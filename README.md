@@ -160,6 +160,21 @@ let packed = pack(&opts)?;
 
 ---
 
+## Branches
+
+Work lands on `dev`. `main` is the published line and only moves when `dev` is merged into it — not by a direct push.
+
+```
+git checkout dev
+git pull
+# …commits…
+git push origin dev
+```
+
+Then open a pull request from `dev` into `main` and merge it.
+
+---
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
