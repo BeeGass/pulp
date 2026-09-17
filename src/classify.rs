@@ -309,14 +309,22 @@ fn ext_label(ext: &str) -> Option<&'static str> {
 
 /// Whether the mill should tick this file after a scan.
 ///
-/// Lockfiles, raster/vector images, and other binary media stay in the
-/// tree but start unchecked.
+/// Lockfiles, raster/vector images, virtualenv trees, and other binary
+/// media stay in the tree but start unchecked.
 #[must_use]
 pub fn is_default_selected(path: &Path, kind: Kind) -> bool {
     if kind.is_binary_media() {
         return false;
     }
-    !is_lock_file(path) && !is_image_file(path)
+    !is_lock_file(path) && !is_image_file(path) && !is_venv_path(path)
+}
+
+fn is_venv_path(path: &Path) -> bool {
+    path.components().any(|c| {
+        c.as_os_str().to_str().is_some_and(|name| {
+            name.eq_ignore_ascii_case(".venv") || name.eq_ignore_ascii_case("venv")
+        })
+    })
 }
 
 fn is_lock_file(path: &Path) -> bool {
@@ -566,6 +574,23 @@ mod tests {
         assert!(!is_default_selected(Path::new("logo.svg"), Kind::Text));
         assert!(!is_default_selected(Path::new("hero.png"), Kind::Binary));
         assert!(!is_default_selected(Path::new("icon.webp"), Kind::Binary));
+    }
+
+    #[test]
+    fn test_is_default_selected_with_venv_path_returns_false() {
+        assert!(!is_default_selected(
+            Path::new(".venv/lib/python3.11/site.py"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(
+            Path::new("venv/lib/site.py"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(
+            Path::new("src/.venv/foo.py"),
+            Kind::Text
+        ));
+        assert!(is_default_selected(Path::new("src/app.py"), Kind::Text));
     }
 
     #[test]

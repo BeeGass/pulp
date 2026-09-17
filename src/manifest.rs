@@ -152,6 +152,33 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_manifest_with_venv_file_sets_default_on_false() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("src/app.py"), b"print(1)\n");
+        write(&dir.path().join(".venv/lib/site.py"), b"x = 1\n");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            hidden: true,
+            gitignore: false,
+            exclude: Vec::new(),
+            ..Options::default()
+        };
+        let manifest = scan_manifest(&opts).unwrap();
+        let venv = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative.contains(".venv"))
+            .expect("expected .venv file in scan");
+        assert!(!venv.default_on);
+        let app = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == "src/app.py")
+            .unwrap();
+        assert!(app.default_on);
+    }
+
+    #[test]
     fn test_scan_manifest_with_empty_only_returns_no_entries() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join("a.rs"), b"fn a() {}\n");
