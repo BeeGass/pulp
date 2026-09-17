@@ -305,6 +305,7 @@
       <div>
         <div class="path-row">
           <input id="path" type="text" placeholder="/path/to/project or ~/src" spellcheck="false">
+          <button id="browse" type="button">Browse</button>
           <button id="scan" class="primary" type="button">Scan</button>
         </div>
         <div class="opts" style="margin-top:8px">
@@ -335,7 +336,7 @@
           </div>
         </div>
         <div class="chips" id="chips"></div>
-        <div class="tree" id="tree"><div class="empty">Point the mill at a folder, then scan.</div></div>
+        <div class="tree" id="tree"><div class="empty">Browse to a folder in the file manager, or type a path, then scan.</div></div>
       </section>
       <section class="pane paper">
         <div class="pane-h">
@@ -499,7 +500,7 @@
       const tree = $("tree");
       tree.innerHTML = "";
       if (!state.files.length) {
-        tree.innerHTML = '<div class="empty">Point the mill at a folder, then scan.</div>';
+        tree.innerHTML = '<div class="empty">Browse to a folder in the file manager, or type a path, then scan.</div>';
         $("pulp").disabled = true;
         return;
       }
@@ -555,6 +556,31 @@
       }
     }
 
+    async function browse() {
+      setErr("");
+      $("browse").disabled = true;
+      $("stats").innerHTML = '<span class="spin">+</span> file manager';
+      try {
+        const data = await api("/api/browse", {});
+        if (data.cancelled) {
+          $("stats").textContent = "browse cancelled";
+          return;
+        }
+        if (!data.path) {
+          setErr("No folder selected.");
+          return;
+        }
+        $("path").value = data.path;
+        await scan();
+      } catch (e) {
+        setErr(e.message);
+        $("stats").textContent = "browse failed";
+      } finally {
+        $("browse").disabled = false;
+      }
+    }
+
+    $("browse").onclick = browse;
     $("scan").onclick = scan;
     $("pulp").onclick = pulp;
     $("path").addEventListener("keydown", (e) => { if (e.key === "Enter") scan(); });

@@ -9,6 +9,7 @@ pub mod config;
 pub mod error;
 pub mod extract;
 pub mod pack;
+mod pick;
 pub mod render;
 pub mod tokens;
 pub mod tree;

@@ -99,7 +99,7 @@ Noisy trees and secrets stay out even when they are tracked or the folder is not
 
 ## Web mill
 
-`pulp ui` starts a letterpress-style mill on **127.0.0.1 only**. Scan a folder, tick files (Rust, Lean, `.npz`, and the rest), pick `txt` / `md` / `xml`, then copy or download. The page talks to the same extractor as the CLI. Nothing is uploaded.
+`pulp ui` starts a letterpress-style mill on **127.0.0.1 only**. Click **Browse** to pick a folder in Finder (or the system file manager); the mill then scans it. Tick files (Rust, Lean, `.npz`, and the rest), pick `txt` / `md` / `xml`, then copy or download. The page talks to the same extractor as the CLI. Nothing is uploaded.
 
 ```
 pulp ui

@@ -14,21 +14,31 @@ use serde::{Deserialize, Serialize};
 use crate::classify::classify;
 use crate::config::{Options, OutputFormat, TreeMode, default_exclude_globs, parse_size};
 use crate::pack;
+use crate::pick;
 use crate::walk;
 
 const INDEX: &str = include_str!("../web/index.html");
 
 #[derive(Clone, Copy)]
-struct AppState;
+struct AppState {
+    pick: fn() -> Result<Option<PathBuf>, String>,
+}
 
 /// Axum router used by `pulp ui` and the HTTP tests.
 pub fn router() -> Router {
+    router_with(AppState {
+        pick: pick::pick_folder,
+    })
+}
+
+fn router_with(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
         .route("/api/scan", post(scan))
         .route("/api/pack", post(pack_dump))
-        .with_state(AppState)
+        .route("/api/browse", post(browse))
+        .with_state(state)
 }
 
 /// Bind `127.0.0.1:port` and serve the mill. Never listens on other interfaces.
@@ -134,6 +144,12 @@ struct PackResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct BrowseResponse {
+    path: Option<String>,
+    cancelled: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
 }
@@ -169,6 +185,24 @@ async fn scan(
         .await
         .map_err(|err| ApiError::bad(err.to_string()))?
         .map(Json)
+}
+
+async fn browse(State(state): State<AppState>) -> Result<Json<BrowseResponse>, ApiError> {
+    let pick = state.pick;
+    let chosen = tokio::task::spawn_blocking(pick)
+        .await
+        .map_err(|err| ApiError::bad(err.to_string()))?
+        .map_err(ApiError::bad)?;
+    match chosen {
+        Some(path) => Ok(Json(BrowseResponse {
+            path: Some(path.display().to_string()),
+            cancelled: false,
+        })),
+        None => Ok(Json(BrowseResponse {
+            path: None,
+            cancelled: true,
+        })),
+    }
 }
 
 async fn pack_dump(
@@ -406,6 +440,73 @@ mod tests {
         assert!(dump.contains("```"), "{dump}");
         assert_eq!(json["filename"].as_str(), Some("pulp.md"));
         assert!(json["tokens_est"].as_u64().unwrap() > 0);
+    }
+
+    fn stub_pick_testdata() -> Result<Option<PathBuf>, String> {
+        Ok(Some(testdata()))
+    }
+
+    fn stub_pick_cancel() -> Result<Option<PathBuf>, String> {
+        Ok(None)
+    }
+
+    #[tokio::test]
+    async fn test_browse_with_stub_picker_returns_testdata_path() {
+        let app = router_with(AppState {
+            pick: stub_pick_testdata,
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/browse")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["cancelled"], false);
+        let path = json["path"].as_str().unwrap();
+        assert!(path.ends_with("testdata"), "{path}");
+    }
+
+    #[tokio::test]
+    async fn test_browse_with_cancel_returns_cancelled() {
+        let app = router_with(AppState {
+            pick: stub_pick_cancel,
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/browse")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["cancelled"], true);
+        assert!(json["path"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_index_contains_browse_button() {
+        let response = router()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("id=\"browse\""));
+        assert!(html.contains("file manager"));
     }
 
     #[tokio::test]
