@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -58,7 +59,6 @@ struct WorkItem {
     absolute: Option<PathBuf>,
     bytes: Vec<u8>,
     depth: u8,
-    is_root: bool,
 }
 
 /// Walk `opts.roots` and extract each file into LLM-readable text.
@@ -83,17 +83,13 @@ pub fn pack(opts: &Options) -> Result<Packed, Error> {
         .count();
     let files_skipped = files.len().saturating_sub(files_extracted);
 
-    let mut token_buf = String::new();
-    if !tree.is_empty() {
-        token_buf.push_str(&tree);
-    }
-    for file in &files {
-        if file.status == FileStatus::Extracted {
-            token_buf.push_str(&file.text);
-        }
-    }
-    let chars_emitted = token_buf.chars().count();
-    let tokens_est = crate::tokens::estimate_tokens(&token_buf);
+    let chunks = std::iter::once(tree.as_str()).chain(
+        files
+            .iter()
+            .filter(|file| file.status == FileStatus::Extracted)
+            .map(|file| file.text.as_str()),
+    );
+    let (chars_emitted, tokens_est) = crate::tokens::summarize_chunks(chunks);
 
     Ok(Packed {
         files,
@@ -142,8 +138,16 @@ fn process_walked(
             opts.max_file_size,
         )];
     }
-    let bytes = match std::fs::read(&wf.absolute) {
-        Ok(bytes) => bytes,
+    let bytes = match read_limited(&wf.absolute, opts.max_file_size) {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(size)) => {
+            return vec![packed_too_large(
+                wf.relative.clone(),
+                classify(&wf.absolute, None),
+                size,
+                opts.max_file_size,
+            )];
+        }
         Err(err) => {
             return vec![packed_error(
                 wf.relative.clone(),
@@ -160,11 +164,22 @@ fn process_walked(
             absolute: Some(wf.absolute.clone()),
             bytes,
             depth: 0,
-            is_root: is_input_root(&wf.absolute, &opts.roots),
         },
         opts,
         extract_opts,
     )
+}
+
+fn read_limited(path: &Path, max: u64) -> std::io::Result<Result<Vec<u8>, u64>> {
+    let file = std::fs::File::open(path)?;
+    let mut buf = Vec::new();
+    let n = file.take(max.saturating_add(1)).read_to_end(&mut buf)?;
+    if n as u64 > max {
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(n as u64);
+        Ok(Err(size))
+    } else {
+        Ok(Ok(buf))
+    }
 }
 
 fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> Vec<PackedFile> {
@@ -172,8 +187,12 @@ fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> V
     let size = item.bytes.len() as u64;
     let should_expand = kind.is_archive()
         && item.depth < MAX_ARCHIVE_DEPTH
-        && (opts.follow_archives || item.is_root)
-        && size <= opts.max_file_size;
+        && size <= opts.max_file_size
+        && (opts.follow_archives
+            || item
+                .absolute
+                .as_ref()
+                .is_some_and(|path| is_input_root(path, &opts.roots)));
     if should_expand {
         return expand_item(
             &item.relative,
@@ -263,11 +282,23 @@ fn take_archive_members(
     extract_opts: &ExtractOpts,
     depth: u8,
 ) -> Vec<PackedFile> {
+    let include = if opts.include.is_empty() {
+        None
+    } else {
+        walk::build_globset(&opts.include).ok()
+    };
+    let Ok(exclude) = walk::build_globset(&opts.exclude) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     let mut total = 0u64;
     let mut kept = 0usize;
     for (name, mem_bytes) in members {
         if is_unsafe_entry(&name) {
+            continue;
+        }
+        let child = join_rel(relative, &name);
+        if !opts.hidden && walk::is_hidden_rel(&child) {
             continue;
         }
         if kept >= MAX_ARCHIVE_MEMBERS {
@@ -277,21 +308,32 @@ fn take_archive_members(
         if total.saturating_add(n) > MAX_ARCHIVE_UNCOMPRESSED {
             break;
         }
+        let kind = classify(Path::new(&child), Some(&mem_bytes));
+        let emit = !kind.is_archive();
+        if emit && !walk::keep_relative(&child, include.as_ref(), &exclude) {
+            continue;
+        }
+        if !emit && glob_exclude_only(&child, &exclude) {
+            continue;
+        }
         kept += 1;
         total = total.saturating_add(n);
         out.extend(process_item(
             WorkItem {
-                relative: join_rel(relative, &name),
+                relative: child,
                 absolute: None,
                 bytes: mem_bytes,
                 depth: depth + 1,
-                is_root: false,
             },
             opts,
             extract_opts,
         ));
     }
     out
+}
+
+fn glob_exclude_only(relative: &str, exclude: &globset::GlobSet) -> bool {
+    !walk::keep_relative(relative, None, exclude)
 }
 
 fn list_only_file(wf: &WalkedFile, opts: &Options) -> PackedFile {
@@ -521,6 +563,43 @@ mod tests {
                 .files
                 .iter()
                 .any(|f| f.relative.starts_with("target/"))
+        );
+    }
+
+    #[test]
+    fn test_pack_with_archive_excludes_hidden_env_member() {
+        use std::io::{Cursor, Write as IoWrite};
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("bundle.zip");
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zw = ZipWriter::new(&mut buf);
+            let opt = SimpleFileOptions::default();
+            zw.start_file("src/lib.rs", opt).unwrap();
+            zw.write_all(b"pub fn x() {}\n").unwrap();
+            zw.start_file(".env", opt).unwrap();
+            zw.write_all(b"SECRET=1\n").unwrap();
+            zw.finish().unwrap();
+        }
+        std::fs::write(&zip_path, buf.into_inner()).unwrap();
+        let opts = Options {
+            roots: vec![zip_path],
+            follow_archives: true,
+            hidden: false,
+            ..Options::default()
+        };
+        let packed = pack(&opts).unwrap();
+        let rels: Vec<&str> = packed.files.iter().map(|f| f.relative.as_str()).collect();
+        assert!(
+            rels.iter().any(|r| r.ends_with("lib.rs")),
+            "expected rust member, got {rels:?}"
+        );
+        assert!(
+            !rels.iter().any(|r| r.contains(".env")),
+            ".env must not leak from archives, got {rels:?}"
         );
     }
 

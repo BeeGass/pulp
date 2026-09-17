@@ -13,6 +13,9 @@ const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 /// pretty-prints each line. Parse failure returns the decoded text.
 pub fn extract(bytes: &[u8]) -> Result<String, Error> {
     let decoded = super::text::decode_bytes(bytes);
+    if decoded.len() > MAX_PRETTY_BYTES {
+        return Ok(decoded);
+    }
 
     match serde_json::from_str::<Value>(&decoded) {
         Ok(value) => {
@@ -23,7 +26,7 @@ pub fn extract(bytes: &[u8]) -> Result<String, Error> {
             }
         }
         Err(_) => {
-            if decoded.len() <= MAX_PRETTY_BYTES && is_jsonl(&decoded) {
+            if is_jsonl(&decoded) {
                 Ok(pretty_jsonl(&decoded))
             } else {
                 Ok(decoded)
@@ -76,5 +79,14 @@ mod tests {
         let expected =
             serde_json::to_string_pretty(&serde_json::json!({"a": 1, "b": true})).expect("pretty");
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_extract_with_oversize_json_returns_decoded_without_pretty() {
+        let inner = "x".repeat(MAX_PRETTY_BYTES + 8);
+        let input = format!("{{\"a\":\"{inner}\"}}");
+        let got = extract(input.as_bytes()).expect("extract");
+        assert_eq!(got, input);
+        assert!(!got.contains('\n'));
     }
 }

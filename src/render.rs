@@ -74,7 +74,7 @@ fn write_markdown<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::R
         writeln!(w, "## {}", file.relative)?;
         writeln!(w)?;
         let fence = fence_for(&file.text);
-        let lang = fence_lang(&file.relative);
+        let lang = fence_lang(&file.relative, file.kind, opts.source_mode);
         if lang.is_empty() {
             writeln!(w, "{fence}")?;
         } else {
@@ -109,17 +109,31 @@ fn write_xml<W: Write>(w: &mut W, packed: &Packed) -> io::Result<()> {
     Ok(())
 }
 
-fn fence_for(text: &str) -> &'static str {
-    if text.contains("````") {
-        "`````"
-    } else if text.contains("```") {
-        "````"
-    } else {
-        "```"
+fn fence_for(text: &str) -> String {
+    let mut longest = 2usize;
+    let mut run = 0usize;
+    for c in text.chars() {
+        if c == '`' {
+            run += 1;
+            if run > longest {
+                longest = run;
+            }
+        } else {
+            run = 0;
+        }
     }
+    "`".repeat(longest + 1)
 }
 
-fn fence_lang(path: &str) -> &'static str {
+fn fence_lang(path: &str, kind: crate::classify::Kind, source_mode: bool) -> &'static str {
+    if !source_mode
+        && matches!(
+            kind,
+            crate::classify::Kind::Html | crate::classify::Kind::Xml
+        )
+    {
+        return "";
+    }
     match Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -244,6 +258,14 @@ mod tests {
         assert!(s.contains("# Directory structure"));
         assert!(s.contains("```"));
         assert!(!s.contains("## src/lib.rs"));
+    }
+
+    #[test]
+    fn test_fence_for_with_five_backticks_returns_six() {
+        let text = "x\n`````\ny";
+        assert_eq!(fence_for(text), "``````");
+        assert_eq!(fence_for("no ticks"), "```");
+        assert_eq!(fence_for("has ``` fence"), "````");
     }
 
     #[test]

@@ -196,6 +196,8 @@ struct PackRequest {
     #[serde(default)]
     notebook_outputs: bool,
     #[serde(default)]
+    source: bool,
+    #[serde(default)]
     no_tree: bool,
     #[serde(default)]
     no_default_excludes: bool,
@@ -340,6 +342,9 @@ fn scan_sync(req: ScanRequest) -> Result<ScanResponse, ApiError> {
 }
 
 fn pack_sync(req: PackRequest) -> Result<PackResponse, ApiError> {
+    if req.selected.is_empty() {
+        return Err(ApiError::bad("tick at least one file"));
+    }
     let opts = options_from_pack(req, false, false)?;
     let packed = pack::pack(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
     let format = opts.format;
@@ -410,6 +415,7 @@ fn options_from_pack(
         follow_archives: req.archives,
         skip_binaries: !req.binaries,
         notebook_outputs: req.notebook_outputs,
+        source_mode: req.source,
         tree,
         format,
         selected: req.selected,
@@ -694,6 +700,18 @@ mod tests {
         assert!(tree.contains("hello.rs"), "{tree}");
         assert!(!tree.contains("pub fn hello"), "{tree}");
         assert_eq!(json["filename"].as_str(), Some("pulp-tree.md"));
+    }
+
+    #[tokio::test]
+    async fn test_pack_with_empty_selection_returns_error() {
+        let path = testdata().display().to_string();
+        let (status, json) = post_json(
+            "/api/pack",
+            serde_json::json!({ "path": path, "format": "txt", "selected": [] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("tick"));
     }
 
     #[tokio::test]

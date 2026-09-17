@@ -81,11 +81,11 @@ fn npy_display_name(name: &str) -> &str {
     }
 }
 
-struct NpyArray {
+struct NpyArray<'a> {
     descr: String,
     fortran_order: bool,
     shape: Vec<usize>,
-    data: Vec<u8>,
+    data: &'a [u8],
 }
 
 struct Dtype {
@@ -94,7 +94,7 @@ struct Dtype {
     itemsize: usize,
 }
 
-fn parse_npy(bytes: &[u8]) -> Result<NpyArray, Error> {
+fn parse_npy(bytes: &[u8]) -> Result<NpyArray<'_>, Error> {
     if bytes.len() < 8 || !bytes.starts_with(NPY_MAGIC) {
         return Err(Error::msg("not an npy file"));
     }
@@ -122,7 +122,7 @@ fn parse_npy(bytes: &[u8]) -> Result<NpyArray, Error> {
         .map_err(|_| Error::msg("npy header is not utf-8"))?
         .trim_end_matches(['\n', '\r', ' ', '\0']);
     let (descr, fortran_order, shape) = parse_header_dict(header)?;
-    let data = bytes[data_start..].to_vec();
+    let data = bytes.get(data_start..).unwrap_or(&[]);
     Ok(NpyArray {
         descr,
         fortran_order,
@@ -314,7 +314,7 @@ fn is_numeric_dtype(dt: &Dtype) -> bool {
     matches!(dt.kind, 'i' | 'u' | 'f') && matches!(dt.itemsize, 1 | 2 | 4 | 8)
 }
 
-fn render_npy(parsed: &NpyArray) -> String {
+fn render_npy(parsed: &NpyArray<'_>) -> String {
     let elements = parsed
         .shape
         .iter()
@@ -545,7 +545,7 @@ fn f16_to_f32(bits: u16) -> f32 {
     } else if exp == 31 {
         (sign << 31) | (0xff << 23) | (frac << 13)
     } else {
-        let e = exp - 15 + 127;
+        let e = exp + (127 - 15);
         (sign << 31) | (e << 23) | (frac << 13)
     };
     f32::from_bits(out)
@@ -716,6 +716,13 @@ mod tests {
         let text = extract_npz(&zip).unwrap();
         assert!(text.contains("## ok.npy"));
         assert!(!text.contains("evil"));
+    }
+
+    #[test]
+    fn test_f16_to_f32_with_half_returns_point_five() {
+        assert_eq!(f16_to_f32(0x3800), 0.5);
+        assert_eq!(f16_to_f32(0x0000), 0.0);
+        assert_eq!(f16_to_f32(0x3c00), 1.0);
     }
 
     #[test]

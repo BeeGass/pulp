@@ -81,6 +81,10 @@ pub struct Options {
     pub tokens: bool,
     /// If non-empty, only these relative paths are kept after the walk.
     pub selected: Vec<String>,
+    /// Skip these filesystem paths (canonical or as given), e.g. the output file.
+    pub skip_paths: Vec<PathBuf>,
+    /// Preserve HTML/XML/JSON as source instead of converting to readable text.
+    pub source_mode: bool,
 }
 
 impl Default for Options {
@@ -103,6 +107,8 @@ impl Default for Options {
             list_only: false,
             tokens: false,
             selected: Vec::new(),
+            skip_paths: Vec::new(),
+            source_mode: false,
         }
     }
 }

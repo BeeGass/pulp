@@ -144,6 +144,7 @@ mod tests {
         ExtractOpts {
             max_file_size: 8 * 1024 * 1024,
             notebook_outputs: false,
+            source_mode: false,
         }
     }
 
@@ -234,6 +235,7 @@ mod tests {
         let small = ExtractOpts {
             max_file_size: 2,
             notebook_outputs: false,
+            source_mode: false,
         };
         let out = expand_zip(&bytes, &small).unwrap();
         assert_eq!(out, vec![("ok.txt".to_string(), b"ok".to_vec())]);

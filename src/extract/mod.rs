@@ -19,6 +19,7 @@ use crate::error::Error;
 pub struct ExtractOpts {
     pub max_file_size: u64,
     pub notebook_outputs: bool,
+    pub source_mode: bool,
 }
 
 impl ExtractOpts {
@@ -27,6 +28,7 @@ impl ExtractOpts {
         Self {
             max_file_size: opts.max_file_size,
             notebook_outputs: opts.notebook_outputs,
+            source_mode: opts.source_mode,
         }
     }
 }
@@ -41,6 +43,9 @@ pub fn extract(
     opts: &ExtractOpts,
 ) -> Result<String, Error> {
     match kind {
+        Kind::Html if opts.source_mode => text::extract(bytes),
+        Kind::Xml if opts.source_mode => text::extract(bytes),
+        Kind::Json if opts.source_mode => text::extract(bytes),
         Kind::Html => html::extract(bytes),
         Kind::Xml => xml::extract(bytes),
         Kind::Json => json::extract(bytes),
@@ -81,3 +86,32 @@ pub fn expand_archive(
 }
 
 pub use text::{decode_bytes, extract as extract_text};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::classify::Kind;
+
+    #[test]
+    fn test_extract_html_in_source_mode_preserves_markup() {
+        let opts = ExtractOpts {
+            max_file_size: 8 * 1024 * 1024,
+            notebook_outputs: false,
+            source_mode: true,
+        };
+        let got = extract("page.html", b"<p>Hi</p>", Kind::Html, &opts).unwrap();
+        assert!(got.contains("<p>Hi</p>"), "{got}");
+    }
+
+    #[test]
+    fn test_extract_html_without_source_mode_strips_tags() {
+        let opts = ExtractOpts {
+            max_file_size: 8 * 1024 * 1024,
+            notebook_outputs: false,
+            source_mode: false,
+        };
+        let got = extract("page.html", b"<p>Hi</p>", Kind::Html, &opts).unwrap();
+        assert!(got.contains("Hi"), "{got}");
+        assert!(!got.contains("<p>"), "{got}");
+    }
+}

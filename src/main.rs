@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -79,6 +79,10 @@ struct Cli {
     #[arg(long)]
     notebook_outputs: bool,
 
+    /// Keep HTML, XML, and JSON as source instead of converting to readable text.
+    #[arg(long)]
+    source: bool,
+
     /// Print the token estimate (also part of the summary).
     #[arg(long)]
     tokens: bool,
@@ -137,6 +141,16 @@ fn main() -> anyhow::Result<()> {
         default_exclude_globs()
     };
     exclude.extend(cli.exclude);
+    let mut skip_paths = Vec::new();
+    if let Some(out) = &cli.output {
+        skip_paths.push(out.clone());
+        if let Ok(cwd) = std::env::current_dir() {
+            skip_paths.push(cwd.join(out));
+        }
+        if let Ok(canon) = out.canonicalize() {
+            skip_paths.push(canon);
+        }
+    }
     let opts = Options {
         roots: cli.paths,
         gitignore: !cli.no_gitignore,
@@ -155,6 +169,8 @@ fn main() -> anyhow::Result<()> {
         list_only: cli.list,
         tokens: cli.tokens,
         selected: Vec::new(),
+        skip_paths,
+        source_mode: cli.source,
     };
     let packed = pack(&opts).context("pulp failed")?;
     if opts.list_only {
@@ -162,12 +178,14 @@ fn main() -> anyhow::Result<()> {
             println!("{}", file.relative);
         }
     } else if let Some(path) = &cli.output {
-        let mut f =
+        let file =
             std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
-        pulp::render::write_all(&mut f, &packed, &opts)?;
+        let mut w = BufWriter::with_capacity(64 * 1024, file);
+        pulp::render::write_all(&mut w, &packed, &opts)?;
+        w.flush()?;
     } else {
         let stdout = io::stdout();
-        let mut w = stdout.lock();
+        let mut w = BufWriter::with_capacity(64 * 1024, stdout.lock());
         pulp::render::write_all(&mut w, &packed, &opts)?;
         w.flush()?;
     }

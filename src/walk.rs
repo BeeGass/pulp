@@ -47,6 +47,9 @@ pub fn collect(opts: &Options) -> Result<Vec<WalkedFile>, Error> {
         let want: HashSet<&str> = opts.selected.iter().map(String::as_str).collect();
         files.retain(|file| want.contains(file.relative.as_str()));
     }
+    if !opts.skip_paths.is_empty() {
+        files.retain(|file| !is_skipped_path(&file.absolute, &opts.skip_paths));
+    }
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
     Ok(files)
 }
@@ -99,6 +102,7 @@ fn walk_dir(
         .git_ignore(opts.gitignore)
         .git_global(opts.gitignore)
         .git_exclude(opts.gitignore)
+        .ignore(opts.gitignore)
         .follow_links(opts.follow_links)
         .threads(opts.jobs)
         .filter_entry(|entry| entry.file_name() != OsStr::new(".git"));
@@ -186,7 +190,7 @@ fn walked_file(root: &Path, path: &Path, multi: bool, size: u64, is_symlink: boo
     }
 }
 
-fn keep_relative(relative: &str, include: Option<&GlobSet>, exclude: &GlobSet) -> bool {
+pub(crate) fn keep_relative(relative: &str, include: Option<&GlobSet>, exclude: &GlobSet) -> bool {
     if glob_matches(exclude, relative) {
         return false;
     }
@@ -206,7 +210,7 @@ fn glob_matches(set: &GlobSet, relative: &str) -> bool {
         .is_some_and(|name| set.is_match(name))
 }
 
-fn build_globset(patterns: &[String]) -> Result<GlobSet, Error> {
+pub(crate) fn build_globset(patterns: &[String]) -> Result<GlobSet, Error> {
     let mut builder = GlobSetBuilder::new();
     for pat in patterns {
         if pat.is_empty() {
@@ -278,6 +282,26 @@ fn make_absolute(path: &Path) -> PathBuf {
         std::env::current_dir()
             .map(|cwd| cwd.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+pub(crate) fn is_hidden_rel(relative: &str) -> bool {
+    relative
+        .split('/')
+        .any(|part| part.starts_with('.') && part != "." && part != "..")
+}
+
+fn is_skipped_path(path: &Path, skip: &[PathBuf]) -> bool {
+    skip.iter().any(|other| paths_equal(path, other))
+}
+
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
     }
 }
 
@@ -401,6 +425,24 @@ mod tests {
         let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
         assert!(rels.contains(&"src/a.rs"));
         assert!(!rels.iter().any(|r| r.split('/').any(|p| p == ".git")));
+    }
+
+    #[test]
+    fn test_collect_with_gitignore_false_includes_dot_ignore_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join(".ignore"), b"secret.txt\n");
+        write(&dir.path().join("secret.txt"), b"nope\n");
+        write(&dir.path().join("ok.rs"), b"fn ok() {}\n");
+        let mut opts = opts_for(dir.path().to_path_buf());
+        opts.gitignore = false;
+        opts.exclude = Vec::new();
+        let files = collect(&opts).unwrap();
+        let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
+        assert!(rels.contains(&"ok.rs"));
+        assert!(
+            rels.contains(&"secret.txt"),
+            "--no-gitignore must also disable .ignore, got {rels:?}"
+        );
     }
 
     #[test]
