@@ -7,6 +7,8 @@ use quick_xml::events::{BytesRef, Event};
 use zip::ZipArchive;
 
 const MARKDOWN_TABLE_MAX_COLS: usize = 24;
+const MAX_MEMBER_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_PPTX_SLIDES: usize = 200;
 
 /// Extract text from a `.docx` (`word/document.xml`).
 pub fn extract_docx(bytes: &[u8]) -> Result<String, crate::error::Error> {
@@ -24,9 +26,15 @@ pub fn extract_pptx(bytes: &[u8]) -> Result<String, crate::error::Error> {
         .collect();
     slides.sort_by_key(|(n, _)| *n);
 
+    slides.truncate(MAX_PPTX_SLIDES);
     let mut out = String::new();
+    let mut total = 0u64;
     for (n, name) in slides {
         let xml = read_zip_xml_by_name(&mut zip, &name)?;
+        total = total.saturating_add(xml.len() as u64);
+        if total > MAX_MEMBER_BYTES.saturating_mul(4) {
+            break;
+        }
         let text = pptx_from_xml(&xml)?;
         if !out.is_empty() {
             out.push('\n');
@@ -108,11 +116,17 @@ fn read_zip_xml_by_name(
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     name: &str,
 ) -> Result<String, crate::error::Error> {
-    let mut file = zip
+    let file = zip
         .by_name(name)
         .map_err(|err| crate::error::Error::msg(err.to_string()))?;
+    let claimed = file.size();
+    if claimed > MAX_MEMBER_BYTES {
+        return Err(crate::error::Error::msg(format!(
+            "office member {name} is {claimed} bytes; limit {MAX_MEMBER_BYTES}"
+        )));
+    }
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
+    file.take(MAX_MEMBER_BYTES).read_to_end(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 

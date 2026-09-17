@@ -6,13 +6,17 @@ use quick_xml::escape::unescape;
 use quick_xml::events::{BytesStart, Event};
 use zip::ZipArchive;
 
+const MAX_MEMBER_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_CHAPTERS: usize = 500;
+
 /// Extract EPUB chapter text in spine order, falling back to sorted HTML.
 pub fn extract(bytes: &[u8]) -> Result<String, crate::error::Error> {
     let mut zip = open_zip(bytes)?;
-    let chapters = match spine_chapters(&mut zip) {
+    let mut chapters = match spine_chapters(&mut zip) {
         Ok(ch) if !ch.is_empty() => ch,
         _ => fallback_chapters(&mut zip)?,
     };
+    chapters.truncate(MAX_CHAPTERS);
     render_chapters(&chapters)
 }
 
@@ -35,11 +39,17 @@ fn read_zip_file(
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     name: &str,
 ) -> Result<Vec<u8>, crate::error::Error> {
-    let mut file = zip
+    let file = zip
         .by_name(name)
         .map_err(|err| crate::error::Error::msg(err.to_string()))?;
+    let claimed = file.size();
+    if claimed > MAX_MEMBER_BYTES {
+        return Err(crate::error::Error::msg(format!(
+            "epub member {name} is {claimed} bytes; limit {MAX_MEMBER_BYTES}"
+        )));
+    }
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
+    file.take(MAX_MEMBER_BYTES).read_to_end(&mut buf)?;
     Ok(buf)
 }
 
