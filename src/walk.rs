@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,6 +42,10 @@ pub fn collect(opts: &Options) -> Result<Vec<WalkedFile>, Error> {
             return Err(Error::path(root, "does not exist"));
         }
         files.extend(collect_root(root, opts, multi, include.as_ref(), &exclude)?);
+    }
+    if !opts.selected.is_empty() {
+        let want: HashSet<&str> = opts.selected.iter().map(String::as_str).collect();
+        files.retain(|file| want.contains(file.relative.as_str()));
     }
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
     Ok(files)
@@ -346,6 +351,22 @@ mod tests {
                 .iter()
                 .any(|r| r.split('/').any(|p| p == "node_modules"))
         );
+    }
+
+    #[test]
+    fn test_collect_with_selected_paths_returns_only_those_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("keep.rs"), b"fn keep() {}\n");
+        write(&dir.path().join("drop.rs"), b"fn drop() {}\n");
+        write(&dir.path().join("Basic.lean"), b"def n := 0\n");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            selected: vec!["keep.rs".into(), "Basic.lean".into()],
+            ..Options::default()
+        };
+        let files = collect(&opts).unwrap();
+        let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
+        assert_eq!(rels, vec!["Basic.lean", "keep.rs"]);
     }
 
     #[test]

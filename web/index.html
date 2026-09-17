@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pulp mill</title>
+  <style>
+    :root {
+      --ink: #14110e;
+      --ink-2: #221c16;
+      --paper: #f2e6d0;
+      --paper-2: #e7d7b8;
+      --rule: #cbb792;
+      --rust: #c44b24;
+      --rust-2: #a33b1b;
+      --brass: #b08948;
+      --moss: #3e5c40;
+      --mist: #8f8373;
+      --danger: #8a2f24;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --serif: "Iowan Old Style", Palatino, "Palatino Linotype", "Times New Roman", serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #2a2218 0%, transparent 50%),
+        var(--ink);
+      color: var(--paper);
+      font-family: var(--serif);
+      letter-spacing: 0.01em;
+    }
+    body::before {
+      content: "";
+      pointer-events: none;
+      position: fixed;
+      inset: 0;
+      opacity: 0.07;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='4' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    }
+    .app {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      position: relative;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 28px 10px;
+      gap: 16px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .mark {
+      width: 36px;
+      height: 36px;
+      border: 1.5px solid var(--brass);
+      border-radius: 50%;
+      position: relative;
+    }
+    .mark::before, .mark::after {
+      content: "";
+      position: absolute;
+      inset: 7px;
+      border: 1.5px solid var(--rust);
+      border-radius: 50%;
+    }
+    .mark::after {
+      inset: 13px;
+      background: var(--rust);
+      border: 0;
+    }
+    .word {
+      font-size: 28px;
+      font-weight: 650;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      line-height: 1;
+    }
+    .word small {
+      display: block;
+      font-size: 11px;
+      letter-spacing: 0.32em;
+      color: var(--brass);
+      font-family: var(--mono);
+      margin-top: 4px;
+      font-weight: 500;
+    }
+    .privacy {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--paper);
+      background: #2a231c;
+      border: 1px solid var(--brass);
+      padding: 6px 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .deck {
+      padding: 0 28px 14px;
+      color: var(--mist);
+      max-width: 720px;
+      font-size: 16px;
+    }
+    .toolbar {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      padding: 0 28px 16px;
+    }
+    .path-row, .opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    input[type="text"], select {
+      background: var(--ink-2);
+      color: var(--paper);
+      border: 1px solid var(--rule);
+      font-family: var(--mono);
+      font-size: 13px;
+      padding: 10px 12px;
+    }
+    input[type="text"] { flex: 1; min-width: 220px; }
+    label.opt {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--mist);
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    button {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      border: 1px solid var(--brass);
+      background: transparent;
+      color: var(--paper);
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--paper); }
+    button.primary {
+      background: var(--rust);
+      border-color: var(--rust);
+      color: var(--paper);
+    }
+    button.primary:hover { background: var(--rust-2); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--brass);
+      outline-offset: 2px;
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(280px, 38%) 1fr;
+      gap: 16px;
+      min-height: 0;
+      padding: 0 28px 16px;
+    }
+    .pane {
+      background: linear-gradient(180deg, #1c1712 0%, #15120f 100%);
+      border: 1px solid #3a3228;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .pane.paper {
+      background: var(--paper);
+      color: var(--ink);
+      border-color: var(--paper-2);
+    }
+    .pane-h {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid #3a3228;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--brass);
+    }
+    .paper .pane-h {
+      border-bottom: 1px solid var(--rule);
+      color: var(--rust-2);
+    }
+    .pane-h .tools { display: flex; gap: 6px; flex-wrap: wrap; }
+    .pane-h input[type="text"] {
+      padding: 6px 8px;
+      min-width: 0;
+      width: 160px;
+    }
+    .tree, .preview {
+      overflow: auto;
+      flex: 1;
+      padding: 10px 12px 16px;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      line-height: 1.45;
+    }
+    .preview {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 12px;
+    }
+    .empty {
+      color: var(--mist);
+      padding: 24px 8px;
+      font-family: var(--serif);
+      font-size: 18px;
+    }
+    .paper .empty { color: #7a6a52; }
+    .node { margin-left: 14px; }
+    .node.root { margin-left: 0; }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 2px 0;
+    }
+    .row .name { color: var(--paper); }
+    .row .meta { color: var(--mist); font-size: 10px; margin-left: auto; }
+    .kind {
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--brass);
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 8px 12px 0;
+    }
+    .chip {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid #4a3f32;
+      color: var(--mist);
+      padding: 3px 7px;
+      cursor: pointer;
+      background: transparent;
+    }
+    .chip.on { border-color: var(--rust); color: var(--paper); }
+    footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 28px 16px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--mist);
+      flex-wrap: wrap;
+    }
+    .stats strong {
+      color: var(--paper);
+      font-weight: 600;
+    }
+    .err {
+      color: #f0b4a8;
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 0 28px 8px;
+      min-height: 1em;
+    }
+    .spin { animation: mill 1.1s linear infinite; display: inline-block; }
+    @keyframes mill { to { transform: rotate(360deg); } }
+    @media (max-width: 860px) {
+      main { grid-template-columns: 1fr; }
+      header { padding: 14px 16px 8px; }
+      .toolbar, .deck, footer, .err { padding-left: 16px; padding-right: 16px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .spin { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div class="word">Pulp<small>mill · local press</small></div>
+      </div>
+      <div class="privacy">localhost only · nothing uploaded</div>
+    </header>
+    <p class="deck">Grind a folder into one LLM-ready file. Rust, Lean, NumPy, Office, PDFs — still on this machine.</p>
+    <div class="toolbar">
+      <div>
+        <div class="path-row">
+          <input id="path" type="text" placeholder="/path/to/project or ~/src" spellcheck="false">
+          <button id="scan" class="primary" type="button">Scan</button>
+        </div>
+        <div class="opts" style="margin-top:8px">
+          <label class="opt">format
+            <select id="format">
+              <option value="txt">txt</option>
+              <option value="md">md</option>
+              <option value="xml">xml</option>
+            </select>
+          </label>
+          <label class="opt"><input type="checkbox" id="gitignore" checked> gitignore</label>
+          <label class="opt"><input type="checkbox" id="hidden"> hidden</label>
+          <label class="opt"><input type="checkbox" id="archives"> archives</label>
+          <label class="opt"><input type="checkbox" id="notebook"> notebook outputs</label>
+          <label class="opt"><input type="checkbox" id="notree"> no tree</label>
+        </div>
+      </div>
+    </div>
+    <div class="err" id="err" role="status" aria-live="polite"></div>
+    <main>
+      <section class="pane">
+        <div class="pane-h">
+          <span>proof · files</span>
+          <div class="tools">
+            <input id="filter" type="text" placeholder="filter" spellcheck="false">
+            <button type="button" id="all">all</button>
+            <button type="button" id="none">none</button>
+          </div>
+        </div>
+        <div class="chips" id="chips"></div>
+        <div class="tree" id="tree"><div class="empty">Point the mill at a folder, then scan.</div></div>
+      </section>
+      <section class="pane paper">
+        <div class="pane-h">
+          <span>galley · dump</span>
+          <div class="tools">
+            <button type="button" id="pulp" class="primary" disabled>Pulp</button>
+            <button type="button" id="copy" disabled>Copy</button>
+            <button type="button" id="download" disabled>Download</button>
+          </div>
+        </div>
+        <pre class="preview" id="preview"><div class="empty">The dump lands here — txt, md, or xml.</div></pre>
+      </section>
+    </main>
+    <footer>
+      <div class="stats" id="stats">idle</div>
+      <div>pulp mill · 127.0.0.1</div>
+    </footer>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const state = { files: [], selected: new Set(), dump: "", filename: "pulp.txt", kindsOn: null };
+
+    function opts() {
+      return {
+        path: $("path").value.trim(),
+        gitignore: $("gitignore").checked,
+        hidden: $("hidden").checked,
+        archives: $("archives").checked,
+        notebook_outputs: $("notebook").checked,
+        no_tree: $("notree").checked,
+        format: $("format").value,
+      };
+    }
+
+    async function api(url, body) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || res.statusText);
+      return json;
+    }
+
+    function human(n) {
+      if (n < 1024) return n + " B";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KiB";
+      return (n / (1024 * 1024)).toFixed(1) + " MiB";
+    }
+
+    function setErr(msg) { $("err").textContent = msg || ""; }
+
+    function buildTree(files) {
+      const root = { name: "", dirs: new Map(), files: [] };
+      for (const f of files) {
+        const parts = f.relative.split("/").filter(Boolean);
+        let node = root;
+        for (let i = 0; i < parts.length - 1; i++) {
+          if (!node.dirs.has(parts[i])) {
+            node.dirs.set(parts[i], { name: parts[i], dirs: new Map(), files: [] });
+          }
+          node = node.dirs.get(parts[i]);
+        }
+        node.files.push({ ...f, name: parts[parts.length - 1] || f.relative });
+      }
+      return root;
+    }
+
+    function kindsOf(files) {
+      const m = new Map();
+      for (const f of files) m.set(f.kind, (m.get(f.kind) || 0) + 1);
+      return [...m.entries()].sort((a, b) => b[1] - a[1]);
+    }
+
+    function visible(file) {
+      const q = $("filter").value.trim().toLowerCase();
+      if (q && !file.relative.toLowerCase().includes(q)) return false;
+      if (state.kindsOn && !state.kindsOn.has(file.kind)) return false;
+      return true;
+    }
+
+    function renderChips() {
+      const box = $("chips");
+      box.innerHTML = "";
+      for (const [kind, n] of kindsOf(state.files)) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "chip" + (!state.kindsOn || state.kindsOn.has(kind) ? " on" : "");
+        b.textContent = kind + " " + n;
+        b.onclick = () => {
+          if (!state.kindsOn) state.kindsOn = new Set(kindsOf(state.files).map(([k]) => k));
+          if (state.kindsOn.has(kind)) state.kindsOn.delete(kind); else state.kindsOn.add(kind);
+          if (state.kindsOn.size === kindsOf(state.files).length) state.kindsOn = null;
+          renderTree();
+          renderChips();
+        };
+        box.appendChild(b);
+      }
+    }
+
+    function renderNode(node, el, root) {
+      const wrap = document.createElement("div");
+      wrap.className = "node" + (root ? " root" : "");
+      const dirs = [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name));
+      for (const dir of dirs) {
+        const kids = [];
+        (function collect(n) {
+          n.files.forEach((f) => kids.push(f));
+          n.dirs.forEach(collect);
+        })(dir);
+        const shown = kids.filter(visible);
+        if (!shown.length) continue;
+        const row = document.createElement("div");
+        row.className = "row";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        const allOn = shown.every((f) => state.selected.has(f.relative));
+        const some = shown.some((f) => state.selected.has(f.relative));
+        cb.checked = allOn;
+        cb.indeterminate = some && !allOn;
+        cb.addEventListener("change", () => {
+          shown.forEach((f) => cb.checked ? state.selected.add(f.relative) : state.selected.delete(f.relative));
+          renderTree();
+        });
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = dir.name + "/";
+        row.append(cb, name);
+        wrap.appendChild(row);
+        renderNode(dir, wrap, false);
+      }
+      const files = node.files.filter(visible).sort((a, b) => a.name.localeCompare(b.name));
+      for (const f of files) {
+        const row = document.createElement("div");
+        row.className = "row";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = state.selected.has(f.relative);
+        cb.addEventListener("change", () => {
+          if (cb.checked) state.selected.add(f.relative); else state.selected.delete(f.relative);
+          $("pulp").disabled = state.selected.size === 0;
+          renderTree();
+        });
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = f.name;
+        const kind = document.createElement("span");
+        kind.className = "kind";
+        kind.textContent = f.kind;
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        meta.textContent = human(f.size);
+        row.append(cb, name, kind, meta);
+        wrap.appendChild(row);
+      }
+      el.appendChild(wrap);
+    }
+
+    function renderTree() {
+      const tree = $("tree");
+      tree.innerHTML = "";
+      if (!state.files.length) {
+        tree.innerHTML = '<div class="empty">Point the mill at a folder, then scan.</div>';
+        $("pulp").disabled = true;
+        return;
+      }
+      renderNode(buildTree(state.files), tree, true);
+      $("pulp").disabled = state.selected.size === 0;
+    }
+
+    async function scan() {
+      setErr("");
+      const o = opts();
+      if (!o.path) { setErr("Give the mill a path."); return; }
+      $("scan").disabled = true;
+      $("stats").innerHTML = '<span class="spin">+</span> scanning';
+      try {
+        const data = await api("/api/scan", o);
+        state.files = data.files;
+        state.selected = new Set(data.files.map((f) => f.relative));
+        state.kindsOn = null;
+        renderChips();
+        renderTree();
+        $("stats").innerHTML = "<strong>" + data.file_count + "</strong> files · " + human(data.bytes);
+      } catch (e) {
+        setErr(e.message);
+        $("stats").textContent = "scan failed";
+      } finally {
+        $("scan").disabled = false;
+      }
+    }
+
+    async function pulp() {
+      setErr("");
+      const o = opts();
+      o.selected = [...state.selected];
+      if (!o.selected.length) { setErr("Tick at least one file."); return; }
+      $("pulp").disabled = true;
+      $("stats").innerHTML = '<span class="spin">+</span> pulping';
+      try {
+        const data = await api("/api/pack", o);
+        state.dump = data.dump;
+        state.filename = data.filename;
+        $("preview").textContent = data.dump;
+        $("copy").disabled = false;
+        $("download").disabled = false;
+        $("stats").innerHTML =
+          "<strong>" + data.files_extracted + "</strong> pulped · ~<strong>" +
+          data.tokens_est + "</strong> tokens · " + data.elapsed_ms + "ms" +
+          (data.files_skipped ? " · " + data.files_skipped + " skipped" : "");
+      } catch (e) {
+        setErr(e.message);
+        $("stats").textContent = "pulp failed";
+      } finally {
+        $("pulp").disabled = state.selected.size === 0;
+      }
+    }
+
+    $("scan").onclick = scan;
+    $("pulp").onclick = pulp;
+    $("path").addEventListener("keydown", (e) => { if (e.key === "Enter") scan(); });
+    $("filter").addEventListener("input", renderTree);
+    $("all").onclick = () => {
+      state.files.filter(visible).forEach((f) => state.selected.add(f.relative));
+      renderTree();
+    };
+    $("none").onclick = () => {
+      state.files.filter(visible).forEach((f) => state.selected.delete(f.relative));
+      renderTree();
+    };
+    $("copy").onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(state.dump);
+        $("stats").textContent = "copied " + state.filename;
+      } catch (e) { setErr("clipboard: " + e.message); }
+    };
+    $("download").onclick = () => {
+      const blob = new Blob([state.dump], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = state.filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+  </script>
+</body>
+</html>

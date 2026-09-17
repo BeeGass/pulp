@@ -38,6 +38,34 @@ impl Kind {
     pub fn is_binary_media(self) -> bool {
         matches!(self, Self::Binary)
     }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Html => "html",
+            Self::Xml => "xml",
+            Self::Json => "json",
+            Self::Csv => "csv",
+            Self::Tsv => "tsv",
+            Self::Pdf => "pdf",
+            Self::Docx => "docx",
+            Self::Pptx => "pptx",
+            Self::Spreadsheet => "sheet",
+            Self::Odt => "odt",
+            Self::Odp => "odp",
+            Self::Epub => "epub",
+            Self::Rtf => "rtf",
+            Self::Notebook => "ipynb",
+            Self::Npy => "npy",
+            Self::Npz => "npz",
+            Self::Zip => "zip",
+            Self::Tar => "tar",
+            Self::TarGz => "targz",
+            Self::Binary => "binary",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// True when the first 8 KiB contain a NUL, which almost never happens
@@ -261,5 +289,12 @@ mod tests {
     #[test]
     fn test_classify_with_npy_extension_returns_npy() {
         assert_eq!(classify(Path::new("cache/batch.npy"), None), Kind::Npy);
+    }
+
+    #[test]
+    fn test_as_str_with_lean_and_npz_returns_labels() {
+        assert_eq!(Kind::Text.as_str(), "text");
+        assert_eq!(Kind::Npz.as_str(), "npz");
+        assert_eq!(Kind::Npy.as_str(), "npy");
     }
 }

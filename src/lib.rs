@@ -12,6 +12,7 @@ pub mod pack;
 pub mod render;
 pub mod tokens;
 pub mod tree;
+pub mod ui;
 pub mod walk;
 
 pub use classify::{Kind, classify, looks_binary};

@@ -1,0 +1,421 @@
+//! Local mill: a localhost-only web UI over [`crate::pack`].
+
+use std::io::Cursor;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use axum::extract::State;
+use axum::http::{StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+
+use crate::classify::classify;
+use crate::config::{Options, OutputFormat, TreeMode, default_exclude_globs, parse_size};
+use crate::pack;
+use crate::walk;
+
+const INDEX: &str = include_str!("../web/index.html");
+
+#[derive(Clone, Copy)]
+struct AppState;
+
+/// Axum router used by `pulp ui` and the HTTP tests.
+pub fn router() -> Router {
+    Router::new()
+        .route("/", get(index))
+        .route("/api/health", get(health))
+        .route("/api/scan", post(scan))
+        .route("/api/pack", post(pack_dump))
+        .with_state(AppState)
+}
+
+/// Bind `127.0.0.1:port` and serve the mill. Never listens on other interfaces.
+pub async fn serve(port: u16, open_browser: bool) -> anyhow::Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let url = format!("http://{addr}");
+    eprintln!("pulp mill on {url}");
+    eprintln!("localhost only. nothing is uploaded.");
+    if open_browser {
+        let _ = opener::open(&url);
+    }
+    axum::serve(listener, router())
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
+    Ok(())
+}
+
+async fn index() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        Html(INDEX),
+    )
+}
+
+async fn health() -> &'static str {
+    "ok"
+}
+
+#[derive(Debug, Deserialize)]
+struct ScanRequest {
+    path: String,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default = "default_true")]
+    gitignore: bool,
+    #[serde(default)]
+    archives: bool,
+    #[serde(default)]
+    no_default_excludes: bool,
+    #[serde(default)]
+    exclude: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize)]
+struct ScanResponse {
+    root: String,
+    files: Vec<FileEntry>,
+    file_count: usize,
+    bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct FileEntry {
+    relative: String,
+    size: u64,
+    kind: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackRequest {
+    path: String,
+    #[serde(default)]
+    selected: Vec<String>,
+    #[serde(default)]
+    format: String,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default = "default_true")]
+    gitignore: bool,
+    #[serde(default)]
+    archives: bool,
+    #[serde(default)]
+    binaries: bool,
+    #[serde(default)]
+    notebook_outputs: bool,
+    #[serde(default)]
+    no_tree: bool,
+    #[serde(default)]
+    no_default_excludes: bool,
+    #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default)]
+    max_file_size: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PackResponse {
+    dump: String,
+    filename: String,
+    format: String,
+    files_extracted: usize,
+    files_skipped: usize,
+    tokens_est: usize,
+    chars_emitted: usize,
+    elapsed_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorBody {
+    error: String,
+}
+
+struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn bad(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let body = Json(ErrorBody {
+            error: self.message,
+        });
+        (self.status, body).into_response()
+    }
+}
+
+async fn scan(
+    State(_): State<AppState>,
+    Json(req): Json<ScanRequest>,
+) -> Result<Json<ScanResponse>, ApiError> {
+    tokio::task::spawn_blocking(move || scan_sync(req))
+        .await
+        .map_err(|err| ApiError::bad(err.to_string()))?
+        .map(Json)
+}
+
+async fn pack_dump(
+    State(_): State<AppState>,
+    Json(req): Json<PackRequest>,
+) -> Result<Json<PackResponse>, ApiError> {
+    tokio::task::spawn_blocking(move || pack_sync(req))
+        .await
+        .map_err(|err| ApiError::bad(err.to_string()))?
+        .map(Json)
+}
+
+fn scan_sync(req: ScanRequest) -> Result<ScanResponse, ApiError> {
+    let root = resolve_root(&req.path)?;
+    let opts = Options {
+        roots: vec![root.clone()],
+        gitignore: req.gitignore,
+        hidden: req.hidden,
+        follow_archives: req.archives,
+        exclude: merge_excludes(req.no_default_excludes, req.exclude),
+        list_only: true,
+        ..Options::default()
+    };
+    let walked = walk::collect(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let files: Vec<FileEntry> = walked
+        .iter()
+        .map(|file| FileEntry {
+            relative: file.relative.clone(),
+            size: file.size,
+            kind: classify(&file.absolute, None).as_str(),
+        })
+        .collect();
+    let bytes = files.iter().map(|f| f.size).sum();
+    Ok(ScanResponse {
+        root: root.display().to_string(),
+        file_count: files.len(),
+        bytes,
+        files,
+    })
+}
+
+fn pack_sync(req: PackRequest) -> Result<PackResponse, ApiError> {
+    let root = resolve_root(&req.path)?;
+    let format = if req.format.trim().is_empty() {
+        OutputFormat::Plain
+    } else {
+        OutputFormat::from_ext(&req.format)
+            .ok_or_else(|| ApiError::bad(format!("unknown format {}", req.format)))?
+    };
+    let max_file_size = match req.max_file_size.as_deref() {
+        None | Some("") => Options::default().max_file_size,
+        Some(s) => parse_size(s).map_err(ApiError::bad)?,
+    };
+    let opts = Options {
+        roots: vec![root],
+        gitignore: req.gitignore,
+        hidden: req.hidden,
+        follow_archives: req.archives,
+        skip_binaries: !req.binaries,
+        notebook_outputs: req.notebook_outputs,
+        tree: if req.no_tree {
+            TreeMode::None
+        } else {
+            TreeMode::Selected
+        },
+        format,
+        selected: req.selected,
+        exclude: merge_excludes(req.no_default_excludes, req.exclude),
+        max_file_size,
+        ..Options::default()
+    };
+    let packed = pack::pack(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let mut dump = Cursor::new(Vec::new());
+    crate::render::write_all(&mut dump, &packed, &opts)
+        .map_err(|err| ApiError::bad(err.to_string()))?;
+    let dump =
+        String::from_utf8(dump.into_inner()).map_err(|err| ApiError::bad(err.to_string()))?;
+    let ext = format.extension();
+    Ok(PackResponse {
+        dump,
+        filename: format!("pulp.{ext}"),
+        format: ext.to_string(),
+        files_extracted: packed.stats.files_extracted,
+        files_skipped: packed.stats.files_skipped,
+        tokens_est: packed.stats.tokens_est,
+        chars_emitted: packed.stats.chars_emitted,
+        elapsed_ms: packed.stats.elapsed.as_millis(),
+    })
+}
+
+fn merge_excludes(no_defaults: bool, extra: Vec<String>) -> Vec<String> {
+    let mut exclude = if no_defaults {
+        Vec::new()
+    } else {
+        default_exclude_globs()
+    };
+    exclude.extend(extra);
+    exclude
+}
+
+fn resolve_root(raw: &str) -> Result<PathBuf, ApiError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::bad("path is empty"));
+    }
+    let expanded = expand_tilde(trimmed);
+    let path = if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir()
+            .map_err(|err| ApiError::bad(err.to_string()))?
+            .join(expanded)
+    };
+    let canonical = path.canonicalize().unwrap_or(path);
+    if !canonical.exists() {
+        return Err(ApiError::bad(format!(
+            "{} does not exist",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+fn expand_tilde(raw: &str) -> PathBuf {
+    if raw == "~" {
+        return home_dir().unwrap_or_else(|| PathBuf::from(raw));
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(raw)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn testdata() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata")
+    }
+
+    async fn post_json(uri: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn test_health_returns_ok() {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_index_returns_html_mill() {
+        let response = router()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("pulp mill"));
+        assert!(html.contains("localhost"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_testdata_returns_lean_and_rust() {
+        let path = testdata().display().to_string();
+        let (status, json) = post_json(
+            "/api/scan",
+            serde_json::json!({ "path": path, "gitignore": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["relative"].as_str())
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with("hello.rs")), "{names:?}");
+        assert!(names.iter().any(|n| n.ends_with("Hello.lean")), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_pack_with_md_format_returns_markdown_dump() {
+        let path = testdata().display().to_string();
+        let (status, json) = post_json(
+            "/api/pack",
+            serde_json::json!({
+                "path": path,
+                "format": "md",
+                "gitignore": false,
+                "selected": ["hello.rs", "Hello.lean"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let dump = json["dump"].as_str().unwrap();
+        assert!(
+            dump.contains("## hello.rs") || dump.contains("hello.rs"),
+            "{dump}"
+        );
+        assert!(dump.contains("```"), "{dump}");
+        assert_eq!(json["filename"].as_str(), Some("pulp.md"));
+        assert!(json["tokens_est"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_missing_path_returns_error() {
+        let (status, json) = post_json(
+            "/api/scan",
+            serde_json::json!({ "path": "/no/such/pulp-ui-root" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("does not exist"));
+    }
+}

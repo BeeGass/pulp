@@ -3,15 +3,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 
-use pulp::config::default_exclude_globs;
+use pulp::config::{default_exclude_globs, parse_size};
 use pulp::{Options, OutputFormat, TreeMode, pack};
 
 /// Pulp a local folder of mixed documents into one LLM-ready text file.
 #[derive(Parser, Debug)]
-#[command(name = "pulp", version, about)]
+#[command(name = "pulp", version, about, args_conflicts_with_subcommands = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Files, directories, or archives. Defaults to the current directory.
     #[arg(default_value = ".")]
     paths: Vec<PathBuf>,
@@ -89,6 +92,19 @@ struct Cli {
     quiet: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Open the local mill in a browser (127.0.0.1 only).
+    Ui {
+        /// Port on localhost.
+        #[arg(short, long, default_value_t = 8747)]
+        port: u16,
+        /// Do not open a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 enum TreeCli {
     #[default]
@@ -99,6 +115,10 @@ enum TreeCli {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(Command::Ui { port, no_open }) = cli.command {
+        let rt = tokio::runtime::Runtime::new()?;
+        return rt.block_on(pulp::ui::serve(port, !no_open));
+    }
     let format = resolve_format(&cli)?;
     let tree = if cli.no_tree {
         TreeMode::None
@@ -132,6 +152,7 @@ fn main() -> anyhow::Result<()> {
         quiet: cli.quiet,
         list_only: cli.list,
         tokens: cli.tokens,
+        selected: Vec::new(),
     };
     let packed = pack(&opts).context("pulp failed")?;
     if opts.list_only {
@@ -163,36 +184,6 @@ fn resolve_format(cli: &Cli) -> anyhow::Result<OutputFormat> {
     } else {
         Ok(OutputFormat::Plain)
     }
-}
-
-pub(crate) fn parse_size(s: &str) -> Result<u64, String> {
-    let lower = s.trim().replace('_', "").to_ascii_lowercase();
-    let (num, mul) = if let Some(n) = lower.strip_suffix("kib") {
-        (n, 1024_u64)
-    } else if let Some(n) = lower.strip_suffix("mib") {
-        (n, 1024 * 1024)
-    } else if let Some(n) = lower.strip_suffix("gib") {
-        (n, 1024 * 1024 * 1024)
-    } else if let Some(n) = lower.strip_suffix("kb") {
-        (n, 1024)
-    } else if let Some(n) = lower.strip_suffix("mb") {
-        (n, 1024 * 1024)
-    } else if let Some(n) = lower.strip_suffix("gb") {
-        (n, 1024 * 1024 * 1024)
-    } else if let Some(n) = lower.strip_suffix('k') {
-        (n, 1024)
-    } else if let Some(n) = lower.strip_suffix('m') {
-        (n, 1024 * 1024)
-    } else if let Some(n) = lower.strip_suffix('g') {
-        (n, 1024 * 1024 * 1024)
-    } else {
-        (lower.as_str(), 1)
-    };
-    let n: u64 = num
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid size {s}"))?;
-    Ok(n.saturating_mul(mul))
 }
 
 fn print_summary(stats: &pulp::Stats, show_tokens: bool) {
@@ -249,5 +240,17 @@ mod tests {
     fn test_resolve_format_with_xml_flag_returns_xml() {
         let cli = Cli::parse_from(["pulp", "-f", "xml"]);
         assert_eq!(resolve_format(&cli).unwrap(), OutputFormat::Xml);
+    }
+
+    #[test]
+    fn test_cli_with_ui_subcommand_returns_ui_command() {
+        let cli = Cli::parse_from(["pulp", "ui", "--port", "9000", "--no-open"]);
+        match cli.command {
+            Some(Command::Ui { port, no_open }) => {
+                assert_eq!(port, 9000);
+                assert!(no_open);
+            }
+            other => panic!("expected ui, got {other:?}"),
+        }
     }
 }

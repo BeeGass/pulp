@@ -79,6 +79,8 @@ pub struct Options {
     pub quiet: bool,
     pub list_only: bool,
     pub tokens: bool,
+    /// If non-empty, only these relative paths are kept after the walk.
+    pub selected: Vec<String>,
 }
 
 impl Default for Options {
@@ -100,8 +102,40 @@ impl Default for Options {
             quiet: false,
             list_only: false,
             tokens: false,
+            selected: Vec::new(),
         }
     }
+}
+
+/// Parse a human size like `8MiB`, `1m`, or `500k` into bytes (1024-based).
+pub fn parse_size(s: &str) -> Result<u64, String> {
+    let lower = s.trim().replace('_', "").to_ascii_lowercase();
+    let (num, mul) = if let Some(n) = lower.strip_suffix("kib") {
+        (n, 1024_u64)
+    } else if let Some(n) = lower.strip_suffix("mib") {
+        (n, 1024 * 1024)
+    } else if let Some(n) = lower.strip_suffix("gib") {
+        (n, 1024 * 1024 * 1024)
+    } else if let Some(n) = lower.strip_suffix("kb") {
+        (n, 1024)
+    } else if let Some(n) = lower.strip_suffix("mb") {
+        (n, 1024 * 1024)
+    } else if let Some(n) = lower.strip_suffix("gb") {
+        (n, 1024 * 1024 * 1024)
+    } else if let Some(n) = lower.strip_suffix('k') {
+        (n, 1024)
+    } else if let Some(n) = lower.strip_suffix('m') {
+        (n, 1024 * 1024)
+    } else if let Some(n) = lower.strip_suffix('g') {
+        (n, 1024 * 1024 * 1024)
+    } else {
+        (lower.as_str(), 1)
+    };
+    let n: u64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid size {s}"))?;
+    Ok(n.saturating_mul(mul))
 }
 
 /// Globs applied on top of gitignore so noisy trees stay out even when
@@ -182,5 +216,12 @@ mod tests {
             OutputFormat::from_path(Path::new("out/dump.xml")),
             Some(OutputFormat::Xml)
         );
+    }
+
+    #[test]
+    fn test_parse_size_with_mib_suffix_returns_bytes() {
+        assert_eq!(parse_size("8MiB").unwrap(), 8 * 1024 * 1024);
+        assert_eq!(parse_size("1m").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("500k").unwrap(), 500 * 1024);
     }
 }

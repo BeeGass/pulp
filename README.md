@@ -29,6 +29,7 @@ Omit `-o` to write to stdout. `-f` selects the dump layout; if `-f` is omitted, 
 pulp --list src                 # relative paths only
 pulp --tree none -o dump.txt    # files, no directory map
 pulp --hidden --no-gitignore .
+pulp ui                         # local mill at http://127.0.0.1:8747
 ```
 
 ## Output formats
@@ -94,6 +95,16 @@ Noisy trees and secrets stay out even when they are tracked or the folder is not
 | `--tokens` | Token estimate in the summary |
 | `--list` | Print relative paths only |
 | `-q, --quiet` | No stderr summary |
+| `ui` | Local mill at `http://127.0.0.1:8747` (`--port`, `--no-open`) |
+
+## Web mill
+
+`pulp ui` starts a letterpress-style mill on **127.0.0.1 only**. Scan a folder, tick files (Rust, Lean, `.npz`, and the rest), pick `txt` / `md` / `xml`, then copy or download. The page talks to the same extractor as the CLI. Nothing is uploaded.
+
+```
+pulp ui
+pulp ui --port 9000 --no-open
+```
 
 Unless `--quiet`, stderr looks like:
 
