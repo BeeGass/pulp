@@ -79,12 +79,40 @@ pub struct Options {
     pub quiet: bool,
     pub list_only: bool,
     pub tokens: bool,
-    /// If non-empty, only these relative paths are kept after the walk.
-    pub selected: Vec<String>,
+    /// Which discovered files to emit. [`Selection::Only`] with an empty
+    /// list matches nothing; it never becomes “all files”.
+    pub selection: Selection,
     /// Skip these filesystem paths (canonical or as given), e.g. the output file.
     pub skip_paths: Vec<PathBuf>,
     /// Preserve HTML/XML/JSON as source instead of converting to readable text.
     pub source_mode: bool,
+    /// Cap on discovered file entries (examined, not only emitted).
+    pub max_entries: usize,
+    /// Cap on summed input sizes processed in one operation.
+    pub max_total_bytes: u64,
+}
+
+/// Explicit pack/scan selection. An empty [`Only`] is not “everything”.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Selection {
+    #[default]
+    AllEligible,
+    Only(Vec<String>),
+}
+
+impl Selection {
+    #[must_use]
+    pub fn allows(&self, relative: &str) -> bool {
+        match self {
+            Self::AllEligible => true,
+            Self::Only(ids) => ids.iter().any(|id| id == relative),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty_only(&self) -> bool {
+        matches!(self, Self::Only(ids) if ids.is_empty())
+    }
 }
 
 impl Default for Options {
@@ -106,9 +134,11 @@ impl Default for Options {
             quiet: false,
             list_only: false,
             tokens: false,
-            selected: Vec::new(),
+            selection: Selection::AllEligible,
             skip_paths: Vec::new(),
             source_mode: false,
+            max_entries: 100_000,
+            max_total_bytes: 1 << 30,
         }
     }
 }
@@ -229,5 +259,15 @@ mod tests {
         assert_eq!(parse_size("8MiB").unwrap(), 8 * 1024 * 1024);
         assert_eq!(parse_size("1m").unwrap(), 1024 * 1024);
         assert_eq!(parse_size("500k").unwrap(), 500 * 1024);
+    }
+
+    #[test]
+    fn test_selection_only_empty_allows_nothing() {
+        let sel = Selection::Only(Vec::new());
+        assert!(sel.is_empty_only());
+        assert!(!sel.allows("src/lib.rs"));
+        assert!(Selection::AllEligible.allows("src/lib.rs"));
+        assert!(Selection::Only(vec!["src/lib.rs".into()]).allows("src/lib.rs"));
+        assert!(!Selection::Only(vec!["src/lib.rs".into()]).allows("src/main.rs"));
     }
 }

@@ -8,6 +8,7 @@ pub mod classify;
 pub mod config;
 pub mod error;
 pub mod extract;
+pub mod manifest;
 pub mod pack;
 mod pick;
 pub mod render;
@@ -17,6 +18,7 @@ pub mod ui;
 pub mod walk;
 
 pub use classify::{Kind, classify, is_default_selected, language_label, looks_binary};
-pub use config::{Options, OutputFormat, TreeMode};
+pub use config::{Options, OutputFormat, Selection, TreeMode};
 pub use error::Error;
+pub use manifest::{ManifestEntry, ScanManifest, scan_manifest};
 pub use pack::{FileStatus, Packed, PackedFile, Stats, pack};

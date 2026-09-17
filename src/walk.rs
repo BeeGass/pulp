@@ -43,9 +43,13 @@ pub fn collect(opts: &Options) -> Result<Vec<WalkedFile>, Error> {
         }
         files.extend(collect_root(root, opts, multi, include.as_ref(), &exclude)?);
     }
-    if !opts.selected.is_empty() {
-        let want: HashSet<&str> = opts.selected.iter().map(String::as_str).collect();
-        files.retain(|file| want.contains(file.relative.as_str()));
+    match &opts.selection {
+        crate::config::Selection::AllEligible => {}
+        crate::config::Selection::Only(ids) if ids.is_empty() => files.clear(),
+        crate::config::Selection::Only(ids) => {
+            let want: HashSet<&str> = ids.iter().map(String::as_str).collect();
+            files.retain(|file| want.contains(file.relative.as_str()));
+        }
     }
     if !opts.skip_paths.is_empty() {
         files.retain(|file| !is_skipped_path(&file.absolute, &opts.skip_paths));
@@ -385,12 +389,25 @@ mod tests {
         write(&dir.path().join("Basic.lean"), b"def n := 0\n");
         let opts = Options {
             roots: vec![dir.path().to_path_buf()],
-            selected: vec!["keep.rs".into(), "Basic.lean".into()],
+            selection: crate::config::Selection::Only(vec!["keep.rs".into(), "Basic.lean".into()]),
             ..Options::default()
         };
         let files = collect(&opts).unwrap();
         let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
         assert_eq!(rels, vec!["Basic.lean", "keep.rs"]);
+    }
+
+    #[test]
+    fn test_collect_with_empty_only_returns_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("keep.rs"), b"fn keep() {}\n");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            selection: crate::config::Selection::Only(Vec::new()),
+            ..Options::default()
+        };
+        let files = collect(&opts).unwrap();
+        assert!(files.is_empty());
     }
 
     #[test]

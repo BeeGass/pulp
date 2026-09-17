@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pulp::{FileStatus, Kind, Options, OutputFormat, pack};
+use pulp::{FileStatus, Kind, Options, OutputFormat, Selection, pack};
 
 fn testdata(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -318,6 +318,16 @@ fn test_pack_with_xml_format_returns_documents_markup() {
         dump.contains("<document_content>"),
         "xml dump must contain <document_content>:\n{dump}"
     );
+}
+
+#[test]
+fn test_pack_with_empty_only_returns_no_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("keep.rs"), "pub fn keep() {}\n").unwrap();
+    let mut opts = options_for(tmp.path());
+    opts.selection = Selection::Only(Vec::new());
+    let packed = pack(&opts).unwrap_or_else(|e| panic!("{e}"));
+    assert!(packed.files.is_empty());
 }
 
 #[test]

@@ -43,6 +43,14 @@ struct Cli {
     #[arg(long, default_value = "8MiB", value_parser = parse_size)]
     max_file_size: u64,
 
+    /// Stop after this many discovered files.
+    #[arg(long, default_value_t = 100_000)]
+    max_entries: usize,
+
+    /// Stop after this much summed input (e.g. 1GiB).
+    #[arg(long, default_value = "1GiB", value_parser = parse_size)]
+    max_total_bytes: u64,
+
     /// Include glob (repeatable). `*.rs` also matches nested paths.
     #[arg(long)]
     include: Vec<String>,
@@ -168,9 +176,11 @@ fn main() -> anyhow::Result<()> {
         quiet: cli.quiet,
         list_only: cli.list,
         tokens: cli.tokens,
-        selected: Vec::new(),
+        selection: pulp::Selection::AllEligible,
         skip_paths,
         source_mode: cli.source,
+        max_entries: cli.max_entries,
+        max_total_bytes: cli.max_total_bytes,
     };
     let packed = pack(&opts).context("pulp failed")?;
     if opts.list_only {
@@ -217,6 +227,9 @@ fn print_summary(stats: &pulp::Stats, show_tokens: bool) {
     );
     if stats.files_skipped > 0 {
         eprint!(", {} skipped", stats.files_skipped);
+    }
+    if stats.truncated {
+        eprint!(", truncated");
     }
     eprintln!();
 }

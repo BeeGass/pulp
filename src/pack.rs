@@ -9,7 +9,8 @@ use crate::classify::{Kind, classify, looks_binary};
 use crate::config::{Options, TreeMode};
 use crate::error::Error;
 use crate::extract::{ExtractOpts, expand_archive, extract};
-use crate::walk::{self, WalkedFile};
+use crate::manifest::ManifestEntry;
+use crate::walk;
 
 const MAX_ARCHIVE_DEPTH: u8 = 3;
 const MAX_ARCHIVE_MEMBERS: usize = 10_000;
@@ -44,6 +45,21 @@ pub struct Stats {
     pub chars_emitted: usize,
     pub tokens_est: usize,
     pub elapsed: Duration,
+    pub truncated: bool,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            files_extracted: 0,
+            files_skipped: 0,
+            bytes_read: 0,
+            chars_emitted: 0,
+            tokens_est: 0,
+            elapsed: Duration::ZERO,
+            truncated: false,
+        }
+    }
 }
 
 /// Walked, extracted files plus an optional directory map.
@@ -64,14 +80,25 @@ struct WorkItem {
 /// Walk `opts.roots` and extract each file into LLM-readable text.
 pub fn pack(opts: &Options) -> Result<Packed, Error> {
     let start = Instant::now();
-    let walked = walk::collect(opts)?;
+    if opts.selection.is_empty_only() {
+        return Ok(Packed {
+            files: Vec::new(),
+            tree: String::new(),
+            stats: Stats {
+                elapsed: start.elapsed(),
+                ..Stats::default()
+            },
+        });
+    }
+    let manifest = crate::manifest::scan_manifest(opts)?;
     let extract_opts = ExtractOpts::from_options(opts);
     let bytes_read = AtomicU64::new(0);
 
     let mut files = run_parallel(opts.jobs, || {
-        walked
+        manifest
+            .entries
             .par_iter()
-            .flat_map(|wf| process_walked(wf, opts, &extract_opts, &bytes_read))
+            .flat_map(|entry| process_entry(entry, opts, &extract_opts, &bytes_read))
             .collect::<Vec<PackedFile>>()
     })?;
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
@@ -101,6 +128,7 @@ pub fn pack(opts: &Options) -> Result<Packed, Error> {
             chars_emitted,
             tokens_est,
             elapsed: start.elapsed(),
+            truncated: manifest.truncated,
         },
     })
 }
@@ -121,38 +149,38 @@ where
     }
 }
 
-fn process_walked(
-    wf: &WalkedFile,
+fn process_entry(
+    entry: &ManifestEntry,
     opts: &Options,
     extract_opts: &ExtractOpts,
     bytes_read: &AtomicU64,
 ) -> Vec<PackedFile> {
     if opts.list_only {
-        return vec![list_only_file(wf, opts)];
+        return vec![list_only_file(entry, opts)];
     }
-    if wf.size > opts.max_file_size {
+    if entry.oversized || entry.size > opts.max_file_size {
         return vec![packed_too_large(
-            wf.relative.clone(),
-            classify(&wf.absolute, None),
-            wf.size,
+            entry.relative.clone(),
+            entry.kind,
+            entry.size,
             opts.max_file_size,
         )];
     }
-    let bytes = match read_limited(&wf.absolute, opts.max_file_size) {
+    let bytes = match read_limited(&entry.absolute, opts.max_file_size) {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(size)) => {
             return vec![packed_too_large(
-                wf.relative.clone(),
-                classify(&wf.absolute, None),
+                entry.relative.clone(),
+                entry.kind,
                 size,
                 opts.max_file_size,
             )];
         }
         Err(err) => {
             return vec![packed_error(
-                wf.relative.clone(),
-                classify(&wf.absolute, None),
-                wf.size,
+                entry.relative.clone(),
+                entry.kind,
+                entry.size,
                 err.to_string(),
             )];
         }
@@ -160,8 +188,8 @@ fn process_walked(
     bytes_read.fetch_add(bytes.len() as u64, Ordering::Relaxed);
     process_item(
         WorkItem {
-            relative: wf.relative.clone(),
-            absolute: Some(wf.absolute.clone()),
+            relative: entry.relative.clone(),
+            absolute: Some(entry.absolute.clone()),
             bytes,
             depth: 0,
         },
@@ -336,9 +364,9 @@ fn glob_exclude_only(relative: &str, exclude: &globset::GlobSet) -> bool {
     !walk::keep_relative(relative, None, exclude)
 }
 
-fn list_only_file(wf: &WalkedFile, opts: &Options) -> PackedFile {
-    let kind = classify(&wf.absolute, None);
-    let status = if wf.size > opts.max_file_size {
+fn list_only_file(entry: &ManifestEntry, opts: &Options) -> PackedFile {
+    let kind = entry.kind;
+    let status = if entry.oversized || entry.size > opts.max_file_size {
         FileStatus::TooLarge
     } else if kind.is_archive() {
         FileStatus::SkippedArchive
@@ -348,9 +376,9 @@ fn list_only_file(wf: &WalkedFile, opts: &Options) -> PackedFile {
         FileStatus::Extracted
     };
     PackedFile {
-        relative: wf.relative.clone(),
+        relative: entry.relative.clone(),
         kind,
-        size: wf.size,
+        size: entry.size,
         text: String::new(),
         status,
     }
@@ -386,7 +414,7 @@ fn render_pack_tree(opts: &Options, files: &[PackedFile]) -> String {
     }
 }
 
-fn tree_label(roots: &[PathBuf]) -> String {
+pub(crate) fn tree_label(roots: &[PathBuf]) -> String {
     match roots {
         [] => "pulp".to_string(),
         [root] => root
@@ -601,6 +629,36 @@ mod tests {
             !rels.iter().any(|r| r.contains(".env")),
             ".env must not leak from archives, got {rels:?}"
         );
+    }
+
+    #[test]
+    fn test_pack_with_empty_only_returns_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("src/lib.rs"), b"pub fn x() {}\n");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            selection: crate::config::Selection::Only(Vec::new()),
+            ..Options::default()
+        };
+        let packed = pack(&opts).unwrap();
+        assert!(packed.files.is_empty());
+        assert!(!packed.stats.truncated);
+    }
+
+    #[test]
+    fn test_pack_with_max_entries_sets_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.rs"), b"fn a() {}\n");
+        write(&dir.path().join("b.rs"), b"fn b() {}\n");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            max_entries: 1,
+            list_only: true,
+            ..Options::default()
+        };
+        let packed = pack(&opts).unwrap();
+        assert_eq!(packed.files.len(), 1);
+        assert!(packed.stats.truncated);
     }
 
     #[test]

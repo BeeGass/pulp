@@ -198,6 +198,7 @@ mod tests {
                 chars_emitted: 3,
                 tokens_est: 1,
                 elapsed: Duration::from_millis(1),
+                truncated: false,
             },
         };
         let opts = Options {
