@@ -1,0 +1,30 @@
+# xcode-select points at Xcode.app, whose license is unsigned on this
+# machine. Use the Command Line Tools clang so `cargo run` does not
+# invoke `/usr/bin/cc` -> xcodebuild -license.
+[env]
+DEVELOPER_DIR = { value = "/Library/Developer/CommandLineTools", force = true }
+SDKROOT = { value = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk", force = true }
+CC_aarch64-apple-darwin = { value = "/Library/Developer/CommandLineTools/usr/bin/clang", force = true }
+CC_aarch64_apple_darwin = { value = "/Library/Developer/CommandLineTools/usr/bin/clang", force = true }
+CXX_aarch64-apple-darwin = { value = "/Library/Developer/CommandLineTools/usr/bin/clang++", force = true }
+CXX_aarch64_apple_darwin = { value = "/Library/Developer/CommandLineTools/usr/bin/clang++", force = true }
+CC_x86_64-apple-darwin = { value = "/Library/Developer/CommandLineTools/usr/bin/clang", force = true }
+CC_x86_64_apple_darwin = { value = "/Library/Developer/CommandLineTools/usr/bin/clang", force = true }
+
+[target.aarch64-apple-darwin]
+linker = "/Library/Developer/CommandLineTools/usr/bin/clang"
+rustflags = [
+    "-C",
+    "link-arg=-isysroot",
+    "-C",
+    "link-arg=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+]
+
+[target.x86_64-apple-darwin]
+linker = "/Library/Developer/CommandLineTools/usr/bin/clang"
+rustflags = [
+    "-C",
+    "link-arg=-isysroot",
+    "-C",
+    "link-arg=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+]
