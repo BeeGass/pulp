@@ -108,6 +108,8 @@ Noisy trees and secrets stay out even when they are tracked or the folder is not
 | `--no-tree` | Same as `--tree none` |
 | `-j, --jobs N` | Parallelism (`0` = Rayon default) |
 | `--max-file-size SIZE` | Cap per file (default `8MiB`; `8000`, `8k`, `8KiB`, `8m`, `1g`) |
+| `--max-entries N` | Cap discovered files (default `100000`) |
+| `--max-total-bytes SIZE` | Cap summed input size (default `1GiB`) |
 | `--include GLOB` | Repeatable allow-list |
 | `--exclude GLOB` | Repeatable extra deny-list |
 | `--no-default-excludes` | Do not apply the built-in deny-list |
@@ -117,6 +119,7 @@ Noisy trees and secrets stay out even when they are tracked or the folder is not
 | `--archives` | Expand nested zip/tar |
 | `--binaries` | Keep binary placeholders instead of skipping |
 | `--notebook-outputs` | Include Jupyter cell outputs |
+| `--source` | Keep HTML, XML, and JSON as source instead of converting |
 | `--tokens` | Token estimate in the summary |
 | `--list` | Print relative paths only |
 | `-q, --quiet` | No stderr summary |
@@ -124,7 +127,7 @@ Noisy trees and secrets stay out even when they are tracked or the folder is not
 
 ## Web mill
 
-`pulp ui` starts a letterpress-style mill on **127.0.0.1 only**. Click **Browse** to pick a folder in Finder (or the system file manager); the mill then scans it. Folders in the proof tree collapse. Tick files (Rust, Lean, `.npz`, and the rest), pick `txt` / `md` / `xml`, then **Pulp**, **Copy**, **Copy tree**, or download. Copy tree puts only the directory map on the clipboard, in the selected format. Nothing is uploaded.
+`pulp ui` starts a letterpress-style mill on **127.0.0.1 only**. Click **Browse** to pick a folder in Finder (or the system file manager); the mill then scans it. Folders in the proof tree collapse. Tick files (Rust, Lean, `.npz`, and the rest), pick `txt` / `md` / `xml`, then **Pulp**, **Copy**, **Copy tree**, or download. Copy tree puts only the directory map on the clipboard, in the selected format. Changing ticks or settings after a dump marks the output out of date. POSTs carry a per-process session token. Nothing is uploaded.
 
 ```
 pulp ui
@@ -142,17 +145,18 @@ Walk uses a parallel gitignore walker (`ignore`); extraction uses Rayon.
 ## Library
 
 ```rust
-use pulp::{pack, Options, OutputFormat};
+use pulp::{pack, Options, OutputFormat, Selection};
 
 let opts = Options {
     roots: vec!["src".into()],
     format: OutputFormat::Markdown,
+    selection: Selection::AllEligible,
     ..Options::default()
 };
 let packed = pack(&opts)?;
 ```
 
-`pack` never uploads anything. Render the dump with `pulp::render::write_all` using the same `Options.format`.
+`Selection::Only(vec![])` matches nothing; it never becomes “all files”. `pack` never uploads anything. Render the dump with `pulp::render::write_all` using the same `Options.format`. `scan_manifest` is the shared discovery step for scan, tree, and pack.
 
 ## License
 
