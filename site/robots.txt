@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://pulp.onlygass.dev/sitemap.xml
+
+# LLM / agent maps
+# https://pulp.onlygass.dev/llms.txt
+# https://pulp.onlygass.dev/llms-full.txt
