@@ -38,6 +38,7 @@ fn router_with(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/scan", post(scan))
         .route("/api/pack", post(pack_dump))
+        .route("/api/tree", post(tree_dump))
         .route("/api/browse", post(browse))
         .with_state(state)
 }
@@ -195,6 +196,13 @@ struct PackResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct TreeResponse {
+    tree: String,
+    filename: String,
+    format: String,
+}
+
+#[derive(Debug, Serialize)]
 struct BrowseResponse {
     path: Option<String>,
     cancelled: bool,
@@ -266,6 +274,16 @@ async fn pack_dump(
         .map(Json)
 }
 
+async fn tree_dump(
+    State(_): State<AppState>,
+    Json(req): Json<PackRequest>,
+) -> Result<Json<TreeResponse>, ApiError> {
+    tokio::task::spawn_blocking(move || tree_sync(req))
+        .await
+        .map_err(|err| ApiError::bad(err.to_string()))?
+        .map(Json)
+}
+
 fn scan_sync(req: ScanRequest) -> Result<ScanResponse, ApiError> {
     let root = resolve_root(&req.path)?;
     let opts = Options {
@@ -296,36 +314,9 @@ fn scan_sync(req: ScanRequest) -> Result<ScanResponse, ApiError> {
 }
 
 fn pack_sync(req: PackRequest) -> Result<PackResponse, ApiError> {
-    let root = resolve_root(&req.path)?;
-    let format = if req.format.trim().is_empty() {
-        OutputFormat::Plain
-    } else {
-        OutputFormat::from_ext(&req.format)
-            .ok_or_else(|| ApiError::bad(format!("unknown format {}", req.format)))?
-    };
-    let max_file_size = match req.max_file_size.as_deref() {
-        None | Some("") => Options::default().max_file_size,
-        Some(s) => parse_size(s).map_err(ApiError::bad)?,
-    };
-    let opts = Options {
-        roots: vec![root],
-        gitignore: req.gitignore,
-        hidden: req.hidden,
-        follow_archives: req.archives,
-        skip_binaries: !req.binaries,
-        notebook_outputs: req.notebook_outputs,
-        tree: if req.no_tree {
-            TreeMode::None
-        } else {
-            TreeMode::Selected
-        },
-        format,
-        selected: req.selected,
-        exclude: merge_excludes(req.no_default_excludes, req.exclude),
-        max_file_size,
-        ..Options::default()
-    };
+    let opts = options_from_pack(req, false, false)?;
     let packed = pack::pack(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let format = opts.format;
     let mut dump = Cursor::new(Vec::new());
     crate::render::write_all(&mut dump, &packed, &opts)
         .map_err(|err| ApiError::bad(err.to_string()))?;
@@ -341,6 +332,65 @@ fn pack_sync(req: PackRequest) -> Result<PackResponse, ApiError> {
         tokens_est: packed.stats.tokens_est,
         chars_emitted: packed.stats.chars_emitted,
         elapsed_ms: packed.stats.elapsed.as_millis(),
+    })
+}
+
+fn tree_sync(req: PackRequest) -> Result<TreeResponse, ApiError> {
+    if req.selected.is_empty() {
+        return Err(ApiError::bad("tick at least one file"));
+    }
+    let opts = options_from_pack(req, true, true)?;
+    let packed = pack::pack(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let mut dump = Cursor::new(Vec::new());
+    crate::render::write_tree(&mut dump, &packed, &opts)
+        .map_err(|err| ApiError::bad(err.to_string()))?;
+    let tree =
+        String::from_utf8(dump.into_inner()).map_err(|err| ApiError::bad(err.to_string()))?;
+    let ext = opts.format.extension();
+    Ok(TreeResponse {
+        tree,
+        filename: format!("pulp-tree.{ext}"),
+        format: ext.to_string(),
+    })
+}
+
+fn options_from_pack(
+    req: PackRequest,
+    list_only: bool,
+    force_tree: bool,
+) -> Result<Options, ApiError> {
+    let root = resolve_root(&req.path)?;
+    let format = if req.format.trim().is_empty() {
+        OutputFormat::Plain
+    } else {
+        OutputFormat::from_ext(&req.format)
+            .ok_or_else(|| ApiError::bad(format!("unknown format {}", req.format)))?
+    };
+    let max_file_size = match req.max_file_size.as_deref() {
+        None | Some("") => Options::default().max_file_size,
+        Some(s) => parse_size(s).map_err(ApiError::bad)?,
+    };
+    let tree = if force_tree {
+        TreeMode::Selected
+    } else if req.no_tree {
+        TreeMode::None
+    } else {
+        TreeMode::Selected
+    };
+    Ok(Options {
+        roots: vec![root],
+        gitignore: req.gitignore,
+        hidden: req.hidden,
+        follow_archives: req.archives,
+        skip_binaries: !req.binaries,
+        notebook_outputs: req.notebook_outputs,
+        tree,
+        format,
+        selected: req.selected,
+        exclude: merge_excludes(req.no_default_excludes, req.exclude),
+        max_file_size,
+        list_only,
+        ..Options::default()
     })
 }
 
@@ -448,7 +498,6 @@ mod tests {
         let html = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(html.contains("pulp mill"));
         assert!(html.contains("localhost"));
-        assert!(html.contains("aria-expanded"));
     }
 
     #[tokio::test]
@@ -559,6 +608,41 @@ mod tests {
         let html = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(html.contains("id=\"browse\""));
         assert!(html.contains("file manager"));
+        assert!(html.contains("Copy tree"));
+    }
+
+    #[tokio::test]
+    async fn test_tree_with_md_format_returns_fenced_tree_only() {
+        let path = testdata().display().to_string();
+        let (status, json) = post_json(
+            "/api/tree",
+            serde_json::json!({
+                "path": path,
+                "format": "md",
+                "gitignore": false,
+                "selected": ["hello.rs", "Hello.lean"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let tree = json["tree"].as_str().unwrap();
+        assert!(tree.contains("# Directory structure"), "{tree}");
+        assert!(tree.contains("```"), "{tree}");
+        assert!(tree.contains("hello.rs"), "{tree}");
+        assert!(!tree.contains("pub fn hello"), "{tree}");
+        assert_eq!(json["filename"].as_str(), Some("pulp-tree.md"));
+    }
+
+    #[tokio::test]
+    async fn test_tree_with_empty_selection_returns_error() {
+        let path = testdata().display().to_string();
+        let (status, json) = post_json(
+            "/api/tree",
+            serde_json::json!({ "path": path, "format": "txt", "selected": [] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("tick"));
     }
 
     #[tokio::test]

@@ -7,19 +7,49 @@ use crate::config::{Options, OutputFormat};
 /// Write the packed dump in plain, markdown, or XML.
 pub fn write_all<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::Result<()> {
     match opts.format {
-        OutputFormat::Plain => write_plain(w, packed),
-        OutputFormat::Markdown => write_markdown(w, packed),
+        OutputFormat::Plain => write_plain(w, packed, opts),
+        OutputFormat::Markdown => write_markdown(w, packed, opts),
         OutputFormat::Xml => write_xml(w, packed),
     }
 }
 
-fn write_plain<W: Write>(w: &mut W, packed: &Packed) -> io::Result<()> {
-    if !packed.tree.is_empty() {
-        writeln!(w, "Directory structure:")?;
-        write!(w, "{}", packed.tree)?;
-        if !packed.tree.ends_with('\n') {
-            writeln!(w)?;
+/// Write only the directory map in the selected dump format.
+pub fn write_tree<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::Result<()> {
+    if packed.tree.is_empty() {
+        return Ok(());
+    }
+    match opts.format {
+        OutputFormat::Plain => {
+            writeln!(w, "Directory structure:")?;
+            write_tree_body(w, packed)?;
         }
+        OutputFormat::Markdown => {
+            writeln!(w, "# Directory structure")?;
+            writeln!(w)?;
+            writeln!(w, "```")?;
+            write_tree_body(w, packed)?;
+            writeln!(w, "```")?;
+        }
+        OutputFormat::Xml => {
+            writeln!(w, "<document_tree>")?;
+            writeln!(w, "{}", xml_escape(&packed.tree))?;
+            writeln!(w, "</document_tree>")?;
+        }
+    }
+    Ok(())
+}
+
+fn write_tree_body<W: Write>(w: &mut W, packed: &Packed) -> io::Result<()> {
+    write!(w, "{}", packed.tree)?;
+    if !packed.tree.ends_with('\n') {
+        writeln!(w)?;
+    }
+    Ok(())
+}
+
+fn write_plain<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::Result<()> {
+    if !packed.tree.is_empty() {
+        write_tree(w, packed, opts)?;
         writeln!(w)?;
     }
     for file in &packed.files {
@@ -35,16 +65,9 @@ fn write_plain<W: Write>(w: &mut W, packed: &Packed) -> io::Result<()> {
     Ok(())
 }
 
-fn write_markdown<W: Write>(w: &mut W, packed: &Packed) -> io::Result<()> {
+fn write_markdown<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::Result<()> {
     if !packed.tree.is_empty() {
-        writeln!(w, "# Directory structure")?;
-        writeln!(w)?;
-        writeln!(w, "```")?;
-        write!(w, "{}", packed.tree)?;
-        if !packed.tree.ends_with('\n') {
-            writeln!(w)?;
-        }
-        writeln!(w, "```")?;
+        write_tree(w, packed, opts)?;
         writeln!(w)?;
     }
     for file in &packed.files {
@@ -199,5 +222,37 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("<documents>"));
         assert!(s.contains("<document_content>"));
+    }
+
+    #[test]
+    fn test_write_tree_with_plain_returns_directory_structure_only() {
+        let (p, opts) = packed(OutputFormat::Plain);
+        let mut buf = Vec::new();
+        write_tree(&mut buf, &p, &opts).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("Directory structure:"));
+        assert!(s.contains("lib.rs"));
+        assert!(!s.contains("FILE:"));
+    }
+
+    #[test]
+    fn test_write_tree_with_markdown_returns_fenced_tree() {
+        let (p, opts) = packed(OutputFormat::Markdown);
+        let mut buf = Vec::new();
+        write_tree(&mut buf, &p, &opts).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("# Directory structure"));
+        assert!(s.contains("```"));
+        assert!(!s.contains("## src/lib.rs"));
+    }
+
+    #[test]
+    fn test_write_tree_with_xml_returns_document_tree() {
+        let (p, opts) = packed(OutputFormat::Xml);
+        let mut buf = Vec::new();
+        write_tree(&mut buf, &p, &opts).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("<document_tree>"));
+        assert!(!s.contains("<document_content>"));
     }
 }
