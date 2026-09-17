@@ -96,9 +96,9 @@ struct Cli {
 enum Command {
     /// Open the local mill in a browser (127.0.0.1 only).
     Ui {
-        /// Port on localhost.
-        #[arg(short, long, default_value_t = 8747)]
-        port: u16,
+        /// Port on localhost. Default 8747; if that is busy, the next free port is used.
+        #[arg(short, long)]
+        port: Option<u16>,
         /// Do not open a browser.
         #[arg(long)]
         no_open: bool,
@@ -117,7 +117,9 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if let Some(Command::Ui { port, no_open }) = cli.command {
         let rt = tokio::runtime::Runtime::new()?;
-        return rt.block_on(pulp::ui::serve(port, !no_open));
+        let preferred = port.unwrap_or(8747);
+        let try_next = port.is_none();
+        return rt.block_on(pulp::ui::serve(preferred, try_next, !no_open));
     }
     let format = resolve_format(&cli)?;
     let tree = if cli.no_tree {
@@ -247,7 +249,7 @@ mod tests {
         let cli = Cli::parse_from(["pulp", "ui", "--port", "9000", "--no-open"]);
         match cli.command {
             Some(Command::Ui { port, no_open }) => {
-                assert_eq!(port, 9000);
+                assert_eq!(port, Some(9000));
                 assert!(no_open);
             }
             other => panic!("expected ui, got {other:?}"),

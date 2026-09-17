@@ -1,8 +1,9 @@
 //! Local mill: a localhost-only web UI over [`crate::pack`].
 
-use std::io::Cursor;
+use std::io::{Cursor, ErrorKind};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::Command;
 
 use axum::extract::State;
 use axum::http::{StatusCode, header};
@@ -41,12 +42,18 @@ fn router_with(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Bind `127.0.0.1:port` and serve the mill. Never listens on other interfaces.
-pub async fn serve(port: u16, open_browser: bool) -> anyhow::Result<()> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let url = format!("http://{addr}");
-    eprintln!("pulp mill on {url}");
+/// Bind `127.0.0.1` and serve the mill. Never listens on other interfaces.
+///
+/// When `try_next` is set (default port), a busy port walks 8747..=8767
+/// instead of failing with "Address already in use".
+pub async fn serve(preferred: u16, try_next: bool, open_browser: bool) -> anyhow::Result<()> {
+    let (listener, port) = bind_localhost(preferred, try_next).await?;
+    let url = format!("http://127.0.0.1:{port}");
+    if port != preferred {
+        eprintln!("127.0.0.1:{preferred} is busy; mill on {url}");
+    } else {
+        eprintln!("pulp mill on {url}");
+    }
     eprintln!("localhost only. nothing is uploaded.");
     if open_browser {
         let _ = opener::open(&url);
@@ -57,6 +64,50 @@ pub async fn serve(port: u16, open_browser: bool) -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
+}
+
+async fn bind_localhost(
+    preferred: u16,
+    try_next: bool,
+) -> anyhow::Result<(tokio::net::TcpListener, u16)> {
+    let last = if try_next {
+        preferred.saturating_add(20)
+    } else {
+        preferred
+    };
+    for port in preferred..=last {
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return Ok((listener, port)),
+            Err(err) if err.kind() == ErrorKind::AddrInUse => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    let holder = port_holder(preferred)
+        .map(|h| format!(" (held by {h})"))
+        .unwrap_or_default();
+    Err(anyhow::anyhow!(
+        "127.0.0.1:{preferred} is already in use{holder}. Stop that process or pass --port."
+    ))
+}
+
+fn port_holder(port: u16) -> Option<String> {
+    let output = Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let pid = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+    if pid.is_empty() {
+        return None;
+    }
+    Some(format!("pid {pid}"))
 }
 
 async fn index() -> impl IntoResponse {
