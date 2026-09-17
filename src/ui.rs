@@ -448,6 +448,7 @@ mod tests {
         let html = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(html.contains("pulp mill"));
         assert!(html.contains("localhost"));
+        assert!(html.contains("aria-expanded"));
     }
 
     #[tokio::test]

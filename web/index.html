@@ -310,6 +310,22 @@
     .row:hover { background: #ffffff0a; }
     .paper .row:hover { background: #0000000a; }
     .row input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 18px; accent-color: var(--rust); }
+    .twist {
+      flex: 0 0 32px;
+      width: 32px;
+      min-height: 32px;
+      height: 32px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--brass);
+      letter-spacing: 0;
+      font-size: 12px;
+      border-radius: 8px;
+      line-height: 1;
+    }
+    .twist:hover { color: var(--paper); background: #ffffff10; }
+    .row.dir .name { cursor: pointer; }
     .row .name {
       color: var(--paper);
       overflow: hidden;
@@ -473,7 +489,7 @@
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
-    const state = { files: [], selected: new Set(), dump: "", filename: "pulp.txt", kindsOn: null };
+    const state = { files: [], selected: new Set(), collapsed: new Set(), dump: "", filename: "pulp.txt", kindsOn: null };
 
     function opts() {
       return {
@@ -573,7 +589,22 @@
       }
     }
 
-    function renderNode(node, el, root) {
+    function dirPath(prefix, name) {
+      return prefix ? prefix + "/" + name : name;
+    }
+
+    function isCollapsed(path) {
+      if ($("filter").value.trim()) return false;
+      return state.collapsed.has(path);
+    }
+
+    function toggleDir(path) {
+      if (state.collapsed.has(path)) state.collapsed.delete(path);
+      else state.collapsed.add(path);
+      renderTree();
+    }
+
+    function renderNode(node, el, root, prefix) {
       const wrap = document.createElement("div");
       wrap.className = "node" + (root ? " root" : "");
       const dirs = [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -585,8 +616,17 @@
         })(dir);
         const shown = kids.filter(visible);
         if (!shown.length) continue;
+        const path = dirPath(prefix, dir.name);
+        const collapsed = isCollapsed(path);
         const row = document.createElement("div");
-        row.className = "row";
+        row.className = "row dir";
+        const twist = document.createElement("button");
+        twist.type = "button";
+        twist.className = "twist";
+        twist.setAttribute("aria-expanded", collapsed ? "false" : "true");
+        twist.setAttribute("aria-label", (collapsed ? "Expand " : "Collapse ") + path);
+        twist.textContent = collapsed ? "▸" : "▾";
+        twist.addEventListener("click", (e) => { e.preventDefault(); toggleDir(path); });
         const cb = document.createElement("input");
         cb.type = "checkbox";
         const allOn = shown.every((f) => state.selected.has(f.relative));
@@ -600,9 +640,10 @@
         const name = document.createElement("span");
         name.className = "name";
         name.textContent = dir.name + "/";
-        row.append(cb, name);
+        name.addEventListener("click", () => toggleDir(path));
+        row.append(twist, cb, name);
         wrap.appendChild(row);
-        renderNode(dir, wrap, false);
+        if (!collapsed) renderNode(dir, wrap, false, path);
       }
       const files = node.files.filter(visible).sort((a, b) => a.name.localeCompare(b.name));
       for (const f of files) {
@@ -639,7 +680,7 @@
         setPulpEnabled(false);
         return;
       }
-      renderNode(buildTree(state.files), tree, true);
+      renderNode(buildTree(state.files), tree, true, "");
       setPulpEnabled(state.selected.size > 0);
     }
 
@@ -653,6 +694,7 @@
         const data = await api("/api/scan", o);
         state.files = data.files;
         state.selected = new Set(data.files.map((f) => f.relative));
+        state.collapsed = new Set();
         state.kindsOn = null;
         renderChips();
         renderTree();
