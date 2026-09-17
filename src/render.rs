@@ -210,6 +210,7 @@ mod tests {
                 tokens_est: 1,
                 elapsed: Duration::from_millis(1),
                 truncated: false,
+                cancelled: false,
             },
         };
         let opts = Options {

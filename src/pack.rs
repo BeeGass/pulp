@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -23,6 +23,7 @@ pub enum FileStatus {
     SkippedBinary,
     TooLarge,
     SkippedArchive,
+    Changed,
     Error(String),
 }
 
@@ -45,6 +46,7 @@ impl FileStatus {
             Self::SkippedBinary => "skipped_binary",
             Self::TooLarge => "too_large",
             Self::SkippedArchive => "skipped_archive",
+            Self::Changed => "changed",
             Self::Error(_) => "error",
         }
     }
@@ -56,6 +58,7 @@ impl FileStatus {
             Self::SkippedBinary => format!("binary file, {size} bytes"),
             Self::TooLarge => format!("{size} bytes exceeds the size limit"),
             Self::SkippedArchive => "archive not expanded".into(),
+            Self::Changed => "file changed since scan; rescan".into(),
             Self::Error(err) => err.clone(),
         }
     }
@@ -71,6 +74,7 @@ pub struct Stats {
     pub tokens_est: usize,
     pub elapsed: Duration,
     pub truncated: bool,
+    pub cancelled: bool,
 }
 
 impl Default for Stats {
@@ -83,6 +87,7 @@ impl Default for Stats {
             tokens_est: 0,
             elapsed: Duration::ZERO,
             truncated: false,
+            cancelled: false,
         }
     }
 }
@@ -104,6 +109,11 @@ struct WorkItem {
 
 /// Walk `opts.roots` and extract each file into LLM-readable text.
 pub fn pack(opts: &Options) -> Result<Packed, Error> {
+    pack_with_cancel(opts, None)
+}
+
+/// [`pack`] with cooperative cancel checked between files.
+pub fn pack_with_cancel(opts: &Options, cancel: Option<&AtomicBool>) -> Result<Packed, Error> {
     let start = Instant::now();
     if opts.selection.is_empty_only() {
         return Ok(Packed {
@@ -116,6 +126,16 @@ pub fn pack(opts: &Options) -> Result<Packed, Error> {
         });
     }
     let manifest = crate::manifest::scan_manifest(opts)?;
+    pack_manifest(&manifest, opts, cancel, start)
+}
+
+/// Extract already-discovered entries. Used by the mill to avoid a second walk.
+pub fn pack_manifest(
+    manifest: &crate::manifest::ScanManifest,
+    opts: &Options,
+    cancel: Option<&AtomicBool>,
+    start: Instant,
+) -> Result<Packed, Error> {
     let extract_opts = ExtractOpts::from_options(opts);
     let bytes_read = AtomicU64::new(0);
 
@@ -123,10 +143,11 @@ pub fn pack(opts: &Options) -> Result<Packed, Error> {
         manifest
             .entries
             .par_iter()
-            .flat_map(|entry| process_entry(entry, opts, &extract_opts, &bytes_read))
+            .flat_map(|entry| process_entry(entry, opts, &extract_opts, &bytes_read, cancel))
             .collect::<Vec<PackedFile>>()
     })?;
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
+    let cancelled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
 
     let tree = render_pack_tree(opts, &files);
     let files_extracted = files
@@ -153,7 +174,8 @@ pub fn pack(opts: &Options) -> Result<Packed, Error> {
             chars_emitted,
             tokens_est,
             elapsed: start.elapsed(),
-            truncated: manifest.truncated,
+            truncated: manifest.truncated || cancelled,
+            cancelled,
         },
     })
 }
@@ -179,9 +201,23 @@ fn process_entry(
     opts: &Options,
     extract_opts: &ExtractOpts,
     bytes_read: &AtomicU64,
+    cancel: Option<&AtomicBool>,
 ) -> Vec<PackedFile> {
+    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return Vec::new();
+    }
     if opts.list_only {
         return vec![list_only_file(entry, opts)];
+    }
+    if let Some(msg) = changed_since_scan(entry) {
+        return vec![PackedFile {
+            id: entry.id.clone(),
+            relative: entry.relative.clone(),
+            kind: entry.kind,
+            size: entry.size,
+            text: format!("[{msg}]"),
+            status: FileStatus::Changed,
+        }];
     }
     if entry.oversized || entry.size > opts.max_file_size {
         return vec![packed_too_large(
@@ -258,6 +294,7 @@ fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> V
     }
     vec![pack_one(
         item.relative,
+        item.absolute.as_deref(),
         kind,
         size,
         &item.bytes,
@@ -266,8 +303,26 @@ fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> V
     )]
 }
 
+fn changed_since_scan(entry: &ManifestEntry) -> Option<String> {
+    let meta = std::fs::metadata(&entry.absolute).ok()?;
+    if meta.len() != entry.size {
+        return Some(format!(
+            "changed since scan: size {} -> {}",
+            entry.size,
+            meta.len()
+        ));
+    }
+    if let (Some(was), Ok(now)) = (entry.modified, meta.modified()) {
+        if was != now {
+            return Some("changed since scan".into());
+        }
+    }
+    None
+}
+
 fn pack_one(
     relative: String,
+    path: Option<&Path>,
     kind: Kind,
     size: u64,
     bytes: &[u8],
@@ -299,7 +354,12 @@ fn pack_one(
             status: FileStatus::SkippedArchive,
         };
     }
-    match extract(&relative, bytes, kind, extract_opts) {
+    let extracted = if crate::extract::isolate::needs_isolation(kind) {
+        crate::extract::isolate::extract_heavy(path, bytes, kind, extract_opts)
+    } else {
+        extract(&relative, bytes, kind, extract_opts)
+    };
+    match extracted {
         Ok(text) => PackedFile {
             id: relative.clone(),
             relative,

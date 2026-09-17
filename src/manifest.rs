@@ -1,6 +1,7 @@
 //! Shared discovery result for scan, tree, and pack.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::classify::{Kind, classify, is_default_selected, language_label};
 use crate::config::Options;
@@ -19,6 +20,7 @@ pub struct ManifestEntry {
     pub default_on: bool,
     pub oversized: bool,
     pub is_symlink: bool,
+    pub modified: Option<SystemTime>,
 }
 
 /// Files found under the current options, before extraction.
@@ -61,6 +63,7 @@ fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestE
                 default_on: is_default_selected(&wf.absolute, kind) && !oversized,
                 oversized,
                 is_symlink: wf.is_symlink,
+                modified: wf.modified,
                 absolute: wf.absolute,
                 size: wf.size,
                 kind,

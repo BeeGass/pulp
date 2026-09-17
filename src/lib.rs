@@ -12,13 +12,16 @@ pub mod manifest;
 pub mod pack;
 mod pick;
 pub mod render;
+mod store;
 pub mod tokens;
 pub mod tree;
 pub mod ui;
 pub mod walk;
 
-pub use classify::{Kind, classify, is_default_selected, language_label, looks_binary};
+pub use classify::{
+    Kind, classify, is_default_selected, kind_from_label, language_label, looks_binary,
+};
 pub use config::{Options, OutputFormat, Selection, TreeMode};
 pub use error::Error;
 pub use manifest::{ManifestEntry, ScanManifest, scan_manifest};
-pub use pack::{FileStatus, Packed, PackedFile, Stats, pack};
+pub use pack::{FileStatus, Packed, PackedFile, Stats, pack, pack_manifest, pack_with_cancel};

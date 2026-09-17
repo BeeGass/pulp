@@ -2,6 +2,7 @@ mod archive;
 mod csv;
 mod epub;
 mod html;
+pub mod isolate;
 mod json;
 mod notebook;
 mod npz;

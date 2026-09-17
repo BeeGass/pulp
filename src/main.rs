@@ -115,6 +115,20 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
+    /// Internal: extract one heavy file in a child process.
+    #[command(name = "__extract", hide = true)]
+    Extract {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        kind: String,
+        #[arg(long, default_value_t = 8 * 1024 * 1024)]
+        max_file_size: u64,
+        #[arg(long)]
+        source: bool,
+        #[arg(long)]
+        notebook_outputs: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -127,11 +141,33 @@ enum TreeCli {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    if let Some(Command::Ui { port, no_open }) = cli.command {
-        let rt = tokio::runtime::Runtime::new()?;
-        let preferred = port.unwrap_or(8747);
-        let try_next = port.is_none();
-        return rt.block_on(pulp::ui::serve(preferred, try_next, !no_open));
+    match cli.command {
+        Some(Command::Ui { port, no_open }) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            let preferred = port.unwrap_or(8747);
+            let try_next = port.is_none();
+            return rt.block_on(pulp::ui::serve(preferred, try_next, !no_open));
+        }
+        Some(Command::Extract {
+            path,
+            kind,
+            max_file_size,
+            source,
+            notebook_outputs,
+        }) => {
+            let kind = pulp::kind_from_label(&kind)
+                .ok_or_else(|| anyhow::anyhow!("unknown kind {kind}"))?;
+            let opts = pulp::extract::ExtractOpts {
+                max_file_size,
+                notebook_outputs,
+                source_mode: source,
+            };
+            match pulp::extract::isolate::run_child(&path, kind, &opts) {
+                Ok(()) => return Ok(()),
+                Err(code) => std::process::exit(code),
+            }
+        }
+        None => {}
     }
     let format = resolve_format(&cli)?;
     let tree = if cli.no_tree {
@@ -229,6 +265,9 @@ fn print_summary(stats: &pulp::Stats, show_tokens: bool) {
     }
     if stats.truncated {
         eprint!(", truncated");
+    }
+    if stats.cancelled {
+        eprint!(", cancelled");
     }
     eprintln!();
 }

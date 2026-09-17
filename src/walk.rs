@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::SystemTime;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::overrides::OverrideBuilder;
@@ -22,6 +23,7 @@ pub struct WalkedFile {
     pub relative: String,
     pub size: u64,
     pub is_symlink: bool,
+    pub modified: Option<SystemTime>,
 }
 
 /// Walked files plus whether discovery stopped at a budget.
@@ -234,10 +236,12 @@ fn walk_dir(
             if is_in_git_dir(entry.path()) {
                 return WalkState::Continue;
             }
-            let size = match entry.metadata() {
-                Ok(meta) => meta.len(),
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
                 Err(_) => return WalkState::Continue,
             };
+            let size = meta.len();
+            let modified = meta.modified().ok();
             let relative = relative_for(&root_buf, entry.path(), multi);
             if !keep_for_walk(
                 &relative,
@@ -280,6 +284,7 @@ fn walk_dir(
                 relative,
                 size,
                 is_symlink,
+                modified,
             };
             if tx.send(file).is_err() {
                 return WalkState::Quit;
@@ -310,12 +315,14 @@ fn walked_file(
     is_symlink: bool,
 ) -> WalkedFile {
     let relative = relative_for(root, path, multi);
+    let modified = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     WalkedFile {
         id: file_id(root_idx, multi, &relative),
         absolute: make_absolute(path),
         relative,
         size,
         is_symlink,
+        modified,
     }
 }
 

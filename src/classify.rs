@@ -68,6 +68,36 @@ impl Kind {
     }
 }
 
+/// Parse [`Kind::as_str`] back into a kind (child extractor CLI).
+#[must_use]
+pub fn kind_from_label(label: &str) -> Option<Kind> {
+    match label {
+        "text" => Some(Kind::Text),
+        "html" => Some(Kind::Html),
+        "xml" => Some(Kind::Xml),
+        "json" => Some(Kind::Json),
+        "csv" => Some(Kind::Csv),
+        "tsv" => Some(Kind::Tsv),
+        "pdf" => Some(Kind::Pdf),
+        "docx" => Some(Kind::Docx),
+        "pptx" => Some(Kind::Pptx),
+        "sheet" => Some(Kind::Spreadsheet),
+        "odt" => Some(Kind::Odt),
+        "odp" => Some(Kind::Odp),
+        "epub" => Some(Kind::Epub),
+        "rtf" => Some(Kind::Rtf),
+        "ipynb" => Some(Kind::Notebook),
+        "npy" => Some(Kind::Npy),
+        "npz" => Some(Kind::Npz),
+        "zip" => Some(Kind::Zip),
+        "tar" => Some(Kind::Tar),
+        "targz" => Some(Kind::TarGz),
+        "binary" => Some(Kind::Binary),
+        "unknown" => Some(Kind::Unknown),
+        _ => None,
+    }
+}
+
 /// True when the first 8 KiB contain a NUL, which almost never happens
 /// in text we want to dump as source.
 #[must_use]
