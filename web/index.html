@@ -818,6 +818,7 @@
               <button type="button" data-out="issues" id="issuesTab">Issues</button>
             </span>
             <button type="button" id="pulp" class="primary" disabled>Pulp</button>
+            <button type="button" id="cancel" hidden>Cancel</button>
             <button type="button" id="copytreeDump" disabled>Copy tree</button>
             <button type="button" id="copy" disabled>Copy</button>
             <button type="button" id="download" disabled>Download</button>
@@ -834,6 +835,7 @@
     </main>
     <div class="dock" id="dock">
       <button type="button" id="pulp2" class="primary" disabled>Pulp</button>
+      <button type="button" id="cancel2" hidden>Cancel</button>
       <button type="button" id="copytree2" disabled>Tree</button>
       <button type="button" id="copy2" disabled>Copy</button>
       <button type="button" id="download2" disabled>Download</button>
@@ -860,6 +862,10 @@
       outView: "dump",
       outcomes: [],
       dumpBytes: 0,
+      manifestId: "",
+      resultId: "",
+      extractKey: "",
+      previewOnly: false,
     };
 
     function fileId(f) { return f.id || f.relative; }
@@ -909,7 +915,21 @@
         source: $("content").value === "source",
         no_tree: $("notree").checked,
         format: $("format").value,
+        manifest_id: state.manifestId,
+        result_id: state.resultId,
       };
+    }
+
+    function extractKey() {
+      return JSON.stringify({
+        path: $("path").value.trim(),
+        selected: [...state.selected].sort(),
+        content: $("content").value,
+        gitignore: $("gitignore").checked,
+        hidden: $("hidden").checked,
+        archives: $("archives").checked,
+        notebook: $("notebook").checked,
+      });
     }
 
     async function api(url, body) {
@@ -921,7 +941,9 @@
         },
         body: JSON.stringify(body),
       });
-      const json = await res.json();
+      if (res.status === 204) return {};
+      const json = await res.json().catch(() => ({}));
+      if (res.status === 429) throw new Error("mill is busy");
       if (!res.ok) throw new Error(json.error || res.statusText);
       return json;
     }
@@ -1172,6 +1194,9 @@
       try {
         const data = await api("/api/scan", o);
         state.files = data.files;
+        state.manifestId = data.manifest_id || "";
+        state.resultId = "";
+        state.extractKey = "";
         state.bytes = data.bytes || 0;
         state.selected = new Set(
           data.files.filter((f) => f.default_on !== false && !f.oversized).map(fileId)
@@ -1196,39 +1221,72 @@
       o.selected = [...state.selected];
       if (!o.selected.length) { setErr("Tick at least one file."); return; }
       const id = ++state.reqId;
-      const key = settingsKey();
+      const key = extractKey();
       setPulpEnabled(false);
+      setBusy(true);
       $("stats").innerHTML = '<span class="spin">+</span> Extracting';
       $("resultState").textContent = "Extracting";
       try {
         const data = await api("/api/pack", o);
         if (id !== state.reqId) return;
-        state.dump = data.dump;
-        state.filename = data.filename;
-        state.dumpKey = key;
-        state.outcomes = data.outcomes || [];
-        state.dumpBytes = data.dump_bytes || data.dump.length;
-        $("preview").textContent = data.dump;
-        applyWrap();
-        setDumpActions(true);
-        markStaleIfDump();
-        setOutView("dump");
-        setView("dump");
-        const issueN = state.outcomes.filter((o) => o.status !== "extracted").length;
-        $("issuesTab").textContent = "Issues" + (issueN ? " " + issueN : "");
-        $("resultMeta").textContent = human(state.dumpBytes) + " output · content-only ~" + data.tokens_est + " tokens";
-        $("stats").innerHTML =
-          "<strong>" + data.files_extracted + "</strong> pulped · ~<strong>" +
-          data.tokens_est + "</strong> tokens (content-only) · " + data.elapsed_ms + "ms" +
-          (data.files_skipped ? " · " + data.files_skipped + " skipped" : "") +
-          (data.truncated ? " · truncated" : "");
+        applyPack(data, key);
       } catch (e) {
         if (id !== state.reqId) return;
         setErr(e.message);
         $("stats").textContent = "pulp failed";
       } finally {
+        setBusy(false);
         setPulpEnabled(state.selected.size > 0);
       }
+    }
+
+    function applyPack(data, key) {
+      state.dump = data.dump;
+      state.filename = data.filename;
+      state.dumpKey = key;
+      state.extractKey = key;
+      state.outcomes = data.outcomes || [];
+      state.dumpBytes = data.dump_bytes || (data.dump ? data.dump.length : 0);
+      state.manifestId = data.manifest_id || state.manifestId;
+      state.resultId = data.result_id || "";
+      state.previewOnly = !!data.preview_truncated;
+      $("preview").textContent = data.dump;
+      applyWrap();
+      setDumpActions(true);
+      markStaleIfDump();
+      setOutView("dump");
+      setView("dump");
+      const issueN = state.outcomes.filter((o) => o.status !== "extracted").length;
+      $("issuesTab").textContent = "Issues" + (issueN ? " " + issueN : "");
+      $("resultMeta").textContent = human(state.dumpBytes) + " output · content-only ~" + data.tokens_est + " tokens";
+      $("stats").innerHTML =
+        "<strong>" + data.files_extracted + "</strong> pulped · ~<strong>" +
+        data.tokens_est + "</strong> tokens (content-only) · " + data.elapsed_ms + "ms" +
+        (data.files_skipped ? " · " + data.files_skipped + " skipped" : "") +
+        (data.truncated ? " · truncated" : "") +
+        (data.cancelled ? " · cancelled" : "");
+    }
+
+    function setBusy(on) {
+      $("cancel").hidden = !on;
+      $("cancel2").hidden = !on;
+      $("pulp").disabled = on || state.selected.size === 0;
+      $("pulp2").disabled = on || state.selected.size === 0;
+    }
+
+    async function renderStored() {
+      if (!state.resultId) return;
+      const o = opts();
+      try {
+        const data = await api("/api/render", o);
+        applyPack(data, extractKey());
+      } catch (e) {
+        setErr(e.message);
+      }
+    }
+
+    async function cancelPulp() {
+      try { await api("/api/cancel", {}); } catch (_) {}
     }
 
     async function browse() {
@@ -1272,24 +1330,36 @@
     }
 
     async function copyDump() {
-      if (state.stale || !state.dump) return;
+      if (state.stale) return;
       try {
-        await navigator.clipboard.writeText(state.dump);
+        const text = await fullDump();
+        await navigator.clipboard.writeText(text);
         $("stats").textContent = "copied " + state.filename;
       } catch (e) { setErr("clipboard: " + e.message); }
     }
 
-    function downloadDump() {
-      if (state.stale || !state.dump) return;
-      const blob = new Blob([state.dump], { type: "text/plain" });
+    async function downloadDump() {
+      if (state.stale) return;
+      const text = await fullDump();
+      const blob = new Blob([text], { type: "text/plain" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = state.stale
-        ? state.filename.replace(/(\.[^.]+)?$/, (m) => "-outdated" + (m || ""))
-        : state.filename;
+      a.download = state.filename;
       a.click();
       URL.revokeObjectURL(a.href);
       $("stats").textContent = "downloaded " + a.download;
+    }
+
+    async function fullDump() {
+      if (!state.previewOnly && state.dump) return state.dump;
+      if (!state.resultId) return state.dump || "";
+      const q = "?format=" + encodeURIComponent($("format").value) +
+        ($("notree").checked ? "&no_tree=true" : "");
+      const res = await fetch("/api/artifact/" + encodeURIComponent(state.resultId) + q, {
+        headers: { "x-pulp-token": TOKEN },
+      });
+      if (!res.ok) throw new Error("artifact " + res.status);
+      return await res.text();
     }
 
     function applyWrap() {
@@ -1360,7 +1430,8 @@
       b.onclick = () => {
         $("format").value = b.dataset.fmt;
         document.querySelectorAll("[data-fmt]").forEach((x) => x.classList.toggle("on", x === b));
-        markStaleIfDump();
+        if (state.resultId && extractKey() === state.extractKey) renderStored();
+        else markStaleIfDump();
       };
     });
     document.querySelectorAll("[data-content]").forEach((b) => {
@@ -1374,7 +1445,11 @@
       b.onclick = () => setOutView(b.dataset.out);
     });
     $("wrap").addEventListener("change", applyWrap);
-    ["gitignore", "hidden", "archives", "notebook", "notree", "path"].forEach((id) => {
+    $("notree").addEventListener("change", () => {
+      if (state.resultId && extractKey() === state.extractKey) renderStored();
+      else markStaleIfDump();
+    });
+    ["gitignore", "hidden", "archives", "notebook", "path"].forEach((id) => {
       const el = $(id);
       if (!el) return;
       el.addEventListener("change", markStaleIfDump);
@@ -1387,6 +1462,8 @@
     $("scan").onclick = scan;
     $("pulp").onclick = pulp;
     $("pulp2").onclick = pulp;
+    $("cancel").onclick = cancelPulp;
+    $("cancel2").onclick = cancelPulp;
     $("copytree").onclick = copyTree;
     $("copytreeDump").onclick = copyTree;
     $("copytree2").onclick = copyTree;

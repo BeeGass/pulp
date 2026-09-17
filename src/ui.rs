@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -19,6 +20,7 @@ use crate::config::{
 use crate::manifest;
 use crate::pack;
 use crate::pick;
+use crate::store::{self, Mill, StoredResult};
 
 const INDEX: &str = include_str!("../web/index.html");
 
@@ -27,6 +29,7 @@ struct AppState {
     pick: fn() -> Result<Option<PathBuf>, String>,
     token: Arc<str>,
     origin: Arc<str>,
+    mill: Arc<Mill>,
 }
 
 const TEST_TOKEN: &str = "test-token";
@@ -38,6 +41,7 @@ pub fn router() -> Router {
         pick: pick::pick_folder,
         token: Arc::from(TEST_TOKEN),
         origin: Arc::from(TEST_ORIGIN),
+        mill: Arc::new(Mill::new()),
     })
 }
 
@@ -50,6 +54,9 @@ fn router_with(state: AppState) -> Router {
         .route("/api/pack", post(pack_dump))
         .route("/api/tree", post(tree_dump))
         .route("/api/preview", post(preview))
+        .route("/api/render", post(render_dump))
+        .route("/api/cancel", post(cancel_pack))
+        .route("/api/artifact/{id}", get(artifact))
         .route("/api/browse", post(browse))
         .with_state(state)
 }
@@ -71,6 +78,7 @@ pub async fn serve(preferred: u16, try_next: bool, open_browser: bool) -> anyhow
         pick: pick::pick_folder,
         token: Arc::from(new_session_token()?),
         origin: Arc::from(url.as_str()),
+        mill: Arc::new(Mill::new()),
     };
     if open_browser {
         let _ = opener::open(&url);
@@ -237,7 +245,7 @@ async fn health() -> &'static str {
     "ok"
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ScanRequest {
     path: String,
     #[serde(default)]
@@ -263,6 +271,7 @@ struct ScanResponse {
     file_count: usize,
     bytes: u64,
     truncated: bool,
+    manifest_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -276,9 +285,13 @@ struct FileEntry {
     oversized: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct PackRequest {
     path: String,
+    #[serde(default)]
+    manifest_id: String,
+    #[serde(default)]
+    result_id: String,
     #[serde(default)]
     selected: Vec<String>,
     #[serde(default)]
@@ -317,6 +330,10 @@ struct PackResponse {
     dump_bytes: usize,
     elapsed_ms: u128,
     truncated: bool,
+    cancelled: bool,
+    preview_truncated: bool,
+    manifest_id: String,
+    result_id: String,
     outcomes: Vec<FileOutcome>,
 }
 
@@ -371,6 +388,13 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn busy() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "mill is busy".into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -388,7 +412,8 @@ async fn scan(
     Json(req): Json<ScanRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
     authorize(&state, &headers)?;
-    tokio::task::spawn_blocking(move || scan_sync(req))
+    let mill = Arc::clone(&state.mill);
+    tokio::task::spawn_blocking(move || scan_sync(req, &mill))
         .await
         .map_err(|err| ApiError::bad(err.to_string()))?
         .map(Json)
@@ -422,10 +447,58 @@ async fn pack_dump(
     Json(req): Json<PackRequest>,
 ) -> Result<Json<PackResponse>, ApiError> {
     authorize(&state, &headers)?;
-    tokio::task::spawn_blocking(move || pack_sync(req))
+    if !state.mill.try_begin_pack() {
+        return Err(ApiError::busy());
+    }
+    let mill = Arc::clone(&state.mill);
+    let result = tokio::task::spawn_blocking(move || pack_sync(req, &mill))
+        .await
+        .map_err(|err| ApiError::bad(err.to_string()));
+    state.mill.end_pack();
+    result?.map(Json)
+}
+
+async fn render_dump(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PackRequest>,
+) -> Result<Json<PackResponse>, ApiError> {
+    authorize(&state, &headers)?;
+    let mill = Arc::clone(&state.mill);
+    tokio::task::spawn_blocking(move || render_sync(req, &mill))
         .await
         .map_err(|err| ApiError::bad(err.to_string()))?
         .map(Json)
+}
+
+async fn cancel_pack(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    authorize(&state, &headers)?;
+    state.mill.request_cancel();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ArtifactQuery>,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers)?;
+    let mill = Arc::clone(&state.mill);
+    tokio::task::spawn_blocking(move || artifact_sync(&id, &query, &mill))
+        .await
+        .map_err(|err| ApiError::bad(err.to_string()))?
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtifactQuery {
+    #[serde(default)]
+    format: String,
+    #[serde(default)]
+    no_tree: bool,
 }
 
 async fn tree_dump(
@@ -434,13 +507,15 @@ async fn tree_dump(
     Json(req): Json<PackRequest>,
 ) -> Result<Json<TreeResponse>, ApiError> {
     authorize(&state, &headers)?;
-    tokio::task::spawn_blocking(move || tree_sync(req))
+    let mill = Arc::clone(&state.mill);
+    tokio::task::spawn_blocking(move || tree_sync(req, &mill))
         .await
         .map_err(|err| ApiError::bad(err.to_string()))?
         .map(Json)
 }
 
-fn scan_sync(req: ScanRequest) -> Result<ScanResponse, ApiError> {
+fn scan_sync(req: ScanRequest, mill: &Mill) -> Result<ScanResponse, ApiError> {
+    let key = discovery_key(&req);
     let root = resolve_root(&req.path)?;
     let opts = Options {
         roots: vec![root.clone()],
@@ -465,28 +540,126 @@ fn scan_sync(req: ScanRequest) -> Result<ScanResponse, ApiError> {
             oversized: entry.oversized,
         })
         .collect();
+    let truncated = manifest.truncated;
+    let bytes = manifest.bytes;
+    let manifest_id = mill.put_manifest(key, manifest);
     Ok(ScanResponse {
         root: root.display().to_string(),
         file_count: files.len(),
-        bytes: manifest.bytes,
+        bytes,
         files,
-        truncated: manifest.truncated,
+        truncated,
+        manifest_id,
     })
 }
 
-fn pack_sync(req: PackRequest) -> Result<PackResponse, ApiError> {
+fn pack_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> {
     if req.selected.is_empty() {
         return Err(ApiError::bad("tick at least one file"));
     }
+    let extract_key = extract_key(&req);
+    let opts = options_from_pack(req.clone(), false, false)?;
+    let (manifest_id, mut snapshot) = load_or_scan_manifest(&req, mill)?;
+    if let Some(hit) = mill.find_result(&manifest_id, &extract_key) {
+        return finish_pack(hit, &opts, Instant::now());
+    }
+    snapshot.entries.retain(|entry| {
+        req.selected
+            .iter()
+            .any(|id| id == &entry.id || id == &entry.relative)
+    });
+    let packed = pack::pack_manifest(&snapshot, &opts, Some(&mill.cancel), Instant::now())
+        .map_err(|err| ApiError::bad(err.to_string()))?;
+    let stored = StoredResult {
+        id: store::new_id(),
+        manifest_id: manifest_id.clone(),
+        extract_key,
+        files: packed.files.clone(),
+        stats: packed.stats.clone(),
+    };
+    mill.put_result(stored.clone());
+    finish_pack(stored, &opts, Instant::now())
+}
+
+fn render_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> {
+    if req.result_id.is_empty() {
+        return Err(ApiError::bad("missing result_id"));
+    }
+    let stored = mill
+        .get_result(&req.result_id)
+        .ok_or_else(|| ApiError::bad("unknown result"))?;
     let opts = options_from_pack(req, false, false)?;
-    let packed = pack::pack(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
-    let format = opts.format;
+    finish_pack(stored, &opts, Instant::now())
+}
+
+fn artifact_sync(id: &str, query: &ArtifactQuery, mill: &Mill) -> Result<Response, ApiError> {
+    let stored = mill
+        .get_result(id)
+        .ok_or_else(|| ApiError::bad("unknown result"))?;
+    let format = if query.format.trim().is_empty() {
+        OutputFormat::Xml
+    } else {
+        OutputFormat::from_ext(&query.format)
+            .ok_or_else(|| ApiError::bad(format!("unknown format {}", query.format)))?
+    };
+    let opts = Options {
+        format,
+        tree: if query.no_tree {
+            TreeMode::None
+        } else {
+            TreeMode::Selected
+        },
+        ..Options::default()
+    };
+    let packed = packed_from_stored(&stored, &opts);
     let mut dump = Cursor::new(Vec::new());
     crate::render::write_all(&mut dump, &packed, &opts)
         .map_err(|err| ApiError::bad(err.to_string()))?;
+    let body = dump.into_inner();
+    let ext = format.extension();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "text/plain; charset=utf-8".parse().expect("content-type"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"pulp.{ext}\"")
+            .parse()
+            .expect("content-disposition"),
+    );
+    Ok((headers, body).into_response())
+}
+
+fn load_or_scan_manifest(
+    req: &PackRequest,
+    mill: &Mill,
+) -> Result<(String, crate::manifest::ScanManifest), ApiError> {
+    if !req.manifest_id.is_empty() {
+        if let Some(stored) = mill.get_manifest(&req.manifest_id) {
+            return Ok((stored.id, stored.manifest));
+        }
+    }
+    let opts = options_from_pack(req.clone(), true, false)?;
+    let manifest = manifest::scan_manifest(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let id = mill.put_manifest(discovery_key_pack(req), manifest.clone());
+    Ok((id, manifest))
+}
+
+fn finish_pack(
+    stored: StoredResult,
+    opts: &Options,
+    start: Instant,
+) -> Result<PackResponse, ApiError> {
+    let packed = packed_from_stored(&stored, opts);
+    let mut dump = Cursor::new(Vec::new());
+    crate::render::write_all(&mut dump, &packed, opts)
+        .map_err(|err| ApiError::bad(err.to_string()))?;
     let dump =
         String::from_utf8(dump.into_inner()).map_err(|err| ApiError::bad(err.to_string()))?;
-    let ext = format.extension();
+    let dump_bytes = dump.len();
+    let (dump, preview_truncated) = store::cap_preview(&dump);
+    let ext = opts.format.extension();
     let outcomes = packed
         .files
         .iter()
@@ -498,18 +671,68 @@ fn pack_sync(req: PackRequest) -> Result<PackResponse, ApiError> {
         })
         .collect();
     Ok(PackResponse {
-        dump_bytes: dump.len(),
         dump,
+        dump_bytes,
         filename: format!("pulp.{ext}"),
         format: ext.to_string(),
         files_extracted: packed.stats.files_extracted,
         files_skipped: packed.stats.files_skipped,
         tokens_est: packed.stats.tokens_est,
         chars_emitted: packed.stats.chars_emitted,
-        elapsed_ms: packed.stats.elapsed.as_millis(),
+        elapsed_ms: start.elapsed().as_millis(),
         truncated: packed.stats.truncated,
+        cancelled: packed.stats.cancelled,
+        preview_truncated,
+        manifest_id: stored.manifest_id,
+        result_id: stored.id,
         outcomes,
     })
+}
+
+fn packed_from_stored(stored: &StoredResult, opts: &Options) -> pack::Packed {
+    let tree = if opts.tree == TreeMode::None {
+        String::new()
+    } else {
+        let paths: Vec<String> = stored
+            .files
+            .iter()
+            .filter(|f| f.status == pack::FileStatus::Extracted)
+            .map(|f| f.relative.clone())
+            .collect();
+        crate::tree::render_tree(&pack::tree_label(&opts.roots), &paths)
+    };
+    pack::Packed {
+        files: stored.files.clone(),
+        tree,
+        stats: stored.stats.clone(),
+    }
+}
+
+fn discovery_key(req: &ScanRequest) -> String {
+    format!(
+        "{}|{}|{}|{}|{:?}",
+        req.path, req.hidden, req.gitignore, req.archives, req.exclude
+    )
+}
+
+fn discovery_key_pack(req: &PackRequest) -> String {
+    format!(
+        "{}|{}|{}|{}|{:?}",
+        req.path, req.hidden, req.gitignore, req.archives, req.exclude
+    )
+}
+
+fn extract_key(req: &PackRequest) -> String {
+    let mut ids = req.selected.clone();
+    ids.sort();
+    format!(
+        "{}|{}|{}|{}|{}",
+        ids.join(","),
+        req.source,
+        req.notebook_outputs,
+        req.archives,
+        req.binaries
+    )
 }
 
 async fn preview(
@@ -558,12 +781,17 @@ fn preview_sync(req: PackRequest) -> Result<PreviewResponse, ApiError> {
     })
 }
 
-fn tree_sync(req: PackRequest) -> Result<TreeResponse, ApiError> {
+fn tree_sync(req: PackRequest, mill: &Mill) -> Result<TreeResponse, ApiError> {
     if req.selected.is_empty() {
         return Err(ApiError::bad("tick at least one file"));
     }
-    let opts = options_from_pack(req, true, true)?;
-    let manifest = manifest::scan_manifest(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let opts = options_from_pack(req.clone(), true, true)?;
+    let (_, mut manifest) = load_or_scan_manifest(&req, mill)?;
+    manifest.entries.retain(|entry| {
+        req.selected
+            .iter()
+            .any(|id| id == &entry.id || id == &entry.relative)
+    });
     let paths: Vec<String> = manifest
         .entries
         .iter()
@@ -824,6 +1052,113 @@ mod tests {
         assert!(json["outcomes"].as_array().unwrap().iter().any(|o| {
             o["relative"].as_str() == Some("hello.rs") && o["status"].as_str() == Some("extracted")
         }));
+        assert!(json["result_id"].as_str().unwrap().len() > 4);
+        assert!(json["manifest_id"].as_str().unwrap().len() > 4);
+    }
+
+    #[tokio::test]
+    async fn test_scan_returns_manifest_id() {
+        let path = testdata().display().to_string();
+        let (status, json) = post_json(
+            "/api/scan",
+            serde_json::json!({ "path": path, "gitignore": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(json["manifest_id"].as_str().unwrap().len() > 4);
+    }
+
+    #[tokio::test]
+    async fn test_pack_busy_returns_too_many_requests() {
+        let mill = Arc::new(Mill::new());
+        assert!(mill.try_begin_pack());
+        let app = router_with(AppState {
+            pick: pick::pick_folder,
+            token: Arc::from(TEST_TOKEN),
+            origin: Arc::from(TEST_ORIGIN),
+            mill,
+        });
+        let path = testdata().display().to_string();
+        let body = serde_json::json!({
+            "path": path,
+            "format": "txt",
+            "gitignore": false,
+            "selected": ["hello.rs"]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pack")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
+                    .header(header::ORIGIN, "http://127.0.0.1:8747")
+                    .header("x-pulp-token", TEST_TOKEN)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn test_render_with_result_id_returns_xml_without_new_scan() {
+        let app = router();
+        let path = testdata().display().to_string();
+        let pack_body = serde_json::json!({
+            "path": path,
+            "format": "txt",
+            "gitignore": false,
+            "selected": ["hello.rs"]
+        });
+        let packed_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pack")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
+                    .header(header::ORIGIN, "http://127.0.0.1:8747")
+                    .header("x-pulp-token", TEST_TOKEN)
+                    .body(Body::from(pack_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(packed_res.status(), StatusCode::OK);
+        let packed_bytes = packed_res.into_body().collect().await.unwrap().to_bytes();
+        let packed: serde_json::Value = serde_json::from_slice(&packed_bytes).unwrap();
+        let result_id = packed["result_id"].as_str().unwrap().to_string();
+        let render_body = serde_json::json!({
+            "path": path,
+            "format": "xml",
+            "result_id": result_id,
+            "selected": ["hello.rs"]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/render")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
+                    .header(header::ORIGIN, "http://127.0.0.1:8747")
+                    .header("x-pulp-token", TEST_TOKEN)
+                    .body(Body::from(render_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json["dump"].as_str().unwrap().contains("<documents>"),
+            "{json}"
+        );
+        assert_eq!(json["result_id"].as_str(), Some(result_id.as_str()));
     }
 
     #[tokio::test]
@@ -877,6 +1212,7 @@ mod tests {
             pick: stub_pick_testdata,
             token: Arc::from(TEST_TOKEN),
             origin: Arc::from(TEST_ORIGIN),
+            mill: Arc::new(Mill::new()),
         });
         let response = app
             .oneshot(
@@ -905,6 +1241,7 @@ mod tests {
             pick: stub_pick_cancel,
             token: Arc::from(TEST_TOKEN),
             origin: Arc::from(TEST_ORIGIN),
+            mill: Arc::new(Mill::new()),
         });
         let response = app
             .oneshot(
@@ -952,6 +1289,9 @@ mod tests {
         assert!(html.contains("Select matches"));
         assert!(html.contains("data-out=\"issues\""));
         assert!(html.contains("/api/preview"));
+        assert!(html.contains("/api/render"));
+        assert!(html.contains("/api/cancel"));
+        assert!(html.contains("/api/artifact/"));
     }
 
     #[test]
