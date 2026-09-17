@@ -1,2 +1,6 @@
 /target
 .DS_Store
+
+# wasm-pack metadata (binaries tracked for static deploy)
+site/mill/pkg/package.json
+site/mill/pkg/README.md

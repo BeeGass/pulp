@@ -17,3 +17,7 @@ Static landing site for pulp.
 | `/mill/` | Placeholder for the in-browser WASM mill |
 
 The live axum mill (`pulp ui`) stays localhost-only. Do not point this site at a server-side packer.
+
+## Browser mill
+
+`/mill` is the in-browser WASM mill (`crates/pulp-wasm`). Rebuild with `wasm-pack` (see `docs/wasm-mill.md`) and commit updated `site/mill/pkg/*` artifacts.

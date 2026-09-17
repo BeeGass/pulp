@@ -4,31 +4,1330 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#120f0c">
-  <title>Browser mill — pulp (coming soon)</title>
-  <meta name="description" content="In-browser pulp mill coming soon. Files will stay in your browser — nothing uploaded.">
-  <meta name="robots" content="noindex">
-  <link rel="stylesheet" href="/styles.css">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>pulp mill</title>
+  <meta name="pulp-token" content="__PULP_TOKEN__">
+  <style>
+    @font-face {
+      font-family: Fraunces;
+      font-style: normal;
+      font-weight: 500 650;
+      font-display: swap;
+      src: url("../fonts/fraunces.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "IBM Plex Sans";
+      font-style: normal;
+      font-weight: 400 500;
+      font-display: swap;
+      src: url("../fonts/plex-sans.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "IBM Plex Mono";
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url("../fonts/plex-mono-400.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "IBM Plex Mono";
+      font-style: normal;
+      font-weight: 500;
+      font-display: swap;
+      src: url("../fonts/plex-mono-500.woff2") format("woff2");
+    }
+    :root {
+      --ink: #120f0c;
+      --ink-2: #1c1814;
+      --ink-3: #2a241c;
+      --paper: #f4e6cf;
+      --paper-2: #ead7b6;
+      --rule: #c9b48a;
+      --rust: #d45328;
+      --rust-2: #b3441f;
+      --brass: #c4a056;
+      --mist: #9a8d7a;
+      --display: Fraunces, "Iowan Old Style", Palatino, Georgia, serif;
+      --ui: "IBM Plex Sans", "Segoe UI", sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --pad: clamp(12px, 3vw, 28px);
+      --tap: 44px;
+      --safe-b: env(safe-area-inset-bottom, 0px);
+      --safe-t: env(safe-area-inset-top, 0px);
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      min-height: 100dvh;
+      background:
+        radial-gradient(900px 420px at 0% -10%, #3a2a1c 0%, transparent 55%),
+        radial-gradient(700px 380px at 100% 0%, #1e1510 0%, transparent 50%),
+        var(--ink);
+      color: var(--paper);
+      font-family: var(--ui);
+      -webkit-font-smoothing: antialiased;
+    }
+    body::before {
+      content: "";
+      pointer-events: none;
+      position: fixed;
+      inset: 0;
+      opacity: 0.06;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    }
+    button, input, select { font-family: inherit; }
+    .app {
+      min-height: 100dvh;
+      min-height: 100svh;
+      display: grid;
+      grid-template-rows: auto auto auto auto 1fr auto;
+      padding: calc(var(--safe-t) + 10px) var(--pad) calc(var(--safe-b) + 10px);
+      gap: 10px;
+      position: relative;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .mark {
+      width: 40px; height: 40px; flex: 0 0 40px;
+      border-radius: 50%;
+      border: 1.5px solid var(--brass);
+      background:
+        radial-gradient(circle at 50% 50%, transparent 0 28%, var(--rust) 29% 34%, transparent 35% 48%, var(--brass) 49% 52%, transparent 53%),
+        var(--ink-2);
+      box-shadow: inset 0 0 0 7px var(--ink-2), 0 0 0 1px #0006;
+    }
+    .word {
+      font-family: var(--display);
+      font-size: clamp(26px, 6vw, 34px);
+      font-weight: 650;
+      font-optical-sizing: auto;
+      font-variation-settings: "SOFT" 40, "WONK" 1;
+      letter-spacing: 0.04em;
+      text-transform: lowercase;
+      line-height: 0.95;
+    }
+    .word small {
+      display: block;
+      margin-top: 6px;
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--brass);
+    }
+    .privacy {
+      flex: 0 0 auto;
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--brass);
+      border: 1px solid color-mix(in srgb, var(--brass) 55%, transparent);
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--ink-2) 80%, transparent);
+      white-space: nowrap;
+    }
+    .deck {
+      margin: 0;
+      color: var(--mist);
+      font-family: var(--display);
+      font-size: clamp(15px, 3.5vw, 18px);
+      font-weight: 500;
+      font-optical-sizing: auto;
+      line-height: 1.45;
+      max-width: 38rem;
+    }
+    .toolbar { display: grid; gap: 10px; }
+    .path-row {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+    .path-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    input[type="text"], select {
+      width: 100%;
+      min-height: var(--tap);
+      background: var(--ink-2);
+      color: var(--paper);
+      border: 1px solid #3d342a;
+      border-radius: 10px;
+      font-family: var(--mono);
+      font-size: 16px;
+      padding: 10px 12px;
+    }
+    label.opt {
+      font-family: var(--ui);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--mist);
+      display: inline-flex;
+      gap: 7px;
+      align-items: center;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      min-height: 36px;
+      padding: 0 4px;
+    }
+    label.opt input { width: 18px; height: 18px; accent-color: var(--rust); }
+    .opts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      align-items: flex-start;
+    }
+    .ctl {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .ctl-l {
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--mist);
+    }
+    .hint {
+      flex: 1 1 100%;
+      margin: 0;
+      font-size: 12px;
+      color: var(--mist);
+      line-height: 1.4;
+    }
+    .out-views {
+      display: inline-flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .out-views button {
+      min-height: 36px;
+      padding: 0 10px;
+      text-transform: none;
+      letter-spacing: 0.04em;
+    }
+    .out-views button.on {
+      background: var(--ink-3);
+      border-color: var(--brass);
+    }
+    .paper .out-views button.on {
+      background: var(--paper-2);
+      color: var(--ink);
+    }
+    .result-strip {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--mist);
+      border-bottom: 1px solid #3a3228;
+    }
+    .paper .result-strip { border-bottom-color: var(--rule); color: var(--rust-2); }
+    .file-preview { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+    .preview-head {
+      padding: 10px 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--mist);
+      border-bottom: 1px solid var(--rule);
+      overflow-wrap: anywhere;
+    }
+    .issues { overflow: auto; flex: 1; padding: 8px 12px 16px; }
+    .issue {
+      padding: 12px 0;
+      border-bottom: 1px solid #3a3228;
+    }
+    .paper .issue { border-bottom-color: var(--rule); }
+    .issue h3 { margin: 0 0 6px; font: 600 13px var(--mono); }
+    .issue p { margin: 0 0 8px; font-size: 13px; }
+    .row .name {
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+    button.name {
+      min-height: 28px;
+      padding: 4px 6px;
+      border: 0;
+      background: transparent;
+      text-transform: none;
+      letter-spacing: 0;
+      text-align: left;
+      color: inherit;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .row.active { box-shadow: inset 3px 0 var(--rust); }
+    .check-hit {
+      min-width: 28px;
+      min-height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .settings {
+      flex: 1 1 240px;
+      border: 1px solid #3d342a;
+      border-radius: 10px;
+      background: var(--ink-2);
+      min-width: min(100%, 240px);
+    }
+    .settings > summary {
+      list-style: none;
+      min-height: var(--tap);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      cursor: pointer;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--mist);
+      user-select: none;
+    }
+    .settings > summary::-webkit-details-marker { display: none; }
+    .settings > summary::before {
+      content: "▸";
+      font-family: var(--mono);
+      color: var(--brass);
+    }
+    .settings[open] > summary::before { content: "▾"; }
+    .settings[open] > summary {
+      border-bottom: 1px solid #3d342a;
+    }
+    .settings-list {
+      display: grid;
+      gap: 2px;
+      padding: 6px 8px 10px;
+    }
+    .setting {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      padding: 0 4px;
+    }
+    .info {
+      position: relative;
+      width: 22px;
+      height: 22px;
+      min-height: 22px;
+      padding: 0;
+      border-radius: 50%;
+      border: 1px solid color-mix(in srgb, var(--brass) 55%, #3d342a);
+      background: var(--ink-3);
+      color: var(--brass);
+      font-family: var(--display);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: 0;
+      text-transform: none;
+      line-height: 1;
+    }
+    .info::after {
+      content: attr(data-tip);
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 8px);
+      width: max-content;
+      max-width: min(16rem, 70vw);
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #4a3f32;
+      background: var(--ink);
+      color: var(--paper);
+      font-family: var(--ui);
+      font-size: 12px;
+      font-weight: 400;
+      letter-spacing: 0.01em;
+      text-transform: none;
+      line-height: 1.4;
+      text-align: left;
+      white-space: normal;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(4px);
+      transition: opacity 0.12s ease, transform 0.12s ease;
+      z-index: 5;
+      box-shadow: 0 10px 24px #0008;
+    }
+    .info:hover::after,
+    .info:focus::after,
+    .info:focus-visible::after {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .seg {
+      display: inline-flex;
+      border: 1px solid #3d342a;
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--ink-2);
+    }
+    .seg button {
+      min-height: 36px;
+      padding: 0 14px;
+      border: 0;
+      border-right: 1px solid #3d342a;
+      letter-spacing: 0.12em;
+    }
+    .seg button:last-child { border-right: 0; }
+    .seg button.on {
+      background: var(--rust);
+      color: var(--paper);
+    }
+    button {
+      font-family: var(--ui);
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      border: 1px solid color-mix(in srgb, var(--brass) 70%, #3d342a);
+      background: var(--ink-3);
+      color: var(--paper);
+      min-height: var(--tap);
+      padding: 0 14px;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--paper); }
+    button.primary {
+      background: var(--rust);
+      border-color: var(--rust);
+    }
+    button.primary:hover { background: var(--rust-2); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button:focus-visible, input:focus-visible, select:focus-visible, a.github:focus-visible {
+      outline: 2px solid var(--brass);
+      outline-offset: 2px;
+    }
+    .header-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 0 0 auto;
+    }
+    a.github {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: var(--tap);
+      height: var(--tap);
+      min-width: var(--tap);
+      padding: 0;
+      border-radius: 50%;
+      border: 1px solid color-mix(in srgb, var(--brass) 55%, transparent);
+      background: color-mix(in srgb, var(--ink-2) 80%, transparent);
+      color: var(--brass);
+      text-decoration: none;
+    }
+    a.github:hover { border-color: var(--paper); color: var(--paper); }
+    a.github svg { display: block; width: 18px; height: 18px; }
+    .err {
+      color: #f0b4a8;
+      font-family: var(--mono);
+      font-size: 12px;
+      min-height: 1em;
+    }
+    .stale {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--rust);
+      letter-spacing: 0.04em;
+    }
+    .stale[hidden] { display: none; }
+    .pane-h small {
+      font-weight: 400;
+      letter-spacing: 0.16em;
+      color: var(--mist);
+      margin-left: 6px;
+    }
+    .paper .pane-h small { color: var(--rule); }
+    .tabs {
+      display: none;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      padding: 4px;
+      background: var(--ink-2);
+      border: 1px solid #3d342a;
+      border-radius: 12px;
+    }
+    .tabs button {
+      min-height: 40px;
+      border: 0;
+      background: transparent;
+    }
+    .tabs button.on {
+      background: var(--ink-3);
+      border: 1px solid #4a3f32;
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(260px, 38%) 1fr;
+      gap: 12px;
+      min-height: 0;
+    }
+    .pane {
+      background: linear-gradient(180deg, #211c17 0%, #161310 100%);
+      border: 1px solid #3a3228;
+      border-radius: var(--radius);
+      min-height: 0;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 18px 40px #0005;
+    }
+    .pane.paper {
+      background:
+        repeating-linear-gradient(
+          to bottom,
+          transparent 0 27px,
+          color-mix(in srgb, var(--rule) 35%, transparent) 28px
+        ),
+        var(--paper);
+      color: var(--ink);
+      border-color: var(--paper-2);
+    }
+    .pane-h {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid #3a3228;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--brass);
+      flex-wrap: wrap;
+    }
+    .paper .pane-h {
+      background: color-mix(in srgb, var(--paper) 92%, #000);
+      border-bottom: 1px solid var(--rule);
+      color: var(--rust-2);
+    }
+    .pane-h .tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .pane-h input[type="text"] {
+      padding: 8px 10px;
+      min-height: 36px;
+      min-width: 0;
+      width: min(180px, 42vw);
+      font-size: 14px;
+    }
+    .pane-h button { min-height: 36px; padding: 0 10px; }
+    .tree, .preview {
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      flex: 1;
+      padding: 10px 12px 16px;
+      font-family: var(--mono);
+      font-size: 13px;
+      font-variant-ligatures: none;
+      line-height: 1.5;
+    }
+    .preview {
+      white-space: pre;
+      word-break: break-word;
+      font-size: 13px;
+      line-height: 1.55;
+      background: transparent;
+      margin: 0;
+    }
+    .preview.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .empty {
+      color: var(--mist);
+      padding: 28px 8px;
+      font-family: var(--display);
+      font-size: clamp(17px, 4vw, 21px);
+      font-weight: 500;
+      line-height: 1.4;
+    }
+    .paper .empty { color: #7a6a52; }
+    .node { margin-left: 12px; }
+    .node.root { margin-left: 0; }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      padding: 2px 4px;
+      border-radius: 8px;
+    }
+    .row:hover { background: #ffffff0a; }
+    .paper .row:hover { background: #0000000a; }
+    .row input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 18px; accent-color: var(--rust); }
+    .twist {
+      flex: 0 0 32px;
+      width: 32px;
+      min-height: 32px;
+      height: 32px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--brass);
+      letter-spacing: 0;
+      font-size: 12px;
+      border-radius: 8px;
+      line-height: 1;
+    }
+    .twist:hover { color: var(--paper); background: #ffffff10; }
+    .row.dir .name { cursor: pointer; }
+    .row .name {
+      color: var(--paper);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .row.oversize .name { color: var(--mist); }
+    .row .meta {
+      color: var(--mist);
+      font-size: 10px;
+      margin-left: auto;
+      flex: 0 0 auto;
+    }
+    .kind {
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--brass);
+      flex: 0 0 auto;
+    }
+    .types {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 8px 12px 4px;
+      align-items: center;
+    }
+    .types:empty { display: none; }
+    .types-h {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--mist);
+      width: 100%;
+      margin: 0 0 2px;
+    }
+    label.type {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 36px;
+      padding: 0 10px 0 8px;
+      border: 1px solid #4a3f32;
+      border-radius: 999px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--mist);
+      cursor: pointer;
+      user-select: none;
+    }
+    label.type input {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--rust);
+    }
+    label.type.on {
+      border-color: var(--rust);
+      color: var(--paper);
+      background: #d4532814;
+    }
+    label.type.mix {
+      border-color: var(--brass);
+      color: var(--paper);
+    }
+    footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--mist);
+      flex-wrap: wrap;
+    }
+    .stats strong { color: var(--paper); font-weight: 600; }
+    .dock {
+      display: none;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .dock button { flex: 1; min-width: 22%; }
+    .spin { animation: mill 1.1s linear infinite; display: inline-block; }
+    @keyframes mill { to { transform: rotate(360deg); } }
+
+    @media (min-width: 860px) {
+      .path-row {
+        grid-template-columns: 1fr auto;
+      }
+      .path-actions { display: contents; }
+      input[type="text"] { font-size: 13px; }
+    }
+    @media (max-width: 859px) {
+      .privacy { display: none; }
+      .tabs { display: grid; }
+      main {
+        grid-template-columns: 1fr;
+      }
+      main.view-files .pane-dump { display: none; }
+      main.view-dump .pane-files { display: none; }
+      .pane-dump .pane-h .tools { display: none; }
+      .dock { display: flex; }
+      .app {
+        grid-template-rows: auto auto auto auto auto 1fr auto auto;
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .spin { animation: none; }
+    }
+  </style>
 </head>
 <body>
-  <div class="wrap">
-    <header class="top">
-      <a class="mark" href="/">pulp</a>
-      <nav class="nav">
-        <a href="/#install">Install</a>
-        <a href="https://github.com/BeeGass/pulp">GitHub</a>
-      </nav>
-    </header>
-    <main class="hero">
-      <h1>Browser mill coming soon.</h1>
-      <p class="lede">The WASM mill will pack folders inside your tab. Files stay in the browser — same promise as <code>pulp ui</code> on localhost. No upload to a server.</p>
-      <div class="privacy"><strong>Nothing uploaded.</strong> Use the local mill today while this lands.</div>
-      <div class="actions">
-        <a class="btn btn-primary" href="/#install">Install local pulp</a>
-        <a class="btn btn-ghost" href="/">Back to home</a>
+  <div class="app">
+    <header>
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div class="word">pulp<small>mill · local press</small></div>
       </div>
-      <pre><code>pulp ui
-# opens http://127.0.0.1:8747</code></pre>
+      <div class="header-meta">
+        <a class="github" href="/" title="pulp.onlygass.dev" aria-label="Back to pulp site" style="text-decoration:none;font-size:.85rem;padding:0 8px">site</a>
+        <a class="github" id="github" href="https://github.com/BeeGass/pulp" target="_blank" rel="noopener noreferrer" title="Inspect pulp source on GitHub" aria-label="Inspect pulp source on GitHub">
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/>
+          </svg>
+        </a>
+        <div class="privacy">in-browser · nothing uploaded</div>
+      </div>
+    </header>
+    <p class="deck">Grind a folder into one LLM-ready file in this tab. Rust, Lean, Office, PDFs — nothing leaves the browser.</p>
+    <div class="toolbar">
+      <div class="path-row">
+        <div id="path" class="path-display" style="flex:1;min-width:0;padding:10px 12px;border-radius:10px;border:1px solid color-mix(in srgb, var(--rule) 45%, transparent);background:#0c0a08;color:var(--mist);font-family:var(--mono);font-size:.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No folder selected — Browse</div>
+        <input id="dirInput" type="file" webkitdirectory multiple style="display:none">
+        <div class="path-actions">
+          <button id="browse" type="button">Browse</button>
+          <button id="scan" class="primary" type="button">Scan</button>
+        </div>
+      </div>
+      <div class="opts">
+        <span class="ctl">
+          <span class="ctl-l">Content</span>
+          <span class="seg" role="group" aria-label="content">
+            <button type="button" data-content="source">Preserve source</button>
+            <button type="button" data-content="readable" class="on">Readable text</button>
+          </span>
+        </span>
+        <select id="content" hidden>
+          <option value="readable" selected>readable</option>
+          <option value="source">source</option>
+        </select>
+        <span class="ctl">
+          <span class="ctl-l">Output format</span>
+          <span class="seg" role="group" aria-label="format">
+            <button type="button" data-fmt="txt">txt</button>
+            <button type="button" data-fmt="md">md</button>
+            <button type="button" data-fmt="xml" class="on">xml</button>
+          </span>
+        </span>
+        <select id="format" hidden>
+          <option value="txt">txt</option>
+          <option value="md">md</option>
+          <option value="xml" selected>xml</option>
+        </select>
+        <p class="hint" id="contentHint">PDFs and Office files are still converted to text. HTML, XML, and JSON stay as decoded source when Preserve source is on.</p>
+        <details class="settings" id="settings">
+          <summary>Options</summary>
+          <div class="settings-list">
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="gitignore" checked> gitignore</label>
+              <button type="button" class="info" data-tip="Honor .gitignore, .ignore, and git exclude files when walking the tree." aria-label="Honor .gitignore, .ignore, and git exclude files when walking the tree.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="hidden"> hidden</label>
+              <button type="button" class="info" data-tip="Include hidden files and folders (dotfiles). .git is still skipped." aria-label="Include hidden files and folders (dotfiles). .git is still skipped.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="archives"> archives</label>
+              <button type="button" class="info" data-tip="Expand nested zip and tar members, not only a root archive." aria-label="Expand nested zip and tar members, not only a root archive.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="notebook"> notebook outputs</label>
+              <button type="button" class="info" data-tip="Keep Jupyter cell outputs in the dump, not only the source cells." aria-label="Keep Jupyter cell outputs in the dump, not only the source cells.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="notree"> no tree</label>
+              <button type="button" class="info" data-tip="Omit the directory map from the top of the dump." aria-label="Omit the directory map from the top of the dump.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="wrap"> wrap preview</label>
+              <button type="button" class="info" data-tip="Wrap lines in Combined and File preview. View only; does not change the dump." aria-label="Wrap lines in Combined and File preview. View only; does not change the dump.">i</button>
+            </div>
+          </div>
+        </details>
+      </div>
+    </div>
+    <div class="err" id="err" role="status" aria-live="polite"></div>
+    <div class="stale" id="stale" hidden role="status" aria-live="polite">Output is out of date. Pulp again before copying.</div>
+    <nav class="tabs" id="tabs" aria-label="Panes">
+      <button type="button" class="on" data-view="files">Files</button>
+      <button type="button" data-view="dump">Output</button>
+    </nav>
+    <main id="stage" class="view-files">
+      <section class="pane pane-files">
+        <div class="pane-h">
+          <span>Files <small>proof</small></span>
+          <div class="tools">
+            <input id="filter" type="text" placeholder="filter" spellcheck="false">
+            <button type="button" id="all">Select matches</button>
+            <button type="button" id="none">Clear matches</button>
+            <button type="button" id="copytree" disabled>Copy tree</button>
+          </div>
+        </div>
+        <div class="types" id="types"></div>
+        <div class="tree" id="tree"><div class="empty">Browse to a folder in the file manager, or type a path, then scan.</div></div>
+      </section>
+      <section class="pane paper pane-dump">
+        <div class="pane-h">
+          <span>Output <small>galley</small></span>
+          <div class="tools">
+            <span class="out-views" role="group" aria-label="Output view">
+              <button type="button" data-out="dump" class="on">Combined</button>
+              <button type="button" data-out="preview">File preview</button>
+              <button type="button" data-out="issues" id="issuesTab">Issues</button>
+            </span>
+            <button type="button" id="pulp" class="primary" disabled>Pulp</button>
+            <button type="button" id="cancel" hidden>Cancel</button>
+            <button type="button" id="copytreeDump" disabled>Copy tree</button>
+            <button type="button" id="copy" disabled>Copy</button>
+            <button type="button" id="download" disabled>Download</button>
+          </div>
+        </div>
+        <div class="result-strip"><span id="resultState">Not generated</span><span id="resultMeta"></span></div>
+        <pre class="preview" id="preview"><div class="empty">The dump lands here — xml, md, or txt.</div></pre>
+        <div class="file-preview" id="filePreview" hidden>
+          <div class="preview-head" id="previewHead"></div>
+          <pre class="preview" id="previewBody"></pre>
+        </div>
+        <div class="issues" id="issues" hidden></div>
+      </section>
     </main>
+    <div class="dock" id="dock">
+      <button type="button" id="pulp2" class="primary" disabled>Pulp</button>
+      <button type="button" id="cancel2" hidden>Cancel</button>
+      <button type="button" id="copytree2" disabled>Tree</button>
+      <button type="button" id="copy2" disabled>Copy</button>
+      <button type="button" id="download2" disabled>Download</button>
+    </div>
+    <footer>
+      <div class="stats" id="stats">idle</div>
+      <div>pulp mill · pulp.onlygass.dev</div>
+    </footer>
   </div>
+  
+<script type="module">
+import init, { scan_files, pack_files, pulp_version, smoke_pack } from './pkg/pulp_wasm.js';
+
+const $ = (id) => document.getElementById(id);
+const state = {
+  files: [],
+  fileMap: new Map(),
+  selected: new Set(),
+  collapsed: new Set(),
+  dump: '',
+  filename: 'pulp-browser.xml',
+  outcomes: [],
+  busy: false,
+  cancel: false,
+  worker: null,
+  previewFile: null,
+};
+
+async function fileBytes(file) {
+  // Fresh copy with its own ArrayBuffer (avoids shared/detached buffers).
+  const src = new Uint8Array(await file.arrayBuffer());
+  const out = new Uint8Array(src.byteLength);
+  out.set(src);
+  return out;
+}
+
+/** Read many files with bounded concurrency. */
+async function mapPool(items, limit, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      out[idx] = await fn(items[idx], idx);
+    }
+  }
+  const n = Math.min(limit, Math.max(1, items.length));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return out;
+}
+function human(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KiB';
+  return (n / 1048576).toFixed(1) + ' MiB';
+}
+function setErr(msg) { $('err').textContent = msg || ''; }
+function fileId(f) { return f.id || f.relative; }
+
+function contentMode() {
+  return $('content').value === 'source';
+}
+function formatMode() {
+  return $('format').value;
+}
+function optsScan() {
+  return {
+    hidden: $('hidden').checked,
+    archives: $('archives').checked,
+    exclude: [],
+  };
+}
+function optsPack() {
+  return {
+    format: formatMode(),
+    archives: $('archives').checked,
+    binaries: false,
+    notebook_outputs: $('notebook').checked,
+    source: contentMode(),
+    no_tree: $('notree').checked,
+    exclude: [],
+  };
+}
+
+function setBusy(on) {
+  state.busy = on;
+  ['pulp','pulp2','browse','scan','all','none'].forEach(id => {
+    const el = $(id); if (el) el.disabled = on || (id.startsWith('pulp') && state.selected.size === 0 && !on);
+  });
+  if ($('cancel')) $('cancel').hidden = !on;
+  if ($('cancel2')) $('cancel2').hidden = !on;
+  if (!on) {
+    $('pulp').disabled = state.selected.size === 0;
+    $('pulp2').disabled = state.selected.size === 0;
+    $('scan').disabled = state.fileMap.size === 0;
+  }
+}
+
+function setView(name) {
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.view === name));
+  const stage = $('stage');
+  stage.classList.toggle('view-files', name === 'files');
+  stage.classList.toggle('view-dump', name === 'dump');
+}
+
+function setOutView(name) {
+  document.querySelectorAll('[data-out]').forEach(b => b.classList.toggle('on', b.dataset.out === name));
+  $('preview').hidden = name !== 'dump';
+  $('filePreview').hidden = name !== 'preview';
+  $('issues').hidden = name !== 'issues';
+}
+
+function buildTree(files) {
+  const root = { name: '', kids: new Map(), files: [] };
+  for (const f of files) {
+    const parts = f.relative.split('/');
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const p = parts[i];
+      if (!node.kids.has(p)) node.kids.set(p, { name: p, kids: new Map(), files: [] });
+      node = node.kids.get(p);
+    }
+    node.files.push(f);
+  }
+  return root;
+}
+
+function kindsOf(files) {
+  const m = new Map();
+  for (const f of files) {
+    const k = f.language || f.kind;
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(f);
+  }
+  return [...m.entries()].sort((a,b) => a[0].localeCompare(b[0]));
+}
+
+function visible(file) {
+  const q = ($('filter').value || '').trim().toLowerCase();
+  if (!q) return true;
+  return file.relative.toLowerCase().includes(q) || (file.language||'').toLowerCase().includes(q);
+}
+
+function renderTypes() {
+  const el = $('types');
+  el.innerHTML = '';
+  for (const [kind, files] of kindsOf(state.files.filter(visible))) {
+    const ids = files.map(fileId);
+    const on = ids.every(id => state.selected.has(id));
+    const some = ids.some(id => state.selected.has(id));
+    const lab = document.createElement('label');
+    lab.className = 'opt';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = on;
+    cb.indeterminate = some && !on;
+    cb.addEventListener('change', () => {
+      for (const id of ids) { if (cb.checked) state.selected.add(id); else state.selected.delete(id); }
+      renderTree(); refreshStats();
+    });
+    lab.append(cb, document.createTextNode(` ${kind} (${files.length})`));
+    el.appendChild(lab);
+  }
+}
+
+function renderNode(node, el, prefix) {
+  for (const [name, child] of [...node.kids.entries()].sort((a,b)=>a[0].localeCompare(b[0]))) {
+    const path = prefix ? prefix + '/' + name : name;
+    const row = document.createElement('div');
+    row.className = 'row dir';
+    const twist = document.createElement('button');
+    twist.type = 'button';
+    twist.className = 'twist';
+    const collapsed = state.collapsed.has(path);
+    twist.textContent = collapsed ? '▸' : '▾';
+    twist.addEventListener('click', () => {
+      if (collapsed) state.collapsed.delete(path); else state.collapsed.add(path);
+      renderTree();
+    });
+    const mark = document.createElement('span');
+    mark.className = 'name';
+    mark.textContent = name + '/';
+    row.append(twist, mark);
+    el.appendChild(row);
+    if (!collapsed) {
+      const nest = document.createElement('div');
+      nest.className = 'nest';
+      renderNode(child, nest, path);
+      el.appendChild(nest);
+    }
+  }
+  for (const f of node.files.filter(visible).sort((a,b)=>a.relative.localeCompare(b.relative))) {
+    const id = fileId(f);
+    const row = document.createElement('label');
+    row.className = 'row file';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = state.selected.has(id);
+    cb.addEventListener('change', () => {
+      if (cb.checked) state.selected.add(id); else state.selected.delete(id);
+      renderTypes(); refreshStats();
+    });
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = f.relative.split('/').pop();
+    name.title = f.relative;
+    name.style.cursor = 'pointer';
+    name.addEventListener('click', async (e) => {
+      e.preventDefault();
+      await showPreview(f);
+    });
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = `${f.language || f.kind} · ${human(f.size)}`;
+    row.append(cb, name, meta);
+    el.appendChild(row);
+  }
+}
+
+function renderTree() {
+  const tree = $('tree');
+  tree.innerHTML = '';
+  if (!state.files.length) {
+    tree.innerHTML = '<div class="empty">Browse to a folder, then scan.</div>';
+    return;
+  }
+  renderNode(buildTree(state.files), tree, '');
+}
+
+function renderIssues() {
+  const el = $('issues');
+  el.innerHTML = '';
+  const bad = (state.outcomes||[]).filter(o => o.status && o.status !== 'extracted');
+  $('issuesTab').textContent = bad.length ? `Issues (${bad.length})` : 'Issues';
+  if (!bad.length) { el.innerHTML = '<div class="empty">No issues.</div>'; return; }
+  for (const o of bad) {
+    const d = document.createElement('div');
+    d.className = 'issue';
+    d.textContent = `${o.status}: ${o.relative}`;
+    el.appendChild(d);
+  }
+}
+
+function refreshStats() {
+  const n = state.selected.size;
+  $('pulp').disabled = state.busy || n === 0;
+  $('pulp2').disabled = state.busy || n === 0;
+  $('copytree').disabled = !state.files.length;
+  $('copytreeDump').disabled = !state.files.length;
+  $('copytree2').disabled = !state.files.length;
+  const bytes = state.files.filter(f => state.selected.has(fileId(f))).reduce((a,f)=>a+(f.size||0),0);
+  if (!state.dump) {
+    $('stats').textContent = state.files.length
+      ? `${state.files.length} files · ${n} selected · ${human(bytes)}`
+      : (state.fileMap.size ? `${state.fileMap.size} loaded — scan` : 'idle');
+  }
+  $('copy').disabled = !state.dump;
+  $('download').disabled = !state.dump;
+  $('copy2').disabled = !state.dump;
+  $('download2').disabled = !state.dump;
+}
+
+async function showPreview(f) {
+  const file = state.fileMap.get(f.relative);
+  if (!file) return;
+  setView('dump');
+  setOutView('preview');
+  $('previewHead').textContent = f.relative;
+  try {
+    const text = await file.slice(0, 200_000).text();
+    $('previewBody').textContent = text;
+  } catch (e) {
+    $('previewBody').textContent = '(binary or unreadable)';
+  }
+}
+
+async function ingestFiles(list) {
+  state.fileMap.clear();
+  state.files = [];
+  state.selected.clear();
+  state.dump = '';
+  $('preview').textContent = '';
+  for (const file of list) {
+    const relative = (file.webkitRelativePath || file.name || '').replace(/^\.\//, '');
+    if (relative) state.fileMap.set(relative, file);
+  }
+  $('path').textContent = state.fileMap.size ? `${state.fileMap.size} files selected` : 'No folder selected — Browse';
+  $('scan').disabled = state.fileMap.size === 0;
+  refreshStats();
+}
+
+async function scan() {
+  setErr('');
+  setBusy(true);
+  $('stats').innerHTML = '<span class="spin"></span> scanning…';
+  try {
+    const files = [];
+    for (const [relative, file] of state.fileMap) {
+      files.push({ relative, size: file.size });
+    }
+    const data = scan_files({ files, ...optsScan() });
+    state.files = data.files || [];
+    state.selected = new Set(state.files.filter(f => f.default_on).map(fileId));
+    renderTypes(); renderTree(); refreshStats(); setView('files');
+    if (data.truncated) setErr('Scan hit entry limit — some files omitted.');
+  } catch (e) {
+    setErr(String(e && e.message || e));
+    $('stats').textContent = 'scan failed';
+  } finally { setBusy(false); refreshStats(); }
+}
+
+function ensureWorker() {
+  if (state.worker) return state.worker;
+  state.worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+  return state.worker;
+}
+
+function packViaWorker(payload) {
+  return new Promise((resolve, reject) => {
+    let w;
+    try { w = ensureWorker(); } catch (e) { reject(e); return; }
+    const onMsg = (ev) => {
+      w.removeEventListener('message', onMsg);
+      w.removeEventListener('error', onErr);
+      if (ev.data?.ok) resolve(ev.data.result);
+      else reject(new Error(ev.data?.error || 'pack failed'));
+    };
+    const onErr = (err) => {
+      w.removeEventListener('message', onMsg);
+      w.removeEventListener('error', onErr);
+      reject(err);
+    };
+    w.addEventListener('message', onMsg);
+    w.addEventListener('error', onErr);
+    // Structured-clone only — do NOT transfer ArrayBuffers.
+    // Transfer detaches buffers and breaks main-thread fallback / reuse.
+    w.postMessage({ type: 'pack', payload });
+  });
+}
+
+async function pulp() {
+  setErr('');
+  state.cancel = false;
+  setBusy(true);
+  $('stats').innerHTML = '<span class="spin"></span> packing…';
+  $('resultState').textContent = 'Packing…';
+  try {
+    const selected = [...state.selected];
+    const jobs = selected.map((id) => {
+      const entry = state.files.find(f => fileId(f) === id);
+      const relative = entry ? entry.relative : id;
+      return { id, relative, blob: state.fileMap.get(relative) };
+    }).filter(j => j.blob);
+    if (!jobs.length) throw new Error('No selected files readable');
+
+    $('stats').innerHTML = `<span class="spin"></span> reading ${jobs.length} files…`;
+    const files = await mapPool(jobs, 8, async (j) => ({
+      relative: j.relative,
+      id: j.id,
+      bytes: await fileBytes(j.blob),
+    }));
+
+    const payload = { files, selected, ...optsPack() };
+    $('stats').innerHTML = `<span class="spin"></span> packing…`;
+    let data;
+    try {
+      data = await packViaWorker(payload);
+    } catch (workerErr) {
+      console.warn('worker pack failed, main thread', workerErr);
+      // Re-copy bytes in case anything was detached.
+      const retry = {
+        ...payload,
+        files: payload.files.map((f) => ({
+          ...f,
+          bytes: f.bytes ? new Uint8Array(f.bytes) : f.bytes,
+        })),
+      };
+      data = pack_files(retry);
+    }
+    if (state.cancel) { $('stats').textContent = 'cancelled'; return; }
+    if (data.error) setErr(data.error);
+    state.dump = data.dump || '';
+    state.filename = data.filename || 'pulp-browser.txt';
+    state.outcomes = data.outcomes || [];
+    $('preview').textContent = state.dump || (data.error ? `(${data.error})` : '(empty dump)');
+    renderIssues();
+    setView('dump'); setOutView('dump');
+    const ok = (data.files_extracted || 0) > 0;
+    $('resultState').textContent = ok ? 'Ready' : 'Empty';
+    $('resultMeta').textContent =
+      `${data.files_extracted || 0} extracted · ${data.files_skipped || 0} skipped · ~${data.tokens_est || 0} tok · ${human(data.dump_bytes || 0)} · ${data.elapsed_ms || 0} ms`;
+    $('stats').textContent = $('resultMeta').textContent;
+    if (data.preview_truncated) setErr((data.error ? data.error + ' · ' : '') + 'Preview truncated in the UI; packed output may be larger.');
+    if (!ok && !data.error) setErr('Pack produced no extracted text. Try enabling archives, or check Issues.');
+  } catch (e) {
+    setErr(String(e && e.message || e));
+    $('stats').textContent = 'pack failed';
+    $('resultState').textContent = 'Failed';
+  } finally { setBusy(false); refreshStats(); }
+}
+
+function cancelPulp() {
+  state.cancel = true;
+  if (state.worker) { try { state.worker.terminate(); } catch(_){} state.worker = null; }
+  setBusy(false);
+  $('stats').textContent = 'cancelled';
+}
+
+async function copyTree() {
+  const text = state.files.filter(f => state.selected.has(fileId(f))).map(f => f.relative).join('\n');
+  await navigator.clipboard.writeText(text);
+  $('stats').textContent = 'tree copied';
+}
+async function copyDump() {
+  await navigator.clipboard.writeText(state.dump);
+  $('stats').textContent = 'dump copied';
+}
+function downloadDump() {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([state.dump], { type: 'text/plain' }));
+  a.download = state.filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// Segmented controls
+document.querySelectorAll('[data-fmt]').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('[data-fmt]').forEach(x => x.classList.toggle('on', x === b));
+  $('format').value = b.dataset.fmt;
+}));
+document.querySelectorAll('[data-content]').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('[data-content]').forEach(x => x.classList.toggle('on', x === b));
+  $('content').value = b.dataset.content;
+}));
+
+$('browse').addEventListener('click', () => $('dirInput').click());
+$('dirInput').addEventListener('change', async (e) => {
+  await ingestFiles([...e.target.files]);
+  await scan();
+});
+$('scan').addEventListener('click', scan);
+$('pulp').addEventListener('click', pulp);
+$('pulp2').addEventListener('click', pulp);
+$('cancel').addEventListener('click', cancelPulp);
+$('cancel2').addEventListener('click', cancelPulp);
+$('copytree').addEventListener('click', copyTree);
+$('copytreeDump').addEventListener('click', copyTree);
+$('copytree2').addEventListener('click', copyTree);
+$('copy').addEventListener('click', copyDump);
+$('copy2').addEventListener('click', copyDump);
+$('download').addEventListener('click', downloadDump);
+$('download2').addEventListener('click', downloadDump);
+$('all').addEventListener('click', () => {
+  for (const f of state.files.filter(visible)) state.selected.add(fileId(f));
+  renderTypes(); renderTree(); refreshStats();
+});
+$('none').addEventListener('click', () => {
+  for (const f of state.files.filter(visible)) state.selected.delete(fileId(f));
+  renderTypes(); renderTree(); refreshStats();
+});
+$('filter').addEventListener('input', () => { renderTypes(); renderTree(); });
+document.querySelectorAll('#tabs button').forEach(b =>
+  b.addEventListener('click', () => setView(b.dataset.view))
+);
+document.querySelectorAll('[data-out]').forEach(b =>
+  b.addEventListener('click', () => setOutView(b.dataset.out))
+);
+
+document.body.addEventListener('dragover', e => e.preventDefault());
+document.body.addEventListener('drop', async e => {
+  e.preventDefault();
+  const files = [...(e.dataTransfer?.files || [])];
+  if (files.length) { await ingestFiles(files); await scan(); }
+});
+
+await init();
+try {
+  const smoke = smoke_pack();
+  if (!smoke || !(smoke.files_extracted > 0)) {
+    console.warn('smoke_pack empty', smoke);
+    setErr('WASM smoke pack returned empty — try a hard refresh. If it persists, pack is broken.');
+  } else {
+    console.log('smoke_pack ok', smoke.files_extracted, smoke.elapsed_ms + 'ms');
+  }
+} catch (e) {
+  console.error('smoke_pack failed', e);
+  setErr('WASM smoke failed: ' + (e && e.message || e) + ' — hard-refresh; if stuck, report this.');
+}
+$('stats').textContent = `wasm v${pulp_version()} · browse a folder`;
+$('scan').disabled = true;
+</script>
+
 </body>
 </html>

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#120f0c">
   <title>pulp — LLM-ready dumps from local folders</title>
-  <meta name="description" content="Pulp grinds a local folder into one LLM-ready text file. Runs on your machine. Browser mill coming — files stay in the tab.">
+  <meta name="description" content="Pulp grinds a local folder into one LLM-ready text file. Runs on your machine. Browser mill at /mill — files stay in the tab.">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -22,11 +22,11 @@
     <main class="hero">
       <h1>Grind a folder into one LLM-ready dump.</h1>
       <p class="lede">Pulp walks a tree in parallel, pulls text out of mixed documents, and writes one file you can hand a model. Paper pulp. Juice. Disposable reading.</p>
-      <div class="privacy"><strong>Local first.</strong> Files never leave the machine. The mill binds localhost only. A browser WASM mill is next — still no upload.</div>
+      <div class="privacy"><strong>Local first.</strong> Files never leave the machine. The mill binds localhost only. Try the browser mill — still no upload.</div>
       <div class="actions">
         <a class="btn btn-primary" href="#install">Install</a>
         <a class="btn btn-ghost" href="https://github.com/BeeGass/pulp">View on GitHub</a>
-        <a class="btn btn-ghost" href="/mill/">Browser mill (soon)</a>
+        <a class="btn btn-ghost" href="/mill/">Browser mill</a>
       </div>
     </main>
 
@@ -62,8 +62,8 @@ pulp ui</code></pre>
 
     <section>
       <h2>Browser mill</h2>
-      <p>The public site will host an in-browser mill at <a href="/mill/">/mill</a>. Same privacy story as localhost: packing runs in WebAssembly inside your tab. No server-side upload/packer.</p>
-      <p class="note">Design notes live in <code>docs/wasm-mill.md</code> in the repo.</p>
+      <p>In-browser mill: <a href="/mill/">/mill</a>. Same privacy story as localhost: packing runs in WebAssembly inside your tab. No server-side upload/packer.</p>
+      <p class="note">Full extract path in WASM: text, code, PDF, Office sheets, zip, HTML, JSON, notebooks, and more. Local <code>pulp ui</code> still wins for gitignore walks and hang isolation. Design: <code>docs/wasm-mill.md</code>.</p>
     </section>
 
     <footer class="footer">
