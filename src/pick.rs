@@ -63,6 +63,7 @@ end tell
         output.status.success(),
         &String::from_utf8_lossy(&output.stdout),
         &String::from_utf8_lossy(&output.stderr),
+        false,
     )
 }
 
@@ -114,6 +115,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         output.status.success(),
         &String::from_utf8_lossy(&output.stdout),
         &String::from_utf8_lossy(&output.stderr),
+        false,
     )
 }
 
@@ -124,6 +126,7 @@ fn try_cmd(bin: &str, args: &[&str]) -> Option<Result<Option<PathBuf>, String>> 
         output.status.success(),
         &String::from_utf8_lossy(&output.stdout),
         &String::from_utf8_lossy(&output.stderr),
+        true,
     ))
 }
 
@@ -131,23 +134,29 @@ pub(crate) fn parse_picker_output(
     ok: bool,
     stdout: &str,
     stderr: &str,
+    empty_fail_is_cancel: bool,
 ) -> Result<Option<PathBuf>, String> {
     let out = stdout.trim();
     let err = stderr.trim();
-    if !ok {
+    if ok {
         if out.is_empty() {
             return Ok(None);
         }
-        return Err(if err.is_empty() {
-            "folder picker failed".into()
-        } else {
-            err.to_string()
-        });
+        return Ok(Some(PathBuf::from(out)));
     }
-    if out.is_empty() {
+    if is_user_cancel(err) || (empty_fail_is_cancel && out.is_empty() && err.is_empty()) {
         return Ok(None);
     }
-    Ok(Some(PathBuf::from(out)))
+    Err(if err.is_empty() {
+        "Folder picker could not open. Enter a path manually.".into()
+    } else {
+        format!("{err}. Enter a path manually.")
+    })
+}
+
+fn is_user_cancel(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("user canceled") || e.contains("user cancelled") || e.contains("(-128)")
 }
 
 #[cfg(test)]
@@ -156,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_parse_picker_output_with_posix_path_returns_folder() {
-        let path = parse_picker_output(true, "/Users/beegass/Projects/pulp/\n", "").unwrap();
+        let path = parse_picker_output(true, "/Users/beegass/Projects/pulp/\n", "", false).unwrap();
         assert_eq!(
             path.unwrap(),
             PathBuf::from("/Users/beegass/Projects/pulp/")
@@ -165,13 +174,26 @@ mod tests {
 
     #[test]
     fn test_parse_picker_output_with_cancel_stderr_returns_none() {
-        let path = parse_picker_output(false, "", "User canceled.").unwrap();
+        let path = parse_picker_output(false, "", "User canceled.", false).unwrap();
         assert!(path.is_none());
     }
 
     #[test]
     fn test_parse_picker_output_with_empty_success_returns_none() {
-        let path = parse_picker_output(true, "  \n", "").unwrap();
+        let path = parse_picker_output(true, "  \n", "", false).unwrap();
         assert!(path.is_none());
+    }
+
+    #[test]
+    fn test_parse_picker_output_with_fail_stderr_returns_error() {
+        let err = parse_picker_output(false, "", "execution error: no display", false).unwrap_err();
+        assert!(err.contains("Enter a path manually"), "{err}");
+        assert!(err.contains("execution error"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_picker_output_with_empty_fail_returns_error() {
+        let err = parse_picker_output(false, "", "", false).unwrap_err();
+        assert!(err.contains("could not open"), "{err}");
     }
 }
