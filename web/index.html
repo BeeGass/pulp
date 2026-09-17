@@ -2,181 +2,246 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#120f0c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>pulp mill</title>
   <style>
     :root {
-      --ink: #14110e;
-      --ink-2: #221c16;
-      --paper: #f2e6d0;
-      --paper-2: #e7d7b8;
-      --rule: #cbb792;
-      --rust: #c44b24;
-      --rust-2: #a33b1b;
-      --brass: #b08948;
-      --moss: #3e5c40;
-      --mist: #8f8373;
-      --danger: #8a2f24;
+      --ink: #120f0c;
+      --ink-2: #1c1814;
+      --ink-3: #2a241c;
+      --paper: #f4e6cf;
+      --paper-2: #ead7b6;
+      --rule: #c9b48a;
+      --rust: #d45328;
+      --rust-2: #b3441f;
+      --brass: #c4a056;
+      --mist: #9a8d7a;
       --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      --serif: "Iowan Old Style", Palatino, "Palatino Linotype", "Times New Roman", serif;
+      --serif: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+      --pad: clamp(12px, 3vw, 28px);
+      --tap: 44px;
+      --safe-b: env(safe-area-inset-bottom, 0px);
+      --safe-t: env(safe-area-inset-top, 0px);
+      --radius: 14px;
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
+      min-height: 100dvh;
       background:
-        radial-gradient(1200px 600px at 10% -10%, #2a2218 0%, transparent 50%),
+        radial-gradient(900px 420px at 0% -10%, #3a2a1c 0%, transparent 55%),
+        radial-gradient(700px 380px at 100% 0%, #1e1510 0%, transparent 50%),
         var(--ink);
       color: var(--paper);
       font-family: var(--serif);
-      letter-spacing: 0.01em;
+      -webkit-font-smoothing: antialiased;
     }
     body::before {
       content: "";
       pointer-events: none;
       position: fixed;
       inset: 0;
-      opacity: 0.07;
-      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='4' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+      opacity: 0.06;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
     }
+    button, input, select { font: inherit; }
     .app {
-      height: 100%;
+      min-height: 100dvh;
+      min-height: 100svh;
       display: grid;
-      grid-template-rows: auto auto 1fr auto;
+      grid-template-rows: auto auto auto auto 1fr auto;
+      padding: calc(var(--safe-t) + 10px) var(--pad) calc(var(--safe-b) + 10px);
+      gap: 10px;
       position: relative;
     }
     header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 18px 28px 10px;
-      gap: 16px;
+      gap: 12px;
     }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
     .mark {
-      width: 36px;
-      height: 36px;
+      width: 40px; height: 40px; flex: 0 0 40px;
+      border-radius: 50%;
       border: 1.5px solid var(--brass);
-      border-radius: 50%;
-      position: relative;
-    }
-    .mark::before, .mark::after {
-      content: "";
-      position: absolute;
-      inset: 7px;
-      border: 1.5px solid var(--rust);
-      border-radius: 50%;
-    }
-    .mark::after {
-      inset: 13px;
-      background: var(--rust);
-      border: 0;
+      background:
+        radial-gradient(circle at 50% 50%, transparent 0 28%, var(--rust) 29% 34%, transparent 35% 48%, var(--brass) 49% 52%, transparent 53%),
+        var(--ink-2);
+      box-shadow: inset 0 0 0 7px var(--ink-2), 0 0 0 1px #0006;
     }
     .word {
-      font-size: 28px;
+      font-size: clamp(22px, 5vw, 30px);
       font-weight: 650;
-      letter-spacing: 0.18em;
+      letter-spacing: 0.2em;
       text-transform: uppercase;
       line-height: 1;
     }
     .word small {
       display: block;
-      font-size: 11px;
-      letter-spacing: 0.32em;
-      color: var(--brass);
+      margin-top: 5px;
       font-family: var(--mono);
-      margin-top: 4px;
+      font-size: 10px;
       font-weight: 500;
+      letter-spacing: 0.28em;
+      color: var(--brass);
     }
     .privacy {
+      flex: 0 0 auto;
       font-family: var(--mono);
-      font-size: 11px;
-      color: var(--paper);
-      background: #2a231c;
-      border: 1px solid var(--brass);
-      padding: 6px 10px;
+      font-size: 10px;
       letter-spacing: 0.08em;
       text-transform: uppercase;
+      color: var(--brass);
+      border: 1px solid color-mix(in srgb, var(--brass) 55%, transparent);
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--ink-2) 80%, transparent);
+      white-space: nowrap;
     }
     .deck {
-      padding: 0 28px 14px;
+      margin: 0;
       color: var(--mist);
-      max-width: 720px;
-      font-size: 16px;
+      font-size: clamp(14px, 3.4vw, 17px);
+      line-height: 1.4;
+      max-width: 40rem;
     }
-    .toolbar {
+    .toolbar { display: grid; gap: 10px; }
+    .path-row {
       display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 10px;
-      padding: 0 28px 16px;
-    }
-    .path-row, .opts {
-      display: flex;
+      grid-template-columns: 1fr;
       gap: 8px;
-      flex-wrap: wrap;
-      align-items: center;
+    }
+    .path-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
     }
     input[type="text"], select {
+      width: 100%;
+      min-height: var(--tap);
       background: var(--ink-2);
       color: var(--paper);
-      border: 1px solid var(--rule);
+      border: 1px solid #3d342a;
+      border-radius: 10px;
       font-family: var(--mono);
-      font-size: 13px;
+      font-size: 16px;
       padding: 10px 12px;
     }
-    input[type="text"] { flex: 1; min-width: 220px; }
     label.opt {
       font-family: var(--mono);
       font-size: 11px;
       color: var(--mist);
-      display: flex;
-      gap: 6px;
+      display: inline-flex;
+      gap: 7px;
       align-items: center;
       letter-spacing: 0.04em;
       text-transform: uppercase;
+      min-height: 36px;
+      padding: 0 4px;
+    }
+    label.opt input { width: 18px; height: 18px; accent-color: var(--rust); }
+    .opts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 12px;
+      align-items: center;
+    }
+    .seg {
+      display: inline-flex;
+      border: 1px solid #3d342a;
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--ink-2);
+    }
+    .seg button {
+      min-height: 36px;
+      padding: 0 14px;
+      border: 0;
+      border-right: 1px solid #3d342a;
+      letter-spacing: 0.12em;
+    }
+    .seg button:last-child { border-right: 0; }
+    .seg button.on {
+      background: var(--rust);
+      color: var(--paper);
     }
     button {
       font-family: var(--mono);
       font-size: 12px;
       letter-spacing: 0.12em;
       text-transform: uppercase;
-      border: 1px solid var(--brass);
-      background: transparent;
+      border: 1px solid color-mix(in srgb, var(--brass) 70%, #3d342a);
+      background: var(--ink-3);
       color: var(--paper);
-      padding: 10px 14px;
+      min-height: var(--tap);
+      padding: 0 14px;
+      border-radius: 10px;
       cursor: pointer;
     }
     button:hover { border-color: var(--paper); }
     button.primary {
       background: var(--rust);
       border-color: var(--rust);
-      color: var(--paper);
     }
     button.primary:hover { background: var(--rust-2); }
-    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
     button:focus-visible, input:focus-visible, select:focus-visible {
       outline: 2px solid var(--brass);
       outline-offset: 2px;
     }
+    .err {
+      color: #f0b4a8;
+      font-family: var(--mono);
+      font-size: 12px;
+      min-height: 1em;
+    }
+    .tabs {
+      display: none;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      padding: 4px;
+      background: var(--ink-2);
+      border: 1px solid #3d342a;
+      border-radius: 12px;
+    }
+    .tabs button {
+      min-height: 40px;
+      border: 0;
+      background: transparent;
+    }
+    .tabs button.on {
+      background: var(--ink-3);
+      border: 1px solid #4a3f32;
+    }
     main {
       display: grid;
-      grid-template-columns: minmax(280px, 38%) 1fr;
-      gap: 16px;
+      grid-template-columns: minmax(260px, 38%) 1fr;
+      gap: 12px;
       min-height: 0;
-      padding: 0 28px 16px;
     }
     .pane {
-      background: linear-gradient(180deg, #1c1712 0%, #15120f 100%);
+      background: linear-gradient(180deg, #211c17 0%, #161310 100%);
       border: 1px solid #3a3228;
+      border-radius: var(--radius);
       min-height: 0;
+      min-width: 0;
       display: flex;
       flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 18px 40px #0005;
     }
     .pane.paper {
-      background: var(--paper);
+      background:
+        repeating-linear-gradient(
+          to bottom,
+          transparent 0 27px,
+          color-mix(in srgb, var(--rule) 35%, transparent) 28px
+        ),
+        var(--paper);
       color: var(--ink);
       border-color: var(--paper-2);
     }
@@ -192,52 +257,78 @@
       letter-spacing: 0.14em;
       text-transform: uppercase;
       color: var(--brass);
+      flex-wrap: wrap;
     }
     .paper .pane-h {
+      background: color-mix(in srgb, var(--paper) 92%, #000);
       border-bottom: 1px solid var(--rule);
       color: var(--rust-2);
     }
-    .pane-h .tools { display: flex; gap: 6px; flex-wrap: wrap; }
+    .pane-h .tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .pane-h input[type="text"] {
-      padding: 6px 8px;
+      padding: 8px 10px;
+      min-height: 36px;
       min-width: 0;
-      width: 160px;
+      width: min(180px, 42vw);
+      font-size: 14px;
     }
+    .pane-h button { min-height: 36px; padding: 0 10px; }
     .tree, .preview {
       overflow: auto;
+      -webkit-overflow-scrolling: touch;
       flex: 1;
       padding: 10px 12px 16px;
       font-family: var(--mono);
-      font-size: 12.5px;
+      font-size: 13px;
       line-height: 1.45;
     }
     .preview {
       white-space: pre-wrap;
       word-break: break-word;
-      font-size: 12px;
+      font-size: 12.5px;
+      background: transparent;
+      margin: 0;
     }
     .empty {
       color: var(--mist);
-      padding: 24px 8px;
+      padding: 28px 8px;
       font-family: var(--serif);
-      font-size: 18px;
+      font-size: clamp(16px, 4vw, 20px);
+      line-height: 1.35;
     }
     .paper .empty { color: #7a6a52; }
-    .node { margin-left: 14px; }
+    .node { margin-left: 12px; }
     .node.root { margin-left: 0; }
     .row {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 2px 0;
+      min-height: 40px;
+      padding: 2px 4px;
+      border-radius: 8px;
     }
-    .row .name { color: var(--paper); }
-    .row .meta { color: var(--mist); font-size: 10px; margin-left: auto; }
+    .row:hover { background: #ffffff0a; }
+    .paper .row:hover { background: #0000000a; }
+    .row input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 18px; accent-color: var(--rust); }
+    .row .name {
+      color: var(--paper);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .row .meta {
+      color: var(--mist);
+      font-size: 10px;
+      margin-left: auto;
+      flex: 0 0 auto;
+    }
     .kind {
       font-size: 10px;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--brass);
+      flex: 0 0 auto;
     }
     .chips {
       display: flex;
@@ -252,39 +343,52 @@
       text-transform: uppercase;
       border: 1px solid #4a3f32;
       color: var(--mist);
-      padding: 3px 7px;
+      padding: 6px 9px;
+      min-height: 32px;
+      border-radius: 999px;
       cursor: pointer;
       background: transparent;
     }
-    .chip.on { border-color: var(--rust); color: var(--paper); }
+    .chip.on { border-color: var(--rust); color: var(--paper); background: #d4532814; }
     footer {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      gap: 12px;
-      padding: 10px 28px 16px;
+      gap: 10px;
       font-family: var(--mono);
       font-size: 12px;
       color: var(--mist);
       flex-wrap: wrap;
     }
-    .stats strong {
-      color: var(--paper);
-      font-weight: 600;
+    .stats strong { color: var(--paper); font-weight: 600; }
+    .dock {
+      display: none;
+      gap: 8px;
     }
-    .err {
-      color: #f0b4a8;
-      font-family: var(--mono);
-      font-size: 12px;
-      padding: 0 28px 8px;
-      min-height: 1em;
-    }
+    .dock button { flex: 1; }
     .spin { animation: mill 1.1s linear infinite; display: inline-block; }
     @keyframes mill { to { transform: rotate(360deg); } }
-    @media (max-width: 860px) {
-      main { grid-template-columns: 1fr; }
-      header { padding: 14px 16px 8px; }
-      .toolbar, .deck, footer, .err { padding-left: 16px; padding-right: 16px; }
+
+    @media (min-width: 860px) {
+      .path-row {
+        grid-template-columns: 1fr auto;
+      }
+      .path-actions { display: contents; }
+      input[type="text"] { font-size: 13px; }
+    }
+    @media (max-width: 859px) {
+      .privacy { display: none; }
+      .tabs { display: grid; }
+      main {
+        grid-template-columns: 1fr;
+      }
+      main.view-files .pane-dump { display: none; }
+      main.view-dump .pane-files { display: none; }
+      .pane-dump .pane-h .tools { display: none; }
+      .dock { display: flex; }
+      .app {
+        grid-template-rows: auto auto auto auto auto 1fr auto auto;
+      }
     }
     @media (prefers-reduced-motion: reduce) {
       .spin { animation: none; }
@@ -302,31 +406,38 @@
     </header>
     <p class="deck">Grind a folder into one LLM-ready file. Rust, Lean, NumPy, Office, PDFs — still on this machine.</p>
     <div class="toolbar">
-      <div>
-        <div class="path-row">
-          <input id="path" type="text" placeholder="/path/to/project or ~/src" spellcheck="false">
+      <div class="path-row">
+        <input id="path" type="text" placeholder="Folder path, or Browse" spellcheck="false" enterkeyhint="go" autocapitalize="off" autocorrect="off">
+        <div class="path-actions">
           <button id="browse" type="button">Browse</button>
           <button id="scan" class="primary" type="button">Scan</button>
         </div>
-        <div class="opts" style="margin-top:8px">
-          <label class="opt">format
-            <select id="format">
-              <option value="txt">txt</option>
-              <option value="md">md</option>
-              <option value="xml">xml</option>
-            </select>
-          </label>
-          <label class="opt"><input type="checkbox" id="gitignore" checked> gitignore</label>
-          <label class="opt"><input type="checkbox" id="hidden"> hidden</label>
-          <label class="opt"><input type="checkbox" id="archives"> archives</label>
-          <label class="opt"><input type="checkbox" id="notebook"> notebook outputs</label>
-          <label class="opt"><input type="checkbox" id="notree"> no tree</label>
-        </div>
+      </div>
+      <div class="opts">
+        <span class="seg" role="group" aria-label="format">
+          <button type="button" data-fmt="txt" class="on">txt</button>
+          <button type="button" data-fmt="md">md</button>
+          <button type="button" data-fmt="xml">xml</button>
+        </span>
+        <select id="format" hidden>
+          <option value="txt" selected>txt</option>
+          <option value="md">md</option>
+          <option value="xml">xml</option>
+        </select>
+        <label class="opt"><input type="checkbox" id="gitignore" checked> gitignore</label>
+        <label class="opt"><input type="checkbox" id="hidden"> hidden</label>
+        <label class="opt"><input type="checkbox" id="archives"> archives</label>
+        <label class="opt"><input type="checkbox" id="notebook"> notebook outputs</label>
+        <label class="opt"><input type="checkbox" id="notree"> no tree</label>
       </div>
     </div>
     <div class="err" id="err" role="status" aria-live="polite"></div>
-    <main>
-      <section class="pane">
+    <nav class="tabs" id="tabs" aria-label="Panes">
+      <button type="button" class="on" data-view="files">Files</button>
+      <button type="button" data-view="dump">Dump</button>
+    </nav>
+    <main id="stage" class="view-files">
+      <section class="pane pane-files">
         <div class="pane-h">
           <span>proof · files</span>
           <div class="tools">
@@ -338,7 +449,7 @@
         <div class="chips" id="chips"></div>
         <div class="tree" id="tree"><div class="empty">Browse to a folder in the file manager, or type a path, then scan.</div></div>
       </section>
-      <section class="pane paper">
+      <section class="pane paper pane-dump">
         <div class="pane-h">
           <span>galley · dump</span>
           <div class="tools">
@@ -350,6 +461,11 @@
         <pre class="preview" id="preview"><div class="empty">The dump lands here — txt, md, or xml.</div></pre>
       </section>
     </main>
+    <div class="dock" id="dock">
+      <button type="button" id="pulp2" class="primary" disabled>Pulp</button>
+      <button type="button" id="copy2" disabled>Copy</button>
+      <button type="button" id="download2" disabled>Download</button>
+    </div>
     <footer>
       <div class="stats" id="stats">idle</div>
       <div>pulp mill · 127.0.0.1</div>
@@ -389,6 +505,25 @@
     }
 
     function setErr(msg) { $("err").textContent = msg || ""; }
+
+    function setView(name) {
+      $("stage").className = "view-" + name;
+      document.querySelectorAll("#tabs button").forEach((b) => {
+        b.classList.toggle("on", b.dataset.view === name);
+      });
+    }
+
+    function setDumpActions(on) {
+      $("copy").disabled = !on;
+      $("copy2").disabled = !on;
+      $("download").disabled = !on;
+      $("download2").disabled = !on;
+    }
+
+    function setPulpEnabled(on) {
+      $("pulp").disabled = !on;
+      $("pulp2").disabled = !on;
+    }
 
     function buildTree(files) {
       const root = { name: "", dirs: new Map(), files: [] };
@@ -478,7 +613,7 @@
         cb.checked = state.selected.has(f.relative);
         cb.addEventListener("change", () => {
           if (cb.checked) state.selected.add(f.relative); else state.selected.delete(f.relative);
-          $("pulp").disabled = state.selected.size === 0;
+          setPulpEnabled(state.selected.size > 0);
           renderTree();
         });
         const name = document.createElement("span");
@@ -501,11 +636,11 @@
       tree.innerHTML = "";
       if (!state.files.length) {
         tree.innerHTML = '<div class="empty">Browse to a folder in the file manager, or type a path, then scan.</div>';
-        $("pulp").disabled = true;
+        setPulpEnabled(false);
         return;
       }
       renderNode(buildTree(state.files), tree, true);
-      $("pulp").disabled = state.selected.size === 0;
+      setPulpEnabled(state.selected.size > 0);
     }
 
     async function scan() {
@@ -521,6 +656,7 @@
         state.kindsOn = null;
         renderChips();
         renderTree();
+        setView("files");
         $("stats").innerHTML = "<strong>" + data.file_count + "</strong> files · " + human(data.bytes);
       } catch (e) {
         setErr(e.message);
@@ -535,15 +671,15 @@
       const o = opts();
       o.selected = [...state.selected];
       if (!o.selected.length) { setErr("Tick at least one file."); return; }
-      $("pulp").disabled = true;
+      setPulpEnabled(false);
       $("stats").innerHTML = '<span class="spin">+</span> pulping';
       try {
         const data = await api("/api/pack", o);
         state.dump = data.dump;
         state.filename = data.filename;
         $("preview").textContent = data.dump;
-        $("copy").disabled = false;
-        $("download").disabled = false;
+        setDumpActions(true);
+        setView("dump");
         $("stats").innerHTML =
           "<strong>" + data.files_extracted + "</strong> pulped · ~<strong>" +
           data.tokens_est + "</strong> tokens · " + data.elapsed_ms + "ms" +
@@ -552,7 +688,7 @@
         setErr(e.message);
         $("stats").textContent = "pulp failed";
       } finally {
-        $("pulp").disabled = state.selected.size === 0;
+        setPulpEnabled(state.selected.size > 0);
       }
     }
 
@@ -580,9 +716,39 @@
       }
     }
 
+    async function copyDump() {
+      try {
+        await navigator.clipboard.writeText(state.dump);
+        $("stats").textContent = "copied " + state.filename;
+      } catch (e) { setErr("clipboard: " + e.message); }
+    }
+
+    function downloadDump() {
+      const blob = new Blob([state.dump], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = state.filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    document.querySelectorAll("[data-fmt]").forEach((b) => {
+      b.onclick = () => {
+        $("format").value = b.dataset.fmt;
+        document.querySelectorAll("[data-fmt]").forEach((x) => x.classList.toggle("on", x === b));
+      };
+    });
+    document.querySelectorAll("#tabs button").forEach((b) => {
+      b.onclick = () => setView(b.dataset.view);
+    });
     $("browse").onclick = browse;
     $("scan").onclick = scan;
     $("pulp").onclick = pulp;
+    $("pulp2").onclick = pulp;
+    $("copy").onclick = copyDump;
+    $("copy2").onclick = copyDump;
+    $("download").onclick = downloadDump;
+    $("download2").onclick = downloadDump;
     $("path").addEventListener("keydown", (e) => { if (e.key === "Enter") scan(); });
     $("filter").addEventListener("input", renderTree);
     $("all").onclick = () => {
@@ -592,20 +758,6 @@
     $("none").onclick = () => {
       state.files.filter(visible).forEach((f) => state.selected.delete(f.relative));
       renderTree();
-    };
-    $("copy").onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(state.dump);
-        $("stats").textContent = "copied " + state.filename;
-      } catch (e) { setErr("clipboard: " + e.message); }
-    };
-    $("download").onclick = () => {
-      const blob = new Blob([state.dump], { type: "text/plain" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = state.filename;
-      a.click();
-      URL.revokeObjectURL(a.href);
     };
   </script>
 </body>
