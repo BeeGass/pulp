@@ -155,9 +155,7 @@ fn main() -> anyhow::Result<()> {
         if let Ok(cwd) = std::env::current_dir() {
             skip_paths.push(cwd.join(out));
         }
-        if let Ok(canon) = out.canonicalize() {
-            skip_paths.push(canon);
-        }
+        skip_paths = pulp::walk::normalize_skip_paths(&skip_paths);
     }
     let opts = Options {
         roots: cli.paths,
@@ -220,9 +218,10 @@ fn print_summary(stats: &pulp::Stats, show_tokens: bool) {
     let _ = show_tokens;
     let ms = duration_ms(stats.elapsed);
     eprint!(
-        "pulped {} files ({} text, ~{} tokens) in {ms}ms",
+        "pulped {} files ({} read, {} chars, ~{} tokens) in {ms}ms",
         stats.files_extracted,
-        human_bytes(stats.chars_emitted as u64),
+        human_bytes(stats.bytes_read),
+        stats.chars_emitted,
         stats.tokens_est
     );
     if stats.files_skipped > 0 {

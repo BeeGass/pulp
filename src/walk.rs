@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::overrides::OverrideBuilder;
@@ -14,6 +15,8 @@ use crate::error::Error;
 /// A file discovered under the pack roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkedFile {
+    /// Unique within one walk. Independent of display [`Self::relative`].
+    pub id: String,
     pub absolute: PathBuf,
     /// `/` separators, no leading `./`.
     pub relative: String,
@@ -21,11 +24,26 @@ pub struct WalkedFile {
     pub is_symlink: bool,
 }
 
+/// Walked files plus whether discovery stopped at a budget.
+#[derive(Debug, Clone)]
+pub struct WalkOutcome {
+    pub files: Vec<WalkedFile>,
+    pub truncated: bool,
+}
+
 /// Collect files under `opts.roots`, applying gitignore, include, and exclude.
 #[must_use = "collecting files has no effect unless the result is used"]
 pub fn collect(opts: &Options) -> Result<Vec<WalkedFile>, Error> {
+    Ok(collect_detailed(opts)?.files)
+}
+
+/// Like [`collect`], but reports whether the discovery budget stopped the walk.
+pub fn collect_detailed(opts: &Options) -> Result<WalkOutcome, Error> {
     if opts.roots.is_empty() {
-        return Ok(Vec::new());
+        return Ok(WalkOutcome {
+            files: Vec::new(),
+            truncated: false,
+        });
     }
 
     let multi = opts.roots.len() > 1;
@@ -35,36 +53,86 @@ pub fn collect(opts: &Options) -> Result<Vec<WalkedFile>, Error> {
         Some(build_globset(&opts.include)?)
     };
     let exclude = build_globset(&opts.exclude)?;
+    let skip_paths = normalize_skip_paths(&opts.skip_paths);
 
-    let mut files = Vec::new();
-    for root in &opts.roots {
+    let mut files: Vec<WalkedFile> = Vec::new();
+    let mut truncated = false;
+    for (idx, root) in opts.roots.iter().enumerate() {
         if !root.exists() {
             return Err(Error::path(root, "does not exist"));
         }
-        files.extend(collect_root(root, opts, multi, include.as_ref(), &exclude)?);
+        let remaining_entries = opts.max_entries.saturating_sub(files.len());
+        let remaining_bytes = opts
+            .max_total_bytes
+            .saturating_sub(files.iter().map(|f| f.size).sum::<u64>());
+        if remaining_entries == 0 || remaining_bytes == 0 {
+            truncated = true;
+            break;
+        }
+        let (chunk, hit) = collect_root(
+            root,
+            idx,
+            opts,
+            multi,
+            include.as_ref(),
+            &exclude,
+            WalkLimits {
+                max_entries: remaining_entries,
+                max_total_bytes: remaining_bytes,
+            },
+        )?;
+        files.extend(chunk);
+        if hit {
+            truncated = true;
+            break;
+        }
     }
     match &opts.selection {
         crate::config::Selection::AllEligible => {}
         crate::config::Selection::Only(ids) if ids.is_empty() => files.clear(),
         crate::config::Selection::Only(ids) => {
             let want: HashSet<&str> = ids.iter().map(String::as_str).collect();
-            files.retain(|file| want.contains(file.relative.as_str()));
+            files.retain(|file| {
+                want.contains(file.id.as_str()) || want.contains(file.relative.as_str())
+            });
         }
     }
-    if !opts.skip_paths.is_empty() {
-        files.retain(|file| !is_skipped_path(&file.absolute, &opts.skip_paths));
+    if !skip_paths.is_empty() {
+        files.retain(|file| !is_skipped_path(&file.absolute, &skip_paths));
     }
-    files.sort_by(|a, b| a.relative.cmp(&b.relative));
-    Ok(files)
+    files.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(WalkOutcome { files, truncated })
+}
+
+/// Canonicalize skip destinations once so each candidate is compared cheaply.
+#[must_use]
+pub fn normalize_skip_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for path in paths {
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if seen.insert(key.clone()) {
+            out.push(key);
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+struct WalkLimits {
+    max_entries: usize,
+    max_total_bytes: u64,
 }
 
 fn collect_root(
     root: &Path,
+    root_idx: usize,
     opts: &Options,
     multi: bool,
     include: Option<&GlobSet>,
     exclude: &GlobSet,
-) -> Result<Vec<WalkedFile>, Error> {
+    limits: WalkLimits,
+) -> Result<(Vec<WalkedFile>, bool), Error> {
     let meta = fs::symlink_metadata(root).map_err(|err| Error::path(root, err.to_string()))?;
     let is_symlink = meta.file_type().is_symlink();
     let followed = if is_symlink {
@@ -75,31 +143,32 @@ fn collect_root(
 
     if followed.is_file() {
         if is_symlink && !opts.follow_links {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
-        return Ok(vec![walked_file(
-            root,
-            root,
-            multi,
-            followed.len(),
-            is_symlink,
-        )]);
+        let file = walked_file(root, root, root_idx, multi, followed.len(), is_symlink);
+        let truncated = 1 > limits.max_entries || file.size > limits.max_total_bytes;
+        if truncated {
+            return Ok((Vec::new(), true));
+        }
+        return Ok((vec![file], false));
     }
 
     if !followed.is_dir() {
         return Err(Error::path(root, "not a file or directory"));
     }
 
-    walk_dir(root, opts, multi, include, exclude)
+    walk_dir(root, root_idx, opts, multi, include, exclude, limits)
 }
 
 fn walk_dir(
     root: &Path,
+    root_idx: usize,
     opts: &Options,
     multi: bool,
     include: Option<&GlobSet>,
     exclude: &GlobSet,
-) -> Result<Vec<WalkedFile>, Error> {
+    limits: WalkLimits,
+) -> Result<(Vec<WalkedFile>, bool), Error> {
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(!opts.hidden)
@@ -136,7 +205,11 @@ fn walk_dir(
     let include = include.cloned().map(Arc::new);
     let exclude = Arc::new(exclude.clone());
     let follow_links = opts.follow_links;
+    let follow_archives = opts.follow_archives;
     let root_buf = root.to_path_buf();
+    let count = Arc::new(AtomicUsize::new(0));
+    let bytes = Arc::new(AtomicU64::new(0));
+    let truncated = Arc::new(AtomicBool::new(false));
 
     let (tx, rx) = crossbeam_channel::unbounded::<WalkedFile>();
     builder.build_parallel().run(|| {
@@ -144,6 +217,9 @@ fn walk_dir(
         let include = include.clone();
         let exclude = Arc::clone(&exclude);
         let root_buf = root_buf.clone();
+        let count = Arc::clone(&count);
+        let bytes = Arc::clone(&bytes);
+        let truncated = Arc::clone(&truncated);
         Box::new(move |result| {
             let Ok(entry) = result else {
                 return WalkState::Continue;
@@ -163,10 +239,43 @@ fn walk_dir(
                 Err(_) => return WalkState::Continue,
             };
             let relative = relative_for(&root_buf, entry.path(), multi);
-            if !keep_relative(&relative, include.as_deref(), exclude.as_ref()) {
+            if !keep_for_walk(
+                &relative,
+                include.as_deref(),
+                exclude.as_ref(),
+                follow_archives,
+            ) {
                 return WalkState::Continue;
             }
+            if count.load(Ordering::Relaxed) >= limits.max_entries {
+                truncated.store(true, Ordering::Relaxed);
+                return WalkState::Quit;
+            }
+            loop {
+                let cur = bytes.load(Ordering::Relaxed);
+                if cur.saturating_add(size) > limits.max_total_bytes {
+                    truncated.store(true, Ordering::Relaxed);
+                    return WalkState::Quit;
+                }
+                if bytes
+                    .compare_exchange_weak(
+                        cur,
+                        cur.saturating_add(size),
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+            let n = count.fetch_add(1, Ordering::Relaxed);
+            if n >= limits.max_entries {
+                truncated.store(true, Ordering::Relaxed);
+                return WalkState::Quit;
+            }
             let file = WalkedFile {
+                id: file_id(root_idx, multi, &relative),
                 absolute: make_absolute(entry.path()),
                 relative,
                 size,
@@ -181,16 +290,58 @@ fn walk_dir(
     drop(tx);
 
     let mut files: Vec<WalkedFile> = rx.iter().collect();
-    files.retain(|file| keep_relative(&file.relative, include.as_deref(), exclude.as_ref()));
-    Ok(files)
+    files.retain(|file| {
+        keep_for_walk(
+            &file.relative,
+            include.as_deref(),
+            exclude.as_ref(),
+            follow_archives,
+        )
+    });
+    Ok((files, truncated.load(Ordering::Relaxed)))
 }
 
-fn walked_file(root: &Path, path: &Path, multi: bool, size: u64, is_symlink: bool) -> WalkedFile {
+fn walked_file(
+    root: &Path,
+    path: &Path,
+    root_idx: usize,
+    multi: bool,
+    size: u64,
+    is_symlink: bool,
+) -> WalkedFile {
+    let relative = relative_for(root, path, multi);
     WalkedFile {
+        id: file_id(root_idx, multi, &relative),
         absolute: make_absolute(path),
-        relative: relative_for(root, path, multi),
+        relative,
         size,
         is_symlink,
+    }
+}
+
+fn file_id(root_idx: usize, multi: bool, relative: &str) -> String {
+    if multi {
+        format!("{root_idx}:{relative}")
+    } else {
+        relative.to_string()
+    }
+}
+
+/// Whether a filesystem path may enter the pipeline (emit or traverse).
+pub(crate) fn keep_for_walk(
+    relative: &str,
+    include: Option<&GlobSet>,
+    exclude: &GlobSet,
+    follow_archives: bool,
+) -> bool {
+    if glob_matches(exclude, relative) {
+        return false;
+    }
+    match include {
+        None => true,
+        Some(set) => {
+            glob_matches(set, relative) || (follow_archives && looks_like_archive(relative))
+        }
     }
 }
 
@@ -202,6 +353,11 @@ pub(crate) fn keep_relative(relative: &str, include: Option<&GlobSet>, exclude: 
         None => true,
         Some(set) => glob_matches(set, relative),
     }
+}
+
+fn looks_like_archive(relative: &str) -> bool {
+    let n = relative.to_ascii_lowercase();
+    n.ends_with(".zip") || n.ends_with(".tar") || n.ends_with(".tgz") || n.ends_with(".tar.gz")
 }
 
 fn glob_matches(set: &GlobSet, relative: &str) -> bool {
@@ -395,6 +551,62 @@ mod tests {
         let files = collect(&opts).unwrap();
         let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
         assert_eq!(rels, vec!["Basic.lean", "keep.rs"]);
+        assert_eq!(files[0].id, "Basic.lean");
+    }
+
+    #[test]
+    fn test_collect_with_two_same_basename_roots_returns_distinct_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("one/repo");
+        let b = dir.path().join("two/repo");
+        write(&a.join("src/lib.rs"), b"fn a() {}\n");
+        write(&b.join("src/lib.rs"), b"fn b() {}\n");
+        let opts = Options {
+            roots: vec![a, b],
+            ..Options::default()
+        };
+        let files = collect(&opts).unwrap();
+        let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids.iter().all(|id| id.contains(':')), "{ids:?}");
+    }
+
+    #[test]
+    fn test_collect_with_include_rs_keeps_zip_when_archives_follow() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("src/lib.rs"), b"fn x() {}\n");
+        write(&dir.path().join("bundle.zip"), b"PK\x03\x04");
+        write(&dir.path().join("notes.txt"), b"hi\n");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            include: vec!["*.rs".into()],
+            follow_archives: true,
+            exclude: Vec::new(),
+            ..Options::default()
+        };
+        let files = collect(&opts).unwrap();
+        let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
+        assert!(rels.contains(&"src/lib.rs"), "{rels:?}");
+        assert!(rels.contains(&"bundle.zip"), "{rels:?}");
+        assert!(!rels.contains(&"notes.txt"), "{rels:?}");
+    }
+
+    #[test]
+    fn test_collect_detailed_with_max_entries_stops_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.rs"), b"fn a() {}\n");
+        write(&dir.path().join("b.rs"), b"fn b() {}\n");
+        write(&dir.path().join("c.rs"), b"fn c() {}\n");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            max_entries: 1,
+            exclude: Vec::new(),
+            ..Options::default()
+        };
+        let outcome = collect_detailed(&opts).unwrap();
+        assert!(outcome.truncated);
+        assert_eq!(outcome.files.len(), 1);
     }
 
     #[test]

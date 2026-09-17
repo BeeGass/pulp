@@ -18,13 +18,7 @@ pub fn extract(bytes: &[u8]) -> Result<String, Error> {
     }
 
     match serde_json::from_str::<Value>(&decoded) {
-        Ok(value) => {
-            if decoded.len() <= MAX_PRETTY_BYTES {
-                serde_json::to_string_pretty(&value).map_err(|e| Error::msg(e.to_string()))
-            } else {
-                Ok(decoded)
-            }
-        }
+        Ok(value) => serde_json::to_string_pretty(&value).map_err(|e| Error::msg(e.to_string())),
         Err(_) => {
             if is_jsonl(&decoded) {
                 Ok(pretty_jsonl(&decoded))

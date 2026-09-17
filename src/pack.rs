@@ -29,11 +29,36 @@ pub enum FileStatus {
 /// One file (or archive member) in a [`Packed`] dump.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackedFile {
+    pub id: String,
     pub relative: String,
     pub kind: Kind,
     pub size: u64,
     pub text: String,
     pub status: FileStatus,
+}
+
+impl FileStatus {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Extracted => "extracted",
+            Self::SkippedBinary => "skipped_binary",
+            Self::TooLarge => "too_large",
+            Self::SkippedArchive => "skipped_archive",
+            Self::Error(_) => "error",
+        }
+    }
+
+    #[must_use]
+    pub fn message(&self, size: u64) -> String {
+        match self {
+            Self::Extracted => String::new(),
+            Self::SkippedBinary => format!("binary file, {size} bytes"),
+            Self::TooLarge => format!("{size} bytes exceeds the size limit"),
+            Self::SkippedArchive => "archive not expanded".into(),
+            Self::Error(err) => err.clone(),
+        }
+    }
 }
 
 /// Totals for a pack run.
@@ -255,6 +280,7 @@ fn pack_one(
     if should_skip_binary(kind, bytes, opts.skip_binaries) {
         return PackedFile {
             text: format!("[binary file, {size} bytes]"),
+            id: relative.clone(),
             relative,
             kind,
             size,
@@ -266,6 +292,7 @@ fn pack_one(
             text: format!(
                 "[archive {relative}, {size} bytes; pass --archives to expand nested archives]"
             ),
+            id: relative.clone(),
             relative,
             kind,
             size,
@@ -274,6 +301,7 @@ fn pack_one(
     }
     match extract(&relative, bytes, kind, extract_opts) {
         Ok(text) => PackedFile {
+            id: relative.clone(),
             relative,
             kind,
             size,
@@ -376,6 +404,7 @@ fn list_only_file(entry: &ManifestEntry, opts: &Options) -> PackedFile {
         FileStatus::Extracted
     };
     PackedFile {
+        id: entry.id.clone(),
         relative: entry.relative.clone(),
         kind,
         size: entry.size,
@@ -492,6 +521,7 @@ fn normalize_rel(path: &str) -> String {
 fn packed_too_large(relative: String, kind: Kind, size: u64, limit: u64) -> PackedFile {
     PackedFile {
         text: format!("[too large: {size} bytes; limit {limit} bytes]"),
+        id: relative.clone(),
         relative,
         kind,
         size,
@@ -502,6 +532,7 @@ fn packed_too_large(relative: String, kind: Kind, size: u64, limit: u64) -> Pack
 fn packed_error(relative: String, kind: Kind, size: u64, message: String) -> PackedFile {
     PackedFile {
         text: format!("[error extracting {relative}: {message}]"),
+        id: relative.clone(),
         relative,
         kind,
         size,

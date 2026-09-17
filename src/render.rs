@@ -32,7 +32,8 @@ pub fn write_tree<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::R
         }
         OutputFormat::Xml => {
             writeln!(w, "<document_tree>")?;
-            writeln!(w, "{}", xml_escape(&packed.tree))?;
+            write_xml_escaped(w, &packed.tree)?;
+            writeln!(w)?;
             writeln!(w, "</document_tree>")?;
         }
     }
@@ -94,14 +95,18 @@ fn write_xml<W: Write>(w: &mut W, packed: &Packed) -> io::Result<()> {
     writeln!(w, "<documents>")?;
     if !packed.tree.is_empty() {
         writeln!(w, "<document_tree>")?;
-        writeln!(w, "{}", xml_escape(&packed.tree))?;
+        write_xml_escaped(w, &packed.tree)?;
+        writeln!(w)?;
         writeln!(w, "</document_tree>")?;
     }
     for (i, file) in packed.files.iter().enumerate() {
         writeln!(w, "<document index=\"{}\">", i + 1)?;
-        writeln!(w, "<source>{}</source>", xml_escape(&file.relative))?;
+        write!(w, "<source>")?;
+        write_xml_escaped(w, &file.relative)?;
+        writeln!(w, "</source>")?;
         writeln!(w, "<document_content>")?;
-        writeln!(w, "{}", xml_escape(&file.text))?;
+        write_xml_escaped(w, &file.text)?;
+        writeln!(w)?;
         writeln!(w, "</document_content>")?;
         writeln!(w, "</document>")?;
     }
@@ -160,17 +165,22 @@ fn fence_lang(path: &str, kind: crate::classify::Kind, source_mode: bool) -> &'s
     }
 }
 
-fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
+fn write_xml_escaped<W: Write>(w: &mut W, s: &str) -> io::Result<()> {
+    let bytes = s.as_bytes();
+    let mut start = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        let esc: &[u8] = match b {
+            b'&' => b"&amp;",
+            b'<' => b"&lt;",
+            b'>' => b"&gt;",
+            _ => continue,
+        };
+        w.write_all(&bytes[start..i])?;
+        w.write_all(esc)?;
+        start = i + 1;
     }
-    out
+    w.write_all(&bytes[start..])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -185,6 +195,7 @@ mod tests {
         let packed = Packed {
             tree: "src\n└── lib.rs\n".into(),
             files: vec![PackedFile {
+                id: "src/lib.rs".into(),
                 relative: "src/lib.rs".into(),
                 kind: Kind::Text,
                 size: 3,

@@ -32,8 +32,8 @@ pub struct ScanManifest {
 
 /// Walk roots with `opts` and record every eligible entry once.
 pub fn scan_manifest(opts: &Options) -> Result<ScanManifest, Error> {
-    let walked = walk::collect(opts)?;
-    let (entries, truncated) = entries_from_walked(walked, opts);
+    let walked = walk::collect_detailed(opts)?;
+    let entries = entries_from_walked(walked.files, opts);
     let bytes = entries.iter().map(|e| e.size).sum();
     let root = opts
         .roots
@@ -44,39 +44,29 @@ pub fn scan_manifest(opts: &Options) -> Result<ScanManifest, Error> {
         root,
         entries,
         bytes,
-        truncated,
+        truncated: walked.truncated,
     })
 }
 
-fn entries_from_walked(mut walked: Vec<WalkedFile>, opts: &Options) -> (Vec<ManifestEntry>, bool) {
-    let mut truncated = false;
-    if walked.len() > opts.max_entries {
-        walked.truncate(opts.max_entries);
-        truncated = true;
-    }
-    let mut total = 0u64;
-    let mut entries = Vec::with_capacity(walked.len());
-    for wf in walked {
-        if total.saturating_add(wf.size) > opts.max_total_bytes {
-            truncated = true;
-            continue;
-        }
-        total = total.saturating_add(wf.size);
-        let kind = classify(&wf.absolute, None);
-        let oversized = wf.size > opts.max_file_size;
-        entries.push(ManifestEntry {
-            id: wf.relative.clone(),
-            relative: wf.relative.clone(),
-            language: language_label(&wf.absolute),
-            default_on: is_default_selected(&wf.absolute, kind) && !oversized,
-            oversized,
-            is_symlink: wf.is_symlink,
-            absolute: wf.absolute,
-            size: wf.size,
-            kind,
-        });
-    }
-    (entries, truncated)
+fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestEntry> {
+    walked
+        .into_iter()
+        .map(|wf| {
+            let kind = classify(&wf.absolute, None);
+            let oversized = wf.size > opts.max_file_size;
+            ManifestEntry {
+                id: wf.id,
+                relative: wf.relative.clone(),
+                language: language_label(&wf.absolute),
+                default_on: is_default_selected(&wf.absolute, kind) && !oversized,
+                oversized,
+                is_symlink: wf.is_symlink,
+                absolute: wf.absolute,
+                size: wf.size,
+                kind,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
