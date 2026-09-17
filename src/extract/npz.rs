@@ -26,10 +26,10 @@ pub fn extract_npy(bytes: &[u8]) -> Result<String, Error> {
 /// noted rather than treated as opaque binary.
 pub fn extract_npz(bytes: &[u8]) -> Result<String, Error> {
     let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(zip_error)?;
-    let mut members: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut total = 0u64;
+    let mut catalog: Vec<(usize, String, u64)> = Vec::new();
+    let mut claimed_total = 0u64;
     for i in 0..archive.len() {
-        if members.len() >= MAX_ARCHIVE_FILES {
+        if catalog.len() >= MAX_ARCHIVE_FILES {
             break;
         }
         let file = match archive.by_index(i) {
@@ -46,29 +46,37 @@ pub fn extract_npz(bytes: &[u8]) -> Result<String, Error> {
         let name = normalize_member_name(raw_name);
         let claimed = file.size();
         if claimed > MAX_ARCHIVE_UNCOMPRESSED
-            || total.saturating_add(claimed) > MAX_ARCHIVE_UNCOMPRESSED
+            || claimed_total.saturating_add(claimed) > MAX_ARCHIVE_UNCOMPRESSED
         {
             continue;
         }
-        let mut data = Vec::new();
-        file.take(claimed).read_to_end(&mut data)?;
-        total = total.saturating_add(data.len() as u64);
-        members.push((name, data));
+        claimed_total = claimed_total.saturating_add(claimed);
+        catalog.push((i, name, claimed));
     }
-    members.sort_by(|a, b| a.0.cmp(&b.0));
+    catalog.sort_by(|a, b| a.1.cmp(&b.1));
 
     let mut sections = Vec::new();
-    for (name, data) in members {
-        let display = npy_display_name(&name);
-        if display.ends_with(".npy") {
-            let text = extract_npy(&data)?;
-            sections.push(format!("## {display}\n{text}"));
-        } else {
-            sections.push(format!(
-                "[skipped non-npy entry {name}, {} bytes]",
-                data.len()
-            ));
+    let mut total = 0u64;
+    for (index, name, claimed) in catalog {
+        if total.saturating_add(claimed) > MAX_ARCHIVE_UNCOMPRESSED {
+            continue;
         }
+        let section = {
+            let file = match archive.by_index(index) {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+            let mut data = Vec::new();
+            file.take(claimed).read_to_end(&mut data)?;
+            total = total.saturating_add(data.len() as u64);
+            let display = npy_display_name(&name);
+            if display.ends_with(".npy") {
+                format!("## {display}\n{}", extract_npy(&data)?)
+            } else {
+                format!("[skipped non-npy entry {name}, {} bytes]", data.len())
+            }
+        };
+        sections.push(section);
     }
     Ok(sections.join("\n\n"))
 }
@@ -706,6 +714,19 @@ mod tests {
         assert!(text.contains("descr: <f4"));
         assert!(text.contains("preview: [1.0, 2.0]"));
         assert!(text.contains("[skipped non-npy entry readme.txt, 2 bytes]"));
+    }
+
+    #[test]
+    fn test_extract_npz_with_two_npy_members_returns_sorted_sections() {
+        let a = build_npy_v1("<f4", false, &[1], &f32_payload(&[1.0]));
+        let b = build_npy_v1("<f4", false, &[1], &f32_payload(&[2.0]));
+        let zip = write_zip(&[("z.npy", a.as_slice()), ("a.npy", b.as_slice())]);
+        let text = extract_npz(&zip).unwrap();
+        let a_at = text.find("## a.npy").expect("a.npy");
+        let z_at = text.find("## z.npy").expect("z.npy");
+        assert!(a_at < z_at, "{text}");
+        assert!(text.contains("preview: [2.0]"));
+        assert!(text.contains("preview: [1.0]"));
     }
 
     #[test]
