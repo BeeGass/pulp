@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#120f0c">
+  <title>pulp — LLM-ready dumps from local folders</title>
+  <meta name="description" content="Pulp grinds a local folder into one LLM-ready text file. Runs on your machine. Browser mill coming — files stay in the tab.">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <a class="mark" href="/">pulp</a>
+      <nav class="nav">
+        <a href="#install">Install</a>
+        <a href="/mill/">Browser mill</a>
+        <a href="https://github.com/BeeGass/pulp">GitHub</a>
+      </nav>
+    </header>
+
+    <main class="hero">
+      <h1>Grind a folder into one LLM-ready dump.</h1>
+      <p class="lede">Pulp walks a tree in parallel, pulls text out of mixed documents, and writes one file you can hand a model. Paper pulp. Juice. Disposable reading.</p>
+      <div class="privacy"><strong>Local first.</strong> Files never leave the machine. The mill binds localhost only. A browser WASM mill is next — still no upload.</div>
+      <div class="actions">
+        <a class="btn btn-primary" href="#install">Install</a>
+        <a class="btn btn-ghost" href="https://github.com/BeeGass/pulp">View on GitHub</a>
+        <a class="btn btn-ghost" href="/mill/">Browser mill (soon)</a>
+      </div>
+    </main>
+
+    <section>
+      <h2>What it does</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>Mixed documents</h3>
+          <p>Code, Markdown, HTML, JSON/CSV, PDF, Office, notebooks, archives — extracted into one dump.</p>
+        </article>
+        <article class="card">
+          <h3>Formats you pick</h3>
+          <p>Plain text, Markdown, or Claude-style XML. Layout follows <code>-f</code> or the <code>-o</code> extension.</p>
+        </article>
+        <article class="card">
+          <h3>Quiet by default</h3>
+          <p>Skips <code>node_modules</code>, <code>target</code>, venvs, secrets, and other noisy trees unless you say otherwise.</p>
+        </article>
+        <article class="card">
+          <h3>Local mill</h3>
+          <p><code>pulp ui</code> opens a localhost mill at <code>127.0.0.1:8747</code>. Nothing is uploaded.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>Install</h2>
+      <pre><code>cargo install --git https://github.com/BeeGass/pulp --locked</code></pre>
+      <p class="note">Requires Rust 1.85+. The GitHub repo must be public (or you need access) for <code>--git</code> install to work.</p>
+      <pre style="margin-top:16px"><code>pulp -o dump.xml .
+pulp ui</code></pre>
+    </section>
+
+    <section>
+      <h2>Browser mill</h2>
+      <p>The public site will host an in-browser mill at <a href="/mill/">/mill</a>. Same privacy story as localhost: packing runs in WebAssembly inside your tab. No server-side upload/packer.</p>
+      <p class="note">Design notes live in <code>docs/wasm-mill.md</code> in the repo.</p>
+    </section>
+
+    <footer class="footer">
+      <span>MIT · Bryan Gass</span>
+      <span><a href="https://onlygass.dev">onlygass.dev</a> · <a href="https://github.com/BeeGass/pulp">source</a></span>
+    </footer>
+  </div>
+</body>
+</html>

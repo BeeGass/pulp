@@ -12,6 +12,17 @@ cargo install --git https://github.com/BeeGass/pulp --locked
 
 Requires Rust 1.85 or newer.
 
+
+## Website
+
+Product site: [pulp.onlygass.dev](https://pulp.onlygass.dev) (landing + install). Static sources live in [`site/`](site/).
+
+The in-browser WASM mill is planned for `/mill` (see [`docs/wasm-mill.md`](docs/wasm-mill.md)). Until then, use the local mill:
+
+```
+pulp ui
+```
+
 ## xtask (per machine / OS)
 
 `cargo xtask` picks jobs and compiler env from the box you are on:
