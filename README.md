@@ -1,157 +1,146 @@
 # pulp
 
-Pulp grinds a local folder (or zip/tar) into one LLM-ready text file.
+Grind a local folder into one LLM-ready dump.
 
-The name is a triple entendre: paper pulp; the verb *to pulp* (extract the juice); and pulp fiction — disposable reading you hand a model. It walks the tree in parallel, pulls text out of mixed documents, and writes one dump. Everything runs on the machine you point it at. Files never leave the machine.
+Pulp walks a tree in parallel, pulls text out of mixed documents, and writes a single file you can hand a model. The name is a triple entendre: paper pulp; the verb *to pulp* (extract the juice); and pulp fiction — disposable reading.
 
-## Install
+**Files never leave the machine.** There is no upload, no account, and no cloud packer. The mill binds `127.0.0.1` only.
+
+Product site: [pulp.onlygass.dev](https://pulp.onlygass.dev) · Source: [github.com/BeeGass/pulp](https://github.com/BeeGass/pulp)
 
 ```
 cargo install --git https://github.com/BeeGass/pulp --locked
+pulp ui
+pulp -o dump.xml .
 ```
 
-Requires Rust 1.85 or newer.
+Requires [Rust](https://rustup.rs/) 1.85 or newer.
 
+---
 
-## Website
-
-Product site: [pulp.onlygass.dev](https://pulp.onlygass.dev) (landing + install). Static sources live in [`site/`](site/).
-
-The in-browser WASM mill is planned for `/mill` (see [`docs/wasm-mill.md`](docs/wasm-mill.md)). Until then, use the local mill:
+## Local mill
 
 ```
 pulp ui
 ```
 
-## xtask (per machine / OS)
+Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is busy). Browse picks a folder in the OS file manager. Tick files, choose **Preserve source** or **Readable text**, pick XML / Markdown / plain text, then Pulp.
 
-`cargo xtask` picks jobs and compiler env from the box you are on:
-
-| Hostname | OS | Notes |
-| --- | --- | --- |
-| `Matrix` | macOS aarch64 | M1 Pro laptop. Uses Command Line Tools clang (Xcode license is unsigned). |
-| `manifold` | Linux x86_64 | 9950X3D. Caps cargo at 24 jobs. Release builds use `target-cpu=native`. |
-| `tensor` | Linux x86_64 | 3900X. Caps at 16 jobs. |
-| `jacobian` | Linux aarch64 | Pi 5. Caps at 4 jobs. |
-| `hessian` | Linux aarch64 | Pi 4. Caps at 2 jobs. |
+- Checkbox includes a file; the filename inspects a capped preview; the twist expands a folder.
+- Changing format or the directory map re-renders the last extraction. Copy and Download stay off while the dump is out of date.
+- One pack job at a time. Cancel asks it to stop between files.
+- Lockfiles, images, and virtualenv trees (`.venv/`, `venv/`) start unchecked.
+- Nothing is uploaded. POSTs carry a per-process session token.
 
 ```
-cargo xtask doctor          # who we think this machine is
-cargo xtask build           # debug
-cargo xtask build --release
+pulp ui --port 9000 --no-open    # headless or remote; then open the URL yourself
+```
+
+An in-browser WASM mill is planned for [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill). Until then, use `pulp ui` on the machine that has the files.
+
+---
+
+## On your machine
+
+Pulp is meant to feel the same on a laptop, a workstation, a Pi-class ARM board, or a headless box. It detects OS and CPU count; you do not need a named host.
+
+| You are on | What you get |
+| --- | --- |
+| **macOS** (Apple Silicon or Intel) | `pulp ui` Browse opens Finder. Building from source uses the Command Line Tools compiler when that SDK is present, so an unsigned Xcode license does not block the link. |
+| **Linux** (x86_64 or aarch64) | Browse uses `zenity`, then `kdialog`. Install one of those for a graphical picker; otherwise type a path. Works on desktops, servers, and ARM boards (Raspberry Pi and similar). |
+| **Windows** (x86_64 or ARM) | Browse opens the Explorer folder dialog. Paths can be typed if the dialog cannot open. |
+| **Headless / SSH** | Skip the browser with `pulp ui --no-open` and open `http://127.0.0.1:…` from a local forward, or stay on the CLI (`pulp -o dump.xml .`). |
+| **Any other OS** | The CLI still packs if the crate builds. The graphical folder picker is macOS, Linux, or Windows only. |
+
+**Hardware.** Walk and extract use as many threads as the OS reports, unless you pass `-j N`. A phone-class ARM board, a 4-core laptop, and a 32-thread desktop all work; more cores mainly shorten large trees. Release builds on macOS and Linux can use the host CPU (`cargo xtask build --release`). PDF, Office, EPUB, and RTF extractors run in a child `pulp` process with a timeout so a stuck parser does not take down the mill.
+
+**Building from source.** `cargo xtask` sets job count from available parallelism and, on macOS, prefers Command Line Tools clang when it is installed. Named-lab overrides exist for a few boxes; everyone else is `unknown` and still gets a sensible default. `PULP_HOST` is only needed if you are deliberately pretending to be one of those boxes.
+
+```
+cargo xtask doctor    # OS, arch, detected jobs
+cargo xtask build
 cargo xtask test
-cargo xtask clippy
-cargo xtask fmt
-cargo xtask ui              # mill, with this host's env
-cargo xtask run -- ui --no-open
+cargo xtask ui
 ```
 
-Override the hostname with `PULP_HOST=manifold` if the kernel name is not the box name.
+---
 
-## Usage
+## CLI
 
 ```
-pulp                  # stdout, plain txt
-pulp -o dump.txt
-pulp -o dump.md       # markdown inferred from extension
-pulp -o dump.xml
+pulp                         # cwd → stdout, plain text
+pulp -o dump.xml .
+pulp -o dump.md src          # markdown from the extension
 pulp -f md src
 pulp --archives project.zip
+pulp --list src
+pulp --tree none -o dump.txt
 ```
 
-Omit `-o` to write to stdout. `-f` selects the dump layout; if `-f` is omitted, the layout is inferred from the `-o` extension (`.txt`, `.md`, `.xml`) and otherwise defaults to plain text.
+Omit `-o` to write to stdout. If `-f` is omitted, layout follows the `-o` extension (`.txt`, `.md`, `.xml`) and otherwise defaults to plain text.
+
+| How to select | Layout |
+| --- | --- |
+| `-f txt` / `-o dump.txt` | `FILE:` headers and an optional directory map |
+| `-f md` / `-o dump.md` | `## path` headings and fenced code |
+| `-f xml` / `-o dump.xml` | `<documents>` / `<document_content>` |
+
+Unless `--quiet`, stderr looks like:
 
 ```
-pulp --list src                 # relative paths only
-pulp --tree none -o dump.txt    # files, no directory map
-pulp --hidden --no-gitignore .
-pulp ui                         # local mill at http://127.0.0.1:8747
+pulped 12 files (48.2 KiB read, 12100 chars, ~12100 tokens) in 35ms
 ```
 
-## Output formats
-
-| How to select | Layout | Shape |
-| --- | --- | --- |
-| `-f txt` / `-f plain` / `-o dump.txt` | Plain | `FILE:` headers, optional directory map |
-| `-f md` / `-f markdown` / `-o dump.md` | Markdown | `## path` headings and fenced code |
-| `-f xml` / `-o dump.xml` | XML | Claude-style `<documents>` / `<document_content>` |
+---
 
 ## What gets pulped
 
-| Kind | Extensions | Notes |
-| --- | --- | --- |
-| Rust | `.rs` | Source text (not excluded by default) |
-| Lean | `.lean` | Source text (not excluded by default) |
-| NumPy | `.npy`, `.npz` | Array metadata and a small preview; not treated as binary |
-| HTML | `.html`, `.htm` | Converted to text |
-| XML | `.xml` | Tags stripped to readable text |
-| JSON | `.json`, `.jsonl` | Pretty-printed when possible |
-| CSV | `.csv`, `.tsv` | Tabular text |
-| PDF | `.pdf` | Extracted text |
-| Word | `.docx` | Document text |
-| PowerPoint | `.pptx` | Slide text |
-| Excel | `.xlsx` | Sheet text |
-| OpenDocument | `.odt` | Document text |
-| EPUB | `.epub` | Chapter text |
-| RTF | `.rtf` | Converted to text |
-| Jupyter | `.ipynb` | Cells; pass `--notebook-outputs` to keep outputs |
-| Archives | `.zip`, `.tar`, `.tar.gz` | Root archives always expand; nested members need `--archives` |
+| Kind | Notes |
+| --- | --- |
+| Source | Rust, Lean, Python, TypeScript, TOML, Markdown, and other text |
+| NumPy | `.npy` / `.npz` metadata and a small preview (not treated as binary) |
+| HTML / XML / JSON | Readable text, or decoded source with `--source` |
+| CSV / TSV | Tabular text |
+| PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, RTF | Extracted text |
+| Jupyter | Cells; `--notebook-outputs` keeps outputs |
+| Zip / tar | A root archive always expands; nested members need `--archives` |
 
-Other text sources (Python, TypeScript, TOML, Markdown, …) are included as plain files. Binary media (images, audio, wasm, …) is skipped unless `--binaries`.
+Binary media (images, audio, wasm, …) is skipped unless `--binaries`.
 
-## Default excludes
+Noisy trees stay out even when they are tracked: `node_modules/`, `target/`, `dist/`, `build/`, virtualenvs, `__pycache__/`, VCS dirs, lockfiles, `.env`, keys, object files, and similar. Rust `.rs`, Lean `.lean`, and NumPy arrays next to a skipped `target/` are still included.
 
-Noisy trees and secrets stay out even when they are tracked or the folder is not a git repo:
+`.gitignore` is honored unless `--no-gitignore`. `--exclude GLOB` adds patterns. `--no-default-excludes` starts from an empty deny list.
 
-`node_modules/`, `target/`, `dist/`, `build/`, virtualenvs, `__pycache__/`, VCS dirs, lockfiles, `.env` / `.env.*`, `*.pem`, `*.key`, object files, and similar.
-
-**Not** excluded: Rust sources (`.rs`), Lean sources (`.lean`), NumPy arrays (`.npy`, `.npz`). `target/` is skipped; the `.rs` files next to it are not.
-
-`--exclude GLOB` appends extra patterns. `--no-default-excludes` starts from an empty list, then applies `--exclude`. `.gitignore` is honored unless `--no-gitignore`.
+---
 
 ## Options
 
 | Flag | Meaning |
 | --- | --- |
 | `-o, --output FILE` | Write the dump here (default: stdout) |
-| `-f, --format FMT` | `txt`/`plain`, `md`/`markdown`, `xml` |
+| `-f, --format FMT` | `txt` / `md` / `xml` |
 | `--tree MODE` | `selected` (default), `full`, `none` |
 | `--no-tree` | Same as `--tree none` |
-| `-j, --jobs N` | Parallelism (`0` = Rayon default) |
-| `--max-file-size SIZE` | Cap per file (default `8MiB`; `8000`, `8k`, `8KiB`, `8m`, `1g`) |
+| `-j, --jobs N` | Parallelism (`0` = all available cores) |
+| `--max-file-size SIZE` | Cap per file (default `8MiB`) |
 | `--max-entries N` | Cap discovered files (default `100000`) |
-| `--max-total-bytes SIZE` | Cap summed input size (default `1GiB`) |
+| `--max-total-bytes SIZE` | Cap summed input (default `1GiB`) |
 | `--include GLOB` | Repeatable allow-list |
 | `--exclude GLOB` | Repeatable extra deny-list |
 | `--no-default-excludes` | Do not apply the built-in deny-list |
 | `--hidden` | Include hidden files (`.git` is still skipped) |
-| `--no-gitignore` | Ignore `.gitignore` |
+| `--no-gitignore` | Ignore `.gitignore` / `.ignore` |
 | `--follow-links` | Follow symlinks |
 | `--archives` | Expand nested zip/tar |
 | `--binaries` | Keep binary placeholders instead of skipping |
 | `--notebook-outputs` | Include Jupyter cell outputs |
-| `--source` | Keep HTML, XML, and JSON as source instead of converting |
+| `--source` | Keep HTML, XML, and JSON as source |
 | `--tokens` | Token estimate in the summary |
 | `--list` | Print relative paths only |
 | `-q, --quiet` | No stderr summary |
-| `ui` | Local mill at `http://127.0.0.1:8747` (`--port`, `--no-open`) |
+| `ui` | Local mill (`--port`, `--no-open`) |
 
-## Web mill
-
-`pulp ui` starts a letterpress-style mill on **127.0.0.1 only**. A GitHub mark in the header links to the source at https://github.com/BeeGass/pulp. Click **Browse** to pick a folder in Finder (or the system file manager); the mill then scans it. Folders in the proof tree collapse. Tick the checkbox to include a file; click the filename to inspect a capped preview. **Content** is Preserve source or Readable text (HTML/XML/JSON only; PDFs and Office still convert). Dump format defaults to XML. Changing format or the directory tree re-renders the last extraction. One pack job runs at a time; Cancel asks it to stop between files. Large dumps are previewed in JSON and fetched from `/api/artifact/{id}`. Copy and Download stay off while the dump is out of date. POSTs carry a per-process session token. PDF, Office, EPUB, and RTF extractors run in a child `pulp` process with a timeout. Nothing is uploaded. Virtualenv trees (`.venv/`, `venv/`), lockfiles, and images start unchecked.
-
-```
-pulp ui
-pulp ui --port 9000 --no-open
-```
-
-Unless `--quiet`, stderr looks like:
-
-```
-pulped 12 files (48.2 KiB text, ~12100 tokens) in 35ms
-```
-
-Walk uses a parallel gitignore walker (`ignore`); extraction uses Rayon.
+---
 
 ## Library
 
@@ -167,7 +156,9 @@ let opts = Options {
 let packed = pack(&opts)?;
 ```
 
-`Selection::Only(vec![])` matches nothing; it never becomes “all files”. `pack` never uploads anything. Render the dump with `pulp::render::write_all` using the same `Options.format`. `scan_manifest` is the shared discovery step for scan, tree, and pack.
+`Selection::Only(vec![])` matches nothing; it never becomes “all files”. Render with `pulp::render::write_all`. `scan_manifest` is the shared discovery step for scan, tree, and pack.
+
+---
 
 ## License
 
