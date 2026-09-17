@@ -114,6 +114,199 @@ pub fn classify(path: &Path, sniff: Option<&[u8]>) -> Kind {
     Kind::Unknown
 }
 
+/// Short language / format tag for the mill tree (never a mystery for `.lean`).
+#[must_use]
+pub fn language_label(path: &Path) -> &'static str {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if let Some(label) = filename_label(&name) {
+        return label;
+    }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if let Some(label) = ext_label(&ext.to_ascii_lowercase()) {
+            return label;
+        }
+    }
+    classify(path, None).as_str()
+}
+
+fn filename_label(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "dockerfile" | "containerfile" => "docker",
+        "makefile" | "gnumakefile" => "make",
+        "justfile" => "just",
+        "cmakelists.txt" => "cmake",
+        "lakefile.lean" => "lean",
+        "lakefile.toml" => "toml",
+        "gemfile" | "rakefile" => "ruby",
+        "procfile" => "procfile",
+        "vagrantfile" => "ruby",
+        "cargo.lock" => "toml",
+        "go.mod" | "go.sum" => "go",
+        "build.gradle" | "settings.gradle" => "groovy",
+        "podfile" => "ruby",
+        "brewfile" => "ruby",
+        "earthfile" => "earthfile",
+        _ => return None,
+    })
+}
+
+fn ext_label(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "lean" => "lean",
+        "olean" => "olean",
+        "agda" | "lagda" => "agda",
+        "idr" | "lidr" => "idris",
+        "rs" => "rust",
+        "py" | "pyi" | "pyw" => "python",
+        "js" | "mjs" | "cjs" => "javascript",
+        "ts" => "typescript",
+        "tsx" => "tsx",
+        "jsx" => "jsx",
+        "go" => "go",
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "c" => "c",
+        "h" | "hh" | "hpp" | "hxx" => "c",
+        "cpp" | "cc" | "cxx" => "cpp",
+        "m" => "objc",
+        "mm" => "objcpp",
+        "cs" => "csharp",
+        "fs" | "fsx" | "fsi" => "fsharp",
+        "swift" => "swift",
+        "rb" | "rake" | "gemspec" | "podspec" => "ruby",
+        "php" => "php",
+        "lua" => "lua",
+        "r" => "r",
+        "jl" => "julia",
+        "sql" => "sql",
+        "dart" => "dart",
+        "scala" | "sc" => "scala",
+        "groovy" => "groovy",
+        "ex" | "exs" => "elixir",
+        "heex" => "heex",
+        "erl" | "hrl" => "erlang",
+        "hs" | "lhs" => "haskell",
+        "ml" | "mli" => "ocaml",
+        "nim" => "nim",
+        "zig" => "zig",
+        "v" => "v",
+        "d" => "d",
+        "pas" => "pascal",
+        "pl" | "pm" => "perl",
+        "raku" => "raku",
+        "proto" => "protobuf",
+        "thrift" => "thrift",
+        "graphql" | "gql" => "graphql",
+        "prisma" => "prisma",
+        "vue" => "vue",
+        "svelte" => "svelte",
+        "astro" => "astro",
+        "sol" => "solidity",
+        "move" => "move",
+        "wgsl" => "wgsl",
+        "glsl" => "glsl",
+        "hlsl" => "hlsl",
+        "metal" => "metal",
+        "asm" | "s" => "asm",
+        "wat" => "wat",
+        "wit" => "wit",
+        "clj" | "cljs" => "clojure",
+        "edn" => "edn",
+        "lisp" | "el" => "lisp",
+        "vim" => "vim",
+        "nix" => "nix",
+        "tf" | "hcl" => "hcl",
+        "cue" => "cue",
+        "jsonnet" => "jsonnet",
+        "bzl" | "bazel" => "starlark",
+        "cabal" => "cabal",
+        "cmake" => "cmake",
+        "make" | "mk" => "make",
+        "ninja" => "ninja",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        "json" | "jsonc" | "json5" | "jsonl" | "ndjson" | "geojson" => "json",
+        "md" | "markdown" | "mdx" => "markdown",
+        "rst" => "rst",
+        "org" => "org",
+        "tex" | "bib" => "latex",
+        "css" => "css",
+        "scss" | "sass" => "scss",
+        "less" => "less",
+        "html" | "htm" | "xhtml" => "html",
+        "xml" | "xsl" | "xslt" | "plist" | "dtd" | "xsd" | "wsdl" => "xml",
+        "svg" | "svgz" => "svg",
+        "csv" => "csv",
+        "tsv" => "tsv",
+        "sh" | "bash" | "zsh" | "fish" => "shell",
+        "ps1" => "powershell",
+        "bat" | "cmd" => "batch",
+        "diff" | "patch" => "diff",
+        "ipynb" => "ipynb",
+        "pdf" => "pdf",
+        "docx" | "dotx" => "docx",
+        "pptx" | "potx" => "pptx",
+        "xlsx" | "xlsm" | "xls" | "xltx" | "ods" => "sheet",
+        "odt" => "odt",
+        "odp" => "odp",
+        "epub" => "epub",
+        "rtf" => "rtf",
+        "npy" => "npy",
+        "npz" => "npz",
+        "zip" | "zipx" => "zip",
+        "tar" => "tar",
+        "png" | "jpg" | "jpeg" | "jpe" | "gif" | "webp" | "ico" | "bmp" | "tif" | "tiff"
+        | "heic" | "heif" | "avif" | "psd" | "ai" | "eps" | "icns" => "image",
+        "woff" | "woff2" | "ttf" | "otf" | "eot" => "font",
+        "mp3" | "m4a" | "aac" | "ogg" | "flac" | "wav" => "audio",
+        "mp4" | "avi" | "mov" | "mkv" | "webm" => "video",
+        "lock" => "lock",
+        "sum" => "sum",
+        "mod" => "go",
+        "work" => "go",
+        "csproj" | "fsproj" | "vbproj" | "sln" => "dotnet",
+        "gitignore" | "gitattributes" | "dockerignore" | "editorconfig" => "config",
+        "env" | "properties" | "ini" | "cfg" | "conf" | "cnf" => "config",
+        "tomlrc" | "npmrc" | "nvmrc" | "prettierrc" | "eslintrc" | "babelrc" => "config",
+        "zshrc" | "bashrc" | "profile" | "gitconfig" => "config",
+        "purs" => "purescript",
+        "elm" => "elm",
+        "rkt" => "racket",
+        "scm" | "ss" => "scheme",
+        "f90" | "f95" | "f03" | "for" => "fortran",
+        "cob" | "cbl" => "cobol",
+        "adb" | "ads" => "ada",
+        "cr" => "crystal",
+        "nimble" => "nim",
+        "re" | "rei" => "reason",
+        "res" | "resi" => "rescript",
+        "mligo" | "jsligo" => "ligo",
+        "wast" => "wat",
+        "sml" => "sml",
+        "fun" | "sig" => "sml",
+        "cl" => "opencl",
+        "cu" | "cuh" => "cuda",
+        "comp" | "frag" | "vert" => "glsl",
+        "puml" | "plantuml" => "uml",
+        "dot" | "gv" => "graphviz",
+        "ron" => "ron",
+        "kdl" => "kdl",
+        "hurl" => "hurl",
+        "http" | "rest" => "http",
+        "jinja" | "j2" | "njk" | "ejs" | "erb" | "twig" | "liquid" | "hbs" | "mustache" => {
+            "template"
+        }
+        "pug" | "jade" | "haml" | "slim" => "template",
+        "cshtml" | "razor" => "razor",
+        "jsp" | "jspx" => "jsp",
+        _ => return None,
+    })
+}
+
 /// Whether the mill should tick this file after a scan.
 ///
 /// Lockfiles, raster/vector images, and other binary media stay in the
@@ -379,5 +572,22 @@ mod tests {
     fn test_is_default_selected_with_rust_source_returns_true() {
         assert!(is_default_selected(Path::new("src/lib.rs"), Kind::Text));
         assert!(is_default_selected(Path::new("Basic.lean"), Kind::Text));
+    }
+
+    #[test]
+    fn test_language_label_with_lean_returns_lean_not_unknown() {
+        assert_eq!(language_label(Path::new("Dual/Basic.lean")), "lean");
+        assert_eq!(language_label(Path::new("lakefile.lean")), "lean");
+        assert_ne!(language_label(Path::new("Basic.lean")), "unknown");
+        assert_ne!(language_label(Path::new("Basic.lean")), "text");
+    }
+
+    #[test]
+    fn test_language_label_with_common_languages_returns_names() {
+        assert_eq!(language_label(Path::new("src/lib.rs")), "rust");
+        assert_eq!(language_label(Path::new("app.ts")), "typescript");
+        assert_eq!(language_label(Path::new("main.py")), "python");
+        assert_eq!(language_label(Path::new("Main.agda")), "agda");
+        assert_eq!(language_label(Path::new("Dockerfile")), "docker");
     }
 }

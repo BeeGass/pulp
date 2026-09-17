@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::classify::{classify, is_default_selected};
+use crate::classify::{classify, is_default_selected, language_label};
 use crate::config::{Options, OutputFormat, TreeMode, default_exclude_globs, parse_size};
 use crate::pack;
 use crate::pick;
@@ -304,7 +304,7 @@ fn scan_sync(req: ScanRequest) -> Result<ScanResponse, ApiError> {
             FileEntry {
                 relative: file.relative.clone(),
                 size: file.size,
-                kind: kind.as_str(),
+                kind: language_label(&file.absolute),
                 default_on: is_default_selected(&file.absolute, kind),
             }
         })
@@ -522,6 +522,20 @@ mod tests {
             .collect();
         assert!(names.iter().any(|n| n.ends_with("hello.rs")), "{names:?}");
         assert!(names.iter().any(|n| n.ends_with("Hello.lean")), "{names:?}");
+        let lean = json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["relative"].as_str() == Some("Hello.lean"))
+            .unwrap();
+        assert_eq!(lean["kind"].as_str(), Some("lean"));
+        let rust = json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["relative"].as_str() == Some("hello.rs"))
+            .unwrap();
+        assert_eq!(rust["kind"].as_str(), Some("rust"));
     }
 
     #[tokio::test]
