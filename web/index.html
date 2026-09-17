@@ -346,26 +346,53 @@
       color: var(--brass);
       flex: 0 0 auto;
     }
-    .chips {
+    .types {
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
-      padding: 8px 12px 0;
+      padding: 8px 12px 4px;
+      align-items: center;
     }
-    .chip {
+    .types:empty { display: none; }
+    .types-h {
       font-family: var(--mono);
       font-size: 10px;
-      letter-spacing: 0.08em;
+      letter-spacing: 0.14em;
       text-transform: uppercase;
-      border: 1px solid #4a3f32;
       color: var(--mist);
-      padding: 6px 9px;
-      min-height: 32px;
-      border-radius: 999px;
-      cursor: pointer;
-      background: transparent;
+      width: 100%;
+      margin: 0 0 2px;
     }
-    .chip.on { border-color: var(--rust); color: var(--paper); background: #d4532814; }
+    label.type {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 36px;
+      padding: 0 10px 0 8px;
+      border: 1px solid #4a3f32;
+      border-radius: 999px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--mist);
+      cursor: pointer;
+      user-select: none;
+    }
+    label.type input {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--rust);
+    }
+    label.type.on {
+      border-color: var(--rust);
+      color: var(--paper);
+      background: #d4532814;
+    }
+    label.type.mix {
+      border-color: var(--brass);
+      color: var(--paper);
+    }
     footer {
       display: flex;
       justify-content: space-between;
@@ -464,7 +491,7 @@
             <button type="button" id="copytree" disabled>Copy tree</button>
           </div>
         </div>
-        <div class="chips" id="chips"></div>
+        <div class="types" id="types"></div>
         <div class="tree" id="tree"><div class="empty">Browse to a folder in the file manager, or type a path, then scan.</div></div>
       </section>
       <section class="pane paper pane-dump">
@@ -493,7 +520,7 @@
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
-    const state = { files: [], selected: new Set(), collapsed: new Set(), dump: "", filename: "pulp.txt", kindsOn: null };
+    const state = { files: [], selected: new Set(), collapsed: new Set(), dump: "", filename: "pulp.txt" };
 
     function opts() {
       return {
@@ -567,32 +594,57 @@
     function kindsOf(files) {
       const m = new Map();
       for (const f of files) m.set(f.kind, (m.get(f.kind) || 0) + 1);
-      return [...m.entries()].sort((a, b) => b[1] - a[1]);
+      return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    }
+
+    function filesOfKind(kind) {
+      return state.files.filter((f) => f.kind === kind);
+    }
+
+    function kindTick(kind) {
+      const files = filesOfKind(kind);
+      let on = 0;
+      for (const f of files) if (state.selected.has(f.relative)) on += 1;
+      return { total: files.length, on, all: on === files.length && on > 0, none: on === 0 };
+    }
+
+    function setKindSelected(kind, on) {
+      for (const f of filesOfKind(kind)) {
+        if (on) state.selected.add(f.relative);
+        else state.selected.delete(f.relative);
+      }
+      renderTree();
     }
 
     function visible(file) {
       const q = $("filter").value.trim().toLowerCase();
       if (q && !file.relative.toLowerCase().includes(q)) return false;
-      if (state.kindsOn && !state.kindsOn.has(file.kind)) return false;
       return true;
     }
 
-    function renderChips() {
-      const box = $("chips");
+    function renderTypes() {
+      const box = $("types");
       box.innerHTML = "";
-      for (const [kind, n] of kindsOf(state.files)) {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.className = "chip" + (!state.kindsOn || state.kindsOn.has(kind) ? " on" : "");
-        b.textContent = kind + " " + n;
-        b.onclick = () => {
-          if (!state.kindsOn) state.kindsOn = new Set(kindsOf(state.files).map(([k]) => k));
-          if (state.kindsOn.has(kind)) state.kindsOn.delete(kind); else state.kindsOn.add(kind);
-          if (state.kindsOn.size === kindsOf(state.files).length) state.kindsOn = null;
-          renderTree();
-          renderChips();
-        };
-        box.appendChild(b);
+      const kinds = kindsOf(state.files);
+      if (!kinds.length) return;
+      const head = document.createElement("div");
+      head.className = "types-h";
+      head.textContent = "by language — tick a type to select every file of it";
+      box.appendChild(head);
+      for (const [kind, n] of kinds) {
+        const st = kindTick(kind);
+        const label = document.createElement("label");
+        label.className = "type" + (st.all ? " on" : st.none ? "" : " mix");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = st.all;
+        cb.indeterminate = !st.all && !st.none;
+        cb.setAttribute("aria-label", "select all " + kind);
+        cb.addEventListener("change", () => setKindSelected(kind, cb.checked));
+        const span = document.createElement("span");
+        span.textContent = kind + " " + st.on + "/" + n;
+        label.append(cb, span);
+        box.appendChild(label);
       }
     }
 
@@ -685,10 +737,12 @@
       if (!state.files.length) {
         tree.innerHTML = '<div class="empty">Browse to a folder in the file manager, or type a path, then scan.</div>';
         setPulpEnabled(false);
+        renderTypes();
         return;
       }
       renderNode(buildTree(state.files), tree, true, "");
       setPulpEnabled(state.selected.size > 0);
+      renderTypes();
     }
 
     async function scan() {
@@ -704,8 +758,6 @@
           data.files.filter((f) => f.default_on !== false).map((f) => f.relative)
         );
         state.collapsed = new Set();
-        state.kindsOn = null;
-        renderChips();
         renderTree();
         setView("files");
         $("stats").innerHTML = "<strong>" + data.file_count + "</strong> files · " + human(data.bytes);

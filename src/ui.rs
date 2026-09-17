@@ -628,6 +628,7 @@ mod tests {
         assert!(html.contains("id=\"browse\""));
         assert!(html.contains("file manager"));
         assert!(html.contains("Copy tree"));
+        assert!(html.contains("id=\"types\""));
     }
 
     #[tokio::test]
