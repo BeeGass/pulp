@@ -35,6 +35,7 @@ pub fn router() -> Router {
 fn router_with(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/fonts/{name}", get(font_file))
         .route("/api/health", get(health))
         .route("/api/scan", post(scan))
         .route("/api/pack", post(pack_dump))
@@ -116,6 +117,26 @@ async fn index() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         Html(INDEX),
     )
+}
+
+async fn font_file(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    let bytes: &'static [u8] = match name.as_str() {
+        "fraunces.woff2" => include_bytes!("../web/fonts/fraunces.woff2"),
+        "plex-sans.woff2" => include_bytes!("../web/fonts/plex-sans.woff2"),
+        "plex-mono-400.woff2" => include_bytes!("../web/fonts/plex-mono-400.woff2"),
+        "plex-mono-500.woff2" => include_bytes!("../web/fonts/plex-mono-500.woff2"),
+        _ => {
+            return (StatusCode::NOT_FOUND, "unknown font").into_response();
+        }
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 async fn health() -> &'static str {
@@ -479,6 +500,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_font_with_fraunces_returns_woff2() {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .uri("/fonts/fraunces.woff2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "font/woff2"
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.len() > 1000);
+    }
+
+    #[tokio::test]
     async fn test_health_returns_ok() {
         let response = router()
             .oneshot(
@@ -503,6 +544,8 @@ mod tests {
         let html = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(html.contains("pulp mill"));
         assert!(html.contains("localhost"));
+        assert!(html.contains("Fraunces"));
+        assert!(html.contains("/fonts/fraunces.woff2"));
     }
 
     #[tokio::test]
