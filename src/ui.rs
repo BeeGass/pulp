@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::classify::classify;
+use crate::classify::{classify, is_default_selected};
 use crate::config::{Options, OutputFormat, TreeMode, default_exclude_globs, parse_size};
 use crate::pack;
 use crate::pick;
@@ -154,6 +154,7 @@ struct FileEntry {
     relative: String,
     size: u64,
     kind: &'static str,
+    default_on: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -298,10 +299,14 @@ fn scan_sync(req: ScanRequest) -> Result<ScanResponse, ApiError> {
     let walked = walk::collect(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
     let files: Vec<FileEntry> = walked
         .iter()
-        .map(|file| FileEntry {
-            relative: file.relative.clone(),
-            size: file.size,
-            kind: classify(&file.absolute, None).as_str(),
+        .map(|file| {
+            let kind = classify(&file.absolute, None);
+            FileEntry {
+                relative: file.relative.clone(),
+                size: file.size,
+                kind: kind.as_str(),
+                default_on: is_default_selected(&file.absolute, kind),
+            }
         })
         .collect();
     let bytes = files.iter().map(|f| f.size).sum();

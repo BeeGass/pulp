@@ -114,6 +114,65 @@ pub fn classify(path: &Path, sniff: Option<&[u8]>) -> Kind {
     Kind::Unknown
 }
 
+/// Whether the mill should tick this file after a scan.
+///
+/// Lockfiles, raster/vector images, and other binary media stay in the
+/// tree but start unchecked.
+#[must_use]
+pub fn is_default_selected(path: &Path, kind: Kind) -> bool {
+    if kind.is_binary_media() {
+        return false;
+    }
+    !is_lock_file(path) && !is_image_file(path)
+}
+
+fn is_lock_file(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.ends_with(".lock")
+        || name.ends_with(".lockb")
+        || name.ends_with("-lock.json")
+        || name.ends_with("-lock.yaml")
+        || name.ends_with("-lock.yml")
+        || matches!(
+            name.as_str(),
+            "go.sum" | "npm-shrinkwrap.json" | "shrinkwrap.yaml"
+        )
+}
+
+fn is_image_file(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "svg"
+            | "svgz"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "jpe"
+            | "gif"
+            | "webp"
+            | "ico"
+            | "icns"
+            | "bmp"
+            | "tif"
+            | "tiff"
+            | "heic"
+            | "heif"
+            | "avif"
+            | "psd"
+            | "ai"
+            | "eps"
+    )
+}
+
 fn is_known_text_filename(name: &str) -> bool {
     matches!(
         name,
@@ -296,5 +355,29 @@ mod tests {
         assert_eq!(Kind::Text.as_str(), "text");
         assert_eq!(Kind::Npz.as_str(), "npz");
         assert_eq!(Kind::Npy.as_str(), "npy");
+    }
+
+    #[test]
+    fn test_is_default_selected_with_lockfile_returns_false() {
+        assert!(!is_default_selected(Path::new("Cargo.lock"), Kind::Text));
+        assert!(!is_default_selected(
+            Path::new("package-lock.json"),
+            Kind::Json
+        ));
+        assert!(!is_default_selected(Path::new("yarn.lock"), Kind::Text));
+        assert!(!is_default_selected(Path::new("go.sum"), Kind::Text));
+    }
+
+    #[test]
+    fn test_is_default_selected_with_image_returns_false() {
+        assert!(!is_default_selected(Path::new("logo.svg"), Kind::Text));
+        assert!(!is_default_selected(Path::new("hero.png"), Kind::Binary));
+        assert!(!is_default_selected(Path::new("icon.webp"), Kind::Binary));
+    }
+
+    #[test]
+    fn test_is_default_selected_with_rust_source_returns_true() {
+        assert!(is_default_selected(Path::new("src/lib.rs"), Kind::Text));
+        assert!(is_default_selected(Path::new("Basic.lean"), Kind::Text));
     }
 }

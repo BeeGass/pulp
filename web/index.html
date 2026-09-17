@@ -700,7 +700,9 @@
       try {
         const data = await api("/api/scan", o);
         state.files = data.files;
-        state.selected = new Set(data.files.map((f) => f.relative));
+        state.selected = new Set(
+          data.files.filter((f) => f.default_on !== false).map((f) => f.relative)
+        );
         state.collapsed = new Set();
         state.kindsOn = null;
         renderChips();

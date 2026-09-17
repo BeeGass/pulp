@@ -16,7 +16,7 @@ pub mod tree;
 pub mod ui;
 pub mod walk;
 
-pub use classify::{Kind, classify, looks_binary};
+pub use classify::{Kind, classify, is_default_selected, looks_binary};
 pub use config::{Options, OutputFormat, TreeMode};
 pub use error::Error;
 pub use pack::{FileStatus, Packed, PackedFile, Stats, pack};
