@@ -1,45 +1,55 @@
 //! Bounded mill session: manifests, extraction results, and one pack job.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::manifest::ScanManifest;
 use crate::pack::{PackedFile, Stats};
 
 const MAX_ITEMS: usize = 8;
+const MAX_RESULT_BYTES: usize = 64 * 1024 * 1024;
 pub const PREVIEW_CHARS: usize = 32 * 1024;
 
 /// In-memory mill session.
 pub struct Mill {
-    pub busy: AtomicBool,
-    pub cancel: AtomicBool,
+    busy: AtomicBool,
+    job_seq: AtomicU64,
+    current: Mutex<Option<Arc<PackJob>>>,
     manifests: Mutex<Lru<StoredManifest>>,
-    results: Mutex<Lru<StoredResult>>,
+    results: Mutex<Lru<Arc<StoredResult>>>,
+}
+
+/// One admitted pack/preview job with its own cancel flag.
+pub struct PackJob {
+    pub id: u64,
+    pub cancel: AtomicBool,
 }
 
 /// Discovery snapshot keyed by [`StoredManifest::id`].
 #[derive(Clone)]
 pub struct StoredManifest {
     pub id: String,
-    #[allow(dead_code)]
     pub discovery_key: String,
     pub manifest: ScanManifest,
 }
 
 /// Extracted files keyed by [`StoredResult::id`]. Re-render without re-extract.
-#[derive(Clone)]
 pub struct StoredResult {
     pub id: String,
     pub manifest_id: String,
     pub extract_key: String,
     pub files: Vec<PackedFile>,
     pub stats: Stats,
+    pub roots: Vec<PathBuf>,
+    pub source_mode: bool,
 }
 
 struct Lru<T> {
     order: VecDeque<String>,
     items: HashMap<String, T>,
+    bytes: usize,
 }
 
 impl<T> Default for Lru<T> {
@@ -47,6 +57,7 @@ impl<T> Default for Lru<T> {
         Self {
             order: VecDeque::new(),
             items: HashMap::new(),
+            bytes: 0,
         }
     }
 }
@@ -55,7 +66,8 @@ impl Default for Mill {
     fn default() -> Self {
         Self {
             busy: AtomicBool::new(false),
-            cancel: AtomicBool::new(false),
+            job_seq: AtomicU64::new(1),
+            current: Mutex::new(None),
             manifests: Mutex::new(Lru::default()),
             results: Mutex::new(Lru::default()),
         }
@@ -68,21 +80,48 @@ impl Mill {
         Self::default()
     }
 
+    /// Admit one pack job. Does not clear another job's cancel flag.
     #[must_use]
-    pub fn try_begin_pack(&self) -> bool {
-        self.cancel.store(false, Ordering::SeqCst);
-        self.busy
+    pub fn try_begin_pack(&self) -> Option<Arc<PackJob>> {
+        if self
+            .busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+            .is_err()
+        {
+            return None;
+        }
+        let job = Arc::new(PackJob {
+            id: self.job_seq.fetch_add(1, Ordering::SeqCst),
+            cancel: AtomicBool::new(false),
+        });
+        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&job));
+        Some(job)
     }
 
-    pub fn end_pack(&self) {
-        self.busy.store(false, Ordering::SeqCst);
-        self.cancel.store(false, Ordering::SeqCst);
+    pub fn end_pack(&self, job: &PackJob) {
+        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        if current.as_ref().is_some_and(|cur| cur.id == job.id) {
+            *current = None;
+            self.busy.store(false, Ordering::SeqCst);
+        }
     }
 
     pub fn request_cancel(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(job) = self
+            .current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            job.cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub fn current_job(&self) -> Option<Arc<PackJob>> {
+        self.current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn put_manifest(&self, discovery_key: String, manifest: ScanManifest) -> String {
@@ -95,7 +134,7 @@ impl Mill {
         self.manifests
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(id.clone(), stored);
+            .push(id.clone(), stored, 0);
         id
     }
 
@@ -107,16 +146,22 @@ impl Mill {
             .cloned()
     }
 
-    pub fn put_result(&self, result: StoredResult) -> String {
+    pub fn put_result(&self, result: StoredResult) -> Arc<StoredResult> {
+        let bytes = result.files.iter().map(|f| f.text.len()).sum::<usize>();
         let id = result.id.clone();
-        self.results
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(id.clone(), result);
-        id
+        let cancelled = result.stats.cancelled;
+        let arc = Arc::new(result);
+        if !cancelled {
+            self.results.lock().unwrap_or_else(|e| e.into_inner()).push(
+                id,
+                Arc::clone(&arc),
+                bytes,
+            );
+        }
+        arc
     }
 
-    pub fn get_result(&self, id: &str) -> Option<StoredResult> {
+    pub fn get_result(&self, id: &str) -> Option<Arc<StoredResult>> {
         self.results
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -124,30 +169,55 @@ impl Mill {
             .cloned()
     }
 
-    pub fn find_result(&self, manifest_id: &str, extract_key: &str) -> Option<StoredResult> {
-        let guard = self.results.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .items
-            .values()
-            .find(|r| r.manifest_id == manifest_id && r.extract_key == extract_key)
-            .cloned()
+    pub fn find_result(&self, manifest_id: &str, extract_key: &str) -> Option<Arc<StoredResult>> {
+        let mut guard = self.results.lock().unwrap_or_else(|e| e.into_inner());
+        let id = guard.items.iter().find_map(|(id, r)| {
+            if r.manifest_id == manifest_id && r.extract_key == extract_key && !r.stats.cancelled {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })?;
+        guard.get(&id).cloned()
     }
 }
 
 impl<T> Lru<T> {
-    fn push(&mut self, id: String, value: T) {
+    fn push(&mut self, id: String, value: T, add_bytes: usize) {
         if self.items.insert(id.clone(), value).is_none() {
             self.order.push_back(id);
-            while self.order.len() > MAX_ITEMS {
-                if let Some(old) = self.order.pop_front() {
-                    self.items.remove(&old);
-                }
+        }
+        self.bytes = self.bytes.saturating_add(add_bytes);
+        while self.order.len() > MAX_ITEMS || self.bytes > MAX_RESULT_BYTES {
+            if let Some(old) = self.order.pop_front() {
+                self.items.remove(&old);
+                self.bytes = self.bytes.saturating_div(2);
+            } else {
+                break;
             }
         }
     }
 
-    fn get(&self, id: &str) -> Option<&T> {
-        self.items.get(id)
+    fn get(&mut self, id: &str) -> Option<&T> {
+        if self.items.contains_key(id) {
+            self.order.retain(|k| k != id);
+            self.order.push_back(id.to_string());
+            self.items.get(id)
+        } else {
+            None
+        }
+    }
+}
+
+/// Drops the busy flag when the worker finishes, even if the HTTP task is gone.
+pub struct JobGuard {
+    pub mill: Arc<Mill>,
+    pub job: Arc<PackJob>,
+}
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        self.mill.end_pack(&self.job);
     }
 }
 
@@ -176,13 +246,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_try_begin_pack_with_busy_returns_false() {
+    fn test_try_begin_pack_with_busy_returns_none() {
         let mill = Mill::new();
-        assert!(mill.try_begin_pack());
-        assert!(!mill.try_begin_pack());
-        mill.end_pack();
-        assert!(mill.try_begin_pack());
-        mill.end_pack();
+        let job = mill.try_begin_pack().expect("first");
+        assert!(mill.try_begin_pack().is_none());
+        mill.request_cancel();
+        assert!(job.cancel.load(Ordering::SeqCst));
+        mill.end_pack(&job);
+        assert!(mill.try_begin_pack().is_some());
+    }
+
+    #[test]
+    fn test_try_begin_pack_does_not_clear_other_cancel() {
+        let mill = Mill::new();
+        let job = mill.try_begin_pack().expect("first");
+        mill.request_cancel();
+        assert!(mill.try_begin_pack().is_none());
+        assert!(job.cancel.load(Ordering::SeqCst));
+        mill.end_pack(&job);
     }
 
     #[test]
