@@ -7,6 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>pulp mill</title>
+  <meta name="pulp-token" content="__PULP_TOKEN__">
   <style>
     @font-face {
       font-family: Fraunces;
@@ -237,6 +238,20 @@
       font-size: 12px;
       min-height: 1em;
     }
+    .stale {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--rust);
+      letter-spacing: 0.04em;
+    }
+    .stale[hidden] { display: none; }
+    .pane-h small {
+      font-weight: 400;
+      letter-spacing: 0.16em;
+      color: var(--mist);
+      margin-left: 6px;
+    }
+    .paper .pane-h small { color: var(--rule); }
     .tabs {
       display: none;
       grid-template-columns: 1fr 1fr;
@@ -374,6 +389,7 @@
       white-space: nowrap;
       min-width: 0;
     }
+    .row.oversize .name { color: var(--mist); }
     .row .meta {
       color: var(--mist);
       font-size: 10px;
@@ -518,14 +534,15 @@
       </div>
     </div>
     <div class="err" id="err" role="status" aria-live="polite"></div>
+    <div class="stale" id="stale" hidden role="status" aria-live="polite">Output is out of date. Pulp again before copying.</div>
     <nav class="tabs" id="tabs" aria-label="Panes">
       <button type="button" class="on" data-view="files">Files</button>
-      <button type="button" data-view="dump">Dump</button>
+      <button type="button" data-view="dump">Output</button>
     </nav>
     <main id="stage" class="view-files">
       <section class="pane pane-files">
         <div class="pane-h">
-          <span>proof · files</span>
+          <span>Files <small>proof</small></span>
           <div class="tools">
             <input id="filter" type="text" placeholder="filter" spellcheck="false">
             <button type="button" id="all">all</button>
@@ -538,7 +555,7 @@
       </section>
       <section class="pane paper pane-dump">
         <div class="pane-h">
-          <span>galley · dump</span>
+          <span>Output <small>galley</small></span>
           <div class="tools">
             <button type="button" id="pulp" class="primary" disabled>Pulp</button>
             <button type="button" id="copytreeDump" disabled>Copy tree</button>
@@ -562,7 +579,43 @@
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
-    const state = { files: [], selected: new Set(), collapsed: new Set(), dump: "", filename: "pulp.txt", bytes: 0 };
+    const TOKEN = document.querySelector('meta[name="pulp-token"]')?.content || "";
+    const state = {
+      files: [],
+      selected: new Set(),
+      collapsed: new Set(),
+      dump: "",
+      filename: "pulp.txt",
+      bytes: 0,
+      reqId: 0,
+      dumpKey: "",
+      stale: false,
+    };
+
+    function settingsKey() {
+      return JSON.stringify({
+        path: $("path").value.trim(),
+        selected: [...state.selected].sort(),
+        format: $("format").value,
+        gitignore: $("gitignore").checked,
+        hidden: $("hidden").checked,
+        archives: $("archives").checked,
+        notebook: $("notebook").checked,
+        source: $("source").checked,
+        notree: $("notree").checked,
+      });
+    }
+
+    function markStaleIfDump() {
+      if (!state.dump) return;
+      const stale = settingsKey() !== state.dumpKey;
+      state.stale = stale;
+      $("stale").hidden = !stale;
+      const title = stale ? "dump is out of date" : "";
+      ["copy", "copy2", "download", "download2"].forEach((id) => {
+        $(id).title = title;
+      });
+    }
 
     function opts() {
       return {
@@ -580,7 +633,10 @@
     async function api(url, body) {
       const res = await fetch(url, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "x-pulp-token": TOKEN,
+        },
         body: JSON.stringify(body),
       });
       const json = await res.json();
@@ -659,13 +715,20 @@
 
     function kindTick(kind) {
       const files = filesOfKind(kind);
+      const selectable = files.filter((f) => !f.oversized);
       let on = 0;
-      for (const f of files) if (state.selected.has(f.relative)) on += 1;
-      return { total: files.length, on, all: on === files.length && on > 0, none: on === 0 };
+      for (const f of selectable) if (state.selected.has(f.relative)) on += 1;
+      return {
+        total: files.length,
+        on,
+        all: selectable.length > 0 && on === selectable.length,
+        none: on === 0,
+      };
     }
 
     function setKindSelected(kind, on) {
       for (const f of filesOfKind(kind)) {
+        if (f.oversized) continue;
         if (on) state.selected.add(f.relative);
         else state.selected.delete(f.relative);
       }
@@ -763,10 +826,14 @@
       const files = node.files.filter(visible).sort((a, b) => a.name.localeCompare(b.name));
       for (const f of files) {
         const row = document.createElement("div");
-        row.className = "row";
+        row.className = "row" + (f.oversized ? " oversize" : "");
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.checked = state.selected.has(f.relative);
+        if (f.oversized) {
+          cb.disabled = true;
+          cb.title = "over the size cap";
+        }
         cb.addEventListener("change", () => {
           if (cb.checked) state.selected.add(f.relative); else state.selected.delete(f.relative);
           setPulpEnabled(state.selected.size > 0);
@@ -799,6 +866,7 @@
       renderNode(buildTree(state.files), tree, true, "");
       setPulpEnabled(state.selected.size > 0);
       renderTypes();
+      markStaleIfDump();
     }
 
     async function scan() {
@@ -812,11 +880,14 @@
         state.files = data.files;
         state.bytes = data.bytes || 0;
         state.selected = new Set(
-          data.files.filter((f) => f.default_on !== false).map((f) => f.relative)
+          data.files.filter((f) => f.default_on !== false && !f.oversized).map((f) => f.relative)
         );
         state.collapsed = new Set();
         renderTree();
         setView("files");
+        if (data.truncated) {
+          setErr("List is truncated at the entry or size cap.");
+        }
       } catch (e) {
         setErr(e.message);
         $("stats").textContent = "scan failed";
@@ -830,20 +901,27 @@
       const o = opts();
       o.selected = [...state.selected];
       if (!o.selected.length) { setErr("Tick at least one file."); return; }
+      const id = ++state.reqId;
+      const key = settingsKey();
       setPulpEnabled(false);
       $("stats").innerHTML = '<span class="spin">+</span> pulping';
       try {
         const data = await api("/api/pack", o);
+        if (id !== state.reqId) return;
         state.dump = data.dump;
         state.filename = data.filename;
+        state.dumpKey = key;
         $("preview").textContent = data.dump;
         setDumpActions(true);
+        markStaleIfDump();
         setView("dump");
         $("stats").innerHTML =
           "<strong>" + data.files_extracted + "</strong> pulped · ~<strong>" +
           data.tokens_est + "</strong> tokens · " + data.elapsed_ms + "ms" +
-          (data.files_skipped ? " · " + data.files_skipped + " skipped" : "");
+          (data.files_skipped ? " · " + data.files_skipped + " skipped" : "") +
+          (data.truncated ? " · truncated" : "");
       } catch (e) {
+        if (id !== state.reqId) return;
         setErr(e.message);
         $("stats").textContent = "pulp failed";
       } finally {
@@ -894,7 +972,7 @@
     async function copyDump() {
       try {
         await navigator.clipboard.writeText(state.dump);
-        $("stats").textContent = "copied " + state.filename;
+        $("stats").textContent = "copied " + state.filename + (state.stale ? " (out of date)" : "");
       } catch (e) { setErr("clipboard: " + e.message); }
     }
 
@@ -902,16 +980,26 @@
       const blob = new Blob([state.dump], { type: "text/plain" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = state.filename;
+      a.download = state.stale
+        ? state.filename.replace(/(\.[^.]+)?$/, (m) => "-outdated" + (m || ""))
+        : state.filename;
       a.click();
       URL.revokeObjectURL(a.href);
+      $("stats").textContent = "downloaded " + a.download + (state.stale ? " (out of date)" : "");
     }
 
     document.querySelectorAll("[data-fmt]").forEach((b) => {
       b.onclick = () => {
         $("format").value = b.dataset.fmt;
         document.querySelectorAll("[data-fmt]").forEach((x) => x.classList.toggle("on", x === b));
+        markStaleIfDump();
       };
+    });
+    ["gitignore", "hidden", "archives", "notebook", "source", "notree", "path"].forEach((id) => {
+      const el = $(id);
+      if (!el) return;
+      el.addEventListener("change", markStaleIfDump);
+      el.addEventListener("input", markStaleIfDump);
     });
     document.querySelectorAll("#tabs button").forEach((b) => {
       b.onclick = () => setView(b.dataset.view);
@@ -930,7 +1018,7 @@
     $("path").addEventListener("keydown", (e) => { if (e.key === "Enter") scan(); });
     $("filter").addEventListener("input", renderTree);
     $("all").onclick = () => {
-      state.files.filter(visible).forEach((f) => state.selected.add(f.relative));
+      state.files.filter(visible).filter((f) => !f.oversized).forEach((f) => state.selected.add(f.relative));
       renderTree();
     };
     $("none").onclick = () => {

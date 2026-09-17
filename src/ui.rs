@@ -1,34 +1,41 @@
 //! Local mill: a localhost-only web UI over [`crate::pack`].
 
-use std::io::{Cursor, ErrorKind};
+use std::io::{Cursor, ErrorKind, Read};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::classify::{classify, is_default_selected, language_label};
-use crate::config::{Options, OutputFormat, TreeMode, default_exclude_globs, parse_size};
+use crate::config::{
+    Options, OutputFormat, Selection, TreeMode, default_exclude_globs, parse_size,
+};
+use crate::manifest;
 use crate::pack;
 use crate::pick;
-use crate::walk;
 
 const INDEX: &str = include_str!("../web/index.html");
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct AppState {
     pick: fn() -> Result<Option<PathBuf>, String>,
+    token: Arc<str>,
 }
+
+const TEST_TOKEN: &str = "test-token";
 
 /// Axum router used by `pulp ui` and the HTTP tests.
 pub fn router() -> Router {
     router_with(AppState {
         pick: pick::pick_folder,
+        token: Arc::from(TEST_TOKEN),
     })
 }
 
@@ -57,14 +64,97 @@ pub async fn serve(preferred: u16, try_next: bool, open_browser: bool) -> anyhow
         eprintln!("pulp mill on {url}");
     }
     eprintln!("localhost only. nothing is uploaded.");
+    let state = AppState {
+        pick: pick::pick_folder,
+        token: Arc::from(new_session_token()),
+    };
     if open_browser {
         let _ = opener::open(&url);
     }
-    axum::serve(listener, router())
+    axum::serve(listener, router_with(state))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    Ok(())
+}
+
+fn new_session_token() -> String {
+    let mut buf = [0u8; 16];
+    let filled = std::fs::File::open("/dev/urandom")
+        .ok()
+        .and_then(|mut f| f.read_exact(&mut buf).ok());
+    if filled.is_none() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        buf[..8].copy_from_slice(&(nanos as u64).to_le_bytes());
+        buf[8..12].copy_from_slice(&std::process::id().to_le_bytes());
+    }
+    buf.iter().fold(String::with_capacity(32), |mut s, b| {
+        s.push_str(&format!("{b:02x}"));
+        s
+    })
+}
+
+fn origin_ok(origin: &str) -> bool {
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    matches!(uri.scheme_str(), Some("http") | Some("https")) && uri.host().is_some_and(host_name_ok)
+}
+
+fn host_name_ok(host: &str) -> bool {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    host.eq_ignore_ascii_case("127.0.0.1")
+        || host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("::1")
+}
+
+fn header_host_ok(host: &str) -> bool {
+    let host = host.trim();
+    if let Some(inner) = host.strip_prefix('[') {
+        let name = inner.split(']').next().unwrap_or("");
+        return host_name_ok(name);
+    }
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
+        _ => host,
+    };
+    host_name_ok(name)
+}
+
+fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
+        && !origin_ok(origin)
+    {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: "bad origin".into(),
+        });
+    }
+    if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok())
+        && !header_host_ok(host)
+    {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: "bad host".into(),
+        });
+    }
+    let got = headers
+        .get("x-pulp-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if got != state.token.as_ref() {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "bad session".into(),
+        });
+    }
     Ok(())
 }
 
@@ -112,10 +202,11 @@ fn port_holder(port: u16) -> Option<String> {
     Some(format!("pid {pid}"))
 }
 
-async fn index() -> impl IntoResponse {
+async fn index(State(state): State<AppState>) -> impl IntoResponse {
+    let html = INDEX.replace("__PULP_TOKEN__", state.token.as_ref());
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        Html(INDEX),
+        Html(html),
     )
 }
 
@@ -168,6 +259,7 @@ struct ScanResponse {
     files: Vec<FileEntry>,
     file_count: usize,
     bytes: u64,
+    truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,6 +268,7 @@ struct FileEntry {
     size: u64,
     kind: &'static str,
     default_on: bool,
+    oversized: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,6 +310,7 @@ struct PackResponse {
     tokens_est: usize,
     chars_emitted: usize,
     elapsed_ms: u128,
+    truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -261,16 +355,22 @@ impl IntoResponse for ApiError {
 }
 
 async fn scan(
-    State(_): State<AppState>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ScanRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
+    authorize(&state, &headers)?;
     tokio::task::spawn_blocking(move || scan_sync(req))
         .await
         .map_err(|err| ApiError::bad(err.to_string()))?
         .map(Json)
 }
 
-async fn browse(State(state): State<AppState>) -> Result<Json<BrowseResponse>, ApiError> {
+async fn browse(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<BrowseResponse>, ApiError> {
+    authorize(&state, &headers)?;
     let pick = state.pick;
     let chosen = tokio::task::spawn_blocking(pick)
         .await
@@ -289,9 +389,11 @@ async fn browse(State(state): State<AppState>) -> Result<Json<BrowseResponse>, A
 }
 
 async fn pack_dump(
-    State(_): State<AppState>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<PackRequest>,
 ) -> Result<Json<PackResponse>, ApiError> {
+    authorize(&state, &headers)?;
     tokio::task::spawn_blocking(move || pack_sync(req))
         .await
         .map_err(|err| ApiError::bad(err.to_string()))?
@@ -299,9 +401,11 @@ async fn pack_dump(
 }
 
 async fn tree_dump(
-    State(_): State<AppState>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<PackRequest>,
 ) -> Result<Json<TreeResponse>, ApiError> {
+    authorize(&state, &headers)?;
     tokio::task::spawn_blocking(move || tree_sync(req))
         .await
         .map_err(|err| ApiError::bad(err.to_string()))?
@@ -319,25 +423,24 @@ fn scan_sync(req: ScanRequest) -> Result<ScanResponse, ApiError> {
         list_only: true,
         ..Options::default()
     };
-    let walked = walk::collect(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
-    let files: Vec<FileEntry> = walked
+    let manifest = manifest::scan_manifest(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let files: Vec<FileEntry> = manifest
+        .entries
         .iter()
-        .map(|file| {
-            let kind = classify(&file.absolute, None);
-            FileEntry {
-                relative: file.relative.clone(),
-                size: file.size,
-                kind: language_label(&file.absolute),
-                default_on: is_default_selected(&file.absolute, kind),
-            }
+        .map(|entry| FileEntry {
+            relative: entry.relative.clone(),
+            size: entry.size,
+            kind: entry.language,
+            default_on: entry.default_on,
+            oversized: entry.oversized,
         })
         .collect();
-    let bytes = files.iter().map(|f| f.size).sum();
     Ok(ScanResponse {
         root: root.display().to_string(),
         file_count: files.len(),
-        bytes,
+        bytes: manifest.bytes,
         files,
+        truncated: manifest.truncated,
     })
 }
 
@@ -363,6 +466,7 @@ fn pack_sync(req: PackRequest) -> Result<PackResponse, ApiError> {
         tokens_est: packed.stats.tokens_est,
         chars_emitted: packed.stats.chars_emitted,
         elapsed_ms: packed.stats.elapsed.as_millis(),
+        truncated: packed.stats.truncated,
     })
 }
 
@@ -371,7 +475,20 @@ fn tree_sync(req: PackRequest) -> Result<TreeResponse, ApiError> {
         return Err(ApiError::bad("tick at least one file"));
     }
     let opts = options_from_pack(req, true, true)?;
-    let packed = pack::pack(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let manifest = manifest::scan_manifest(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let paths: Vec<String> = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.relative.clone())
+        .collect();
+    let packed = pack::Packed {
+        files: Vec::new(),
+        tree: crate::tree::render_tree(&pack::tree_label(&opts.roots), &paths),
+        stats: pack::Stats {
+            truncated: manifest.truncated,
+            ..pack::Stats::default()
+        },
+    };
     let mut dump = Cursor::new(Vec::new());
     crate::render::write_tree(&mut dump, &packed, &opts)
         .map_err(|err| ApiError::bad(err.to_string()))?;
@@ -418,7 +535,7 @@ fn options_from_pack(
         source_mode: req.source,
         tree,
         format,
-        selected: req.selected,
+        selection: Selection::Only(req.selected),
         exclude: merge_excludes(req.no_default_excludes, req.exclude),
         max_file_size,
         list_only,
@@ -494,6 +611,9 @@ mod tests {
                     .method("POST")
                     .uri(uri)
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
+                    .header(header::ORIGIN, "http://127.0.0.1:8747")
+                    .header("x-pulp-token", TEST_TOKEN)
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
@@ -552,6 +672,8 @@ mod tests {
         assert!(html.contains("localhost"));
         assert!(html.contains("Fraunces"));
         assert!(html.contains("/fonts/fraunces.woff2"));
+        assert!(html.contains(TEST_TOKEN));
+        assert!(!html.contains("__PULP_TOKEN__"));
     }
 
     #[tokio::test]
@@ -623,6 +745,7 @@ mod tests {
     async fn test_browse_with_stub_picker_returns_testdata_path() {
         let app = router_with(AppState {
             pick: stub_pick_testdata,
+            token: Arc::from(TEST_TOKEN),
         });
         let response = app
             .oneshot(
@@ -630,6 +753,8 @@ mod tests {
                     .method("POST")
                     .uri("/api/browse")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
+                    .header("x-pulp-token", TEST_TOKEN)
                     .body(Body::from("{}"))
                     .unwrap(),
             )
@@ -647,6 +772,7 @@ mod tests {
     async fn test_browse_with_cancel_returns_cancelled() {
         let app = router_with(AppState {
             pick: stub_pick_cancel,
+            token: Arc::from(TEST_TOKEN),
         });
         let response = app
             .oneshot(
@@ -654,6 +780,8 @@ mod tests {
                     .method("POST")
                     .uri("/api/browse")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
+                    .header("x-pulp-token", TEST_TOKEN)
                     .body(Body::from("{}"))
                     .unwrap(),
             )
@@ -678,6 +806,96 @@ mod tests {
         assert!(html.contains("file manager"));
         assert!(html.contains("Copy tree"));
         assert!(html.contains("id=\"types\""));
+        assert!(html.contains("id=\"stale\""));
+        assert!(html.contains("x-pulp-token"));
+    }
+
+    #[test]
+    fn test_origin_ok_with_loopback_returns_true() {
+        assert!(origin_ok("http://127.0.0.1:8747"));
+        assert!(origin_ok("http://localhost"));
+        assert!(origin_ok("http://[::1]"));
+        assert!(!origin_ok("http://127.0.0.1.evil.test"));
+        assert!(!origin_ok("http://example.com"));
+        assert!(!origin_ok("not a uri"));
+    }
+
+    #[test]
+    fn test_header_host_ok_with_port_returns_true() {
+        assert!(header_host_ok("127.0.0.1:8747"));
+        assert!(header_host_ok("localhost"));
+        assert!(header_host_ok("[::1]:8747"));
+        assert!(!header_host_ok("example.com"));
+        assert!(!header_host_ok("127.0.0.1.evil.test"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_missing_token_returns_unauthorized() {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"path":"."}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_wrong_token_returns_unauthorized() {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-pulp-token", "nope")
+                    .body(Body::from(r#"{"path":"."}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_bad_origin_returns_forbidden() {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ORIGIN, "http://127.0.0.1.evil.test")
+                    .header("x-pulp-token", TEST_TOKEN)
+                    .body(Body::from(r#"{"path":"."}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_bad_host_returns_forbidden() {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "example.com")
+                    .header("x-pulp-token", TEST_TOKEN)
+                    .body(Body::from(r#"{"path":"."}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
