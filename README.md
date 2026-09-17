@@ -127,7 +127,7 @@ Noisy trees and secrets stay out even when they are tracked or the folder is not
 
 ## Web mill
 
-`pulp ui` starts a letterpress-style mill on **127.0.0.1 only**. Click **Browse** to pick a folder in Finder (or the system file manager); the mill then scans it. Folders in the proof tree collapse. Tick files (Rust, Lean, `.npz`, and the rest), pick `txt` / `md` / `xml`, then **Pulp**, **Copy**, **Copy tree**, or download. Copy tree puts only the directory map on the clipboard, in the selected format. Changing ticks or settings after a dump marks the output out of date. POSTs carry a per-process session token. Nothing is uploaded.
+`pulp ui` starts a letterpress-style mill on **127.0.0.1 only**. Click **Browse** to pick a folder in Finder (or the system file manager); the mill then scans it. Folders in the proof tree collapse. Tick files (Rust, Lean, `.npz`, and the rest). Dump format defaults to XML (`txt` / `md` / `xml`). Scan options (gitignore, hidden, archives, notebook outputs, source files) live in a collapsible Options menu. Then **Pulp**, **Copy**, **Copy tree**, or download. Copy tree puts only the directory map on the clipboard, in the selected format. Changing ticks or settings after a dump marks the output out of date. POSTs carry a per-process session token. Nothing is uploaded. Virtualenv trees (`.venv/`, `venv/`), lockfiles, and images start unchecked.
 
 ```
 pulp ui
