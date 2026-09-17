@@ -520,7 +520,7 @@
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
-    const state = { files: [], selected: new Set(), collapsed: new Set(), dump: "", filename: "pulp.txt" };
+    const state = { files: [], selected: new Set(), collapsed: new Set(), dump: "", filename: "pulp.txt", bytes: 0 };
 
     function opts() {
       return {
@@ -573,6 +573,19 @@
       $("copytree").disabled = !on;
       $("copytreeDump").disabled = !on;
       $("copytree2").disabled = !on;
+      refreshTickStats();
+    }
+
+    function refreshTickStats() {
+      const n = state.selected.size;
+      const t = state.files.length;
+      if (!t) {
+        $("stats").textContent = "idle";
+        return;
+      }
+      $("stats").innerHTML =
+        "<strong>" + n + "</strong> ticked · <strong>" + t + "</strong> files" +
+        (state.bytes ? " · " + human(state.bytes) : "");
     }
 
     function buildTree(files) {
@@ -754,13 +767,13 @@
       try {
         const data = await api("/api/scan", o);
         state.files = data.files;
+        state.bytes = data.bytes || 0;
         state.selected = new Set(
           data.files.filter((f) => f.default_on !== false).map((f) => f.relative)
         );
         state.collapsed = new Set();
         renderTree();
         setView("files");
-        $("stats").innerHTML = "<strong>" + data.file_count + "</strong> files · " + human(data.bytes);
       } catch (e) {
         setErr(e.message);
         $("stats").textContent = "scan failed";
