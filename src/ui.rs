@@ -509,7 +509,7 @@ fn options_from_pack(
 ) -> Result<Options, ApiError> {
     let root = resolve_root(&req.path)?;
     let format = if req.format.trim().is_empty() {
-        OutputFormat::Plain
+        OutputFormat::Xml
     } else {
         OutputFormat::from_ext(&req.format)
             .ok_or_else(|| ApiError::bad(format!("unknown format {}", req.format)))?
@@ -733,6 +733,25 @@ mod tests {
         assert!(json["tokens_est"].as_u64().unwrap() > 0);
     }
 
+    #[tokio::test]
+    async fn test_pack_with_empty_format_returns_xml_dump() {
+        let path = testdata().display().to_string();
+        let (status, json) = post_json(
+            "/api/pack",
+            serde_json::json!({
+                "path": path,
+                "gitignore": false,
+                "selected": ["hello.rs"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let dump = json["dump"].as_str().unwrap();
+        assert!(dump.contains("<documents>"), "{dump}");
+        assert_eq!(json["filename"].as_str(), Some("pulp.xml"));
+        assert_eq!(json["format"].as_str(), Some("xml"));
+    }
+
     fn stub_pick_testdata() -> Result<Option<PathBuf>, String> {
         Ok(Some(testdata()))
     }
@@ -808,6 +827,11 @@ mod tests {
         assert!(html.contains("id=\"types\""));
         assert!(html.contains("id=\"stale\""));
         assert!(html.contains("x-pulp-token"));
+        assert!(html.contains("id=\"settings\""));
+        assert!(html.contains("class=\"info\""));
+        assert!(html.contains("data-tip"));
+        assert!(html.contains("data-fmt=\"xml\" class=\"on\""));
+        assert!(html.contains("<option value=\"xml\" selected>"));
     }
 
     #[test]

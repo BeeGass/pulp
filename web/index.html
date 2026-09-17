@@ -185,8 +185,103 @@
     .opts {
       display: flex;
       flex-wrap: wrap;
-      gap: 4px 12px;
+      gap: 8px 12px;
+      align-items: flex-start;
+    }
+    .settings {
+      flex: 1 1 240px;
+      border: 1px solid #3d342a;
+      border-radius: 10px;
+      background: var(--ink-2);
+      min-width: min(100%, 240px);
+    }
+    .settings > summary {
+      list-style: none;
+      min-height: var(--tap);
+      display: flex;
       align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      cursor: pointer;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--mist);
+      user-select: none;
+    }
+    .settings > summary::-webkit-details-marker { display: none; }
+    .settings > summary::before {
+      content: "▸";
+      font-family: var(--mono);
+      color: var(--brass);
+    }
+    .settings[open] > summary::before { content: "▾"; }
+    .settings[open] > summary {
+      border-bottom: 1px solid #3d342a;
+    }
+    .settings-list {
+      display: grid;
+      gap: 2px;
+      padding: 6px 8px 10px;
+    }
+    .setting {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      padding: 0 4px;
+    }
+    .info {
+      position: relative;
+      width: 22px;
+      height: 22px;
+      min-height: 22px;
+      padding: 0;
+      border-radius: 50%;
+      border: 1px solid color-mix(in srgb, var(--brass) 55%, #3d342a);
+      background: var(--ink-3);
+      color: var(--brass);
+      font-family: var(--display);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: 0;
+      text-transform: none;
+      line-height: 1;
+    }
+    .info::after {
+      content: attr(data-tip);
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 8px);
+      width: max-content;
+      max-width: min(16rem, 70vw);
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #4a3f32;
+      background: var(--ink);
+      color: var(--paper);
+      font-family: var(--ui);
+      font-size: 12px;
+      font-weight: 400;
+      letter-spacing: 0.01em;
+      text-transform: none;
+      line-height: 1.4;
+      text-align: left;
+      white-space: normal;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(4px);
+      transition: opacity 0.12s ease, transform 0.12s ease;
+      z-index: 5;
+      box-shadow: 0 10px 24px #0008;
+    }
+    .info:hover::after,
+    .info:focus::after,
+    .info:focus-visible::after {
+      opacity: 1;
+      transform: translateY(0);
     }
     .seg {
       display: inline-flex;
@@ -516,21 +611,44 @@
       </div>
       <div class="opts">
         <span class="seg" role="group" aria-label="format">
-          <button type="button" data-fmt="txt" class="on">txt</button>
+          <button type="button" data-fmt="txt">txt</button>
           <button type="button" data-fmt="md">md</button>
-          <button type="button" data-fmt="xml">xml</button>
+          <button type="button" data-fmt="xml" class="on">xml</button>
         </span>
         <select id="format" hidden>
-          <option value="txt" selected>txt</option>
+          <option value="txt">txt</option>
           <option value="md">md</option>
-          <option value="xml">xml</option>
+          <option value="xml" selected>xml</option>
         </select>
-        <label class="opt"><input type="checkbox" id="gitignore" checked> gitignore</label>
-        <label class="opt"><input type="checkbox" id="hidden"> hidden</label>
-        <label class="opt"><input type="checkbox" id="archives"> archives</label>
-        <label class="opt"><input type="checkbox" id="notebook"> notebook outputs</label>
-        <label class="opt"><input type="checkbox" id="source"> source files</label>
-        <label class="opt"><input type="checkbox" id="notree"> no tree</label>
+        <details class="settings" id="settings">
+          <summary>Options</summary>
+          <div class="settings-list">
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="gitignore" checked> gitignore</label>
+              <button type="button" class="info" data-tip="Honor .gitignore, .ignore, and git exclude files when walking the tree." aria-label="Honor .gitignore, .ignore, and git exclude files when walking the tree.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="hidden"> hidden</label>
+              <button type="button" class="info" data-tip="Include hidden files and folders (dotfiles). .git is still skipped." aria-label="Include hidden files and folders (dotfiles). .git is still skipped.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="archives"> archives</label>
+              <button type="button" class="info" data-tip="Expand nested zip and tar members, not only a root archive." aria-label="Expand nested zip and tar members, not only a root archive.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="notebook"> notebook outputs</label>
+              <button type="button" class="info" data-tip="Keep Jupyter cell outputs in the dump, not only the source cells." aria-label="Keep Jupyter cell outputs in the dump, not only the source cells.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="source"> source files</label>
+              <button type="button" class="info" data-tip="Keep HTML, XML, and JSON as source instead of converting to readable text." aria-label="Keep HTML, XML, and JSON as source instead of converting to readable text.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="notree"> no tree</label>
+              <button type="button" class="info" data-tip="Omit the directory map from the top of the dump." aria-label="Omit the directory map from the top of the dump.">i</button>
+            </div>
+          </div>
+        </details>
       </div>
     </div>
     <div class="err" id="err" role="status" aria-live="polite"></div>
@@ -585,7 +703,7 @@
       selected: new Set(),
       collapsed: new Set(),
       dump: "",
-      filename: "pulp.txt",
+      filename: "pulp.xml",
       bytes: 0,
       reqId: 0,
       dumpKey: "",
