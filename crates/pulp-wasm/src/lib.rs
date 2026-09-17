@@ -2,16 +2,15 @@
 //!
 //! File bytes cross the JS↔WASM boundary as `Uint8Array` (not base64).
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pulp::{
-    classify, is_default_selected, language_label, pack_entries, Options, OutputFormat, Selection,
-    TreeMode,
+    classify, default_exclude_globs, is_default_selected, language_label, pack_entries, MemoryFile,
+    Options, OutputFormat, PathPolicy, Selection, TreeMode,
 };
-use serde::Serialize;
 use serde::ser::Serialize as SerdeSerialize;
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -24,22 +23,14 @@ pub fn pulp_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-
 fn to_js<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {
     let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-    SerdeSerialize::serialize(value, &serializer)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    SerdeSerialize::serialize(value, &serializer).map_err(|e| JsValue::from_str(&e.to_string()))
 }
-
-
 
 fn js_now_ms() -> f64 {
     js_sys::Date::now()
 }
-
-
-
-
 
 fn normalize_rel(path: &str) -> String {
     path.replace('\\', "/")
@@ -48,29 +39,43 @@ fn normalize_rel(path: &str) -> String {
         .to_string()
 }
 
-fn matches_exclude(relative: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return false;
+fn resolved_exclude(extra: Vec<String>) -> Vec<String> {
+    if extra.is_empty() {
+        default_exclude_globs()
+    } else {
+        extra
     }
-    let name = relative.rsplit('/').next().unwrap_or(relative);
-    for pat in patterns {
-        let pat = pat.trim().trim_start_matches("**/");
-        if pat.is_empty() {
-            continue;
-        }
-        if relative.contains(pat.trim_end_matches("/**").trim_end_matches("/*")) {
-            return true;
-        }
-        if name == pat || relative.ends_with(pat) {
-            return true;
-        }
-        if let Some(prefix) = pat.strip_suffix('*') {
-            if name.starts_with(prefix) || relative.contains(prefix) {
-                return true;
-            }
-        }
-    }
-    false
+}
+
+thread_local! {
+    static ARTIFACTS: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn store_artifact(id: &str, dump: String) {
+    ARTIFACTS.with(|map| {
+        map.borrow_mut().insert(id.to_string(), dump);
+    });
+}
+
+/// Full dump for a previous [`pack_files`] result.
+#[wasm_bindgen]
+pub fn artifact(result_id: &str) -> Result<String, JsValue> {
+    ARTIFACTS.with(|map| {
+        map.borrow()
+            .get(result_id)
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("unknown result"))
+    })
+}
+
+fn new_handle() -> String {
+    let mut buf = [0u8; 8];
+    let _ = getrandom::fill(&mut buf);
+    buf.iter().fold(String::from("w-"), |mut s, b| {
+        s.push_str(&format!("{b:02x}"));
+        s
+    })
 }
 
 #[derive(Serialize)]
@@ -122,7 +127,6 @@ struct FileOutcome {
     message: String,
 }
 
-
 #[derive(serde::Deserialize)]
 struct ScanFileIn {
     relative: String,
@@ -150,6 +154,14 @@ pub fn scan_files(input: JsValue) -> Result<JsValue, JsValue> {
     let req: ScanInput = serde_wasm_bindgen::from_value(input)
         .map_err(|e| JsValue::from_str(&format!("invalid scan input: {e}")))?;
     let max_file = req.max_file_size.unwrap_or(8 * 1024 * 1024);
+    let opts = Options {
+        hidden: req.hidden,
+        follow_archives: req.archives,
+        exclude: resolved_exclude(req.exclude),
+        max_file_size: max_file,
+        ..Options::default()
+    };
+    let policy = PathPolicy::from_options(&opts).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let mut files = Vec::new();
     let mut bytes = 0u64;
@@ -165,14 +177,7 @@ pub fn scan_files(input: JsValue) -> Result<JsValue, JsValue> {
         if relative.is_empty() {
             continue;
         }
-        if !req.hidden
-            && relative
-                .split('/')
-                .any(|p| p.starts_with('.') && p != "." && p != "..")
-        {
-            continue;
-        }
-        if matches_exclude(&relative, &req.exclude) {
+        if !policy.keep_walk(&relative) {
             continue;
         }
         let kind = classify(Path::new(&relative), None);
@@ -200,7 +205,7 @@ pub fn scan_files(input: JsValue) -> Result<JsValue, JsValue> {
         file_count,
         bytes,
         truncated,
-        manifest_id: format!("m-{file_count}-{bytes}"),
+        manifest_id: new_handle(),
     };
     to_js(&resp)
 }
@@ -247,65 +252,35 @@ pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
     let req: PackInput = serde_wasm_bindgen::from_value(input)
         .map_err(|e| JsValue::from_str(&format!("invalid pack input: {e}")))?;
 
-    let selected_set: HashMap<String, ()> = req
-        .selected
-        .iter()
-        .map(|s| (normalize_rel(s), ()))
+    let owned: Vec<(String, String, Vec<u8>)> = req
+        .files
+        .into_iter()
+        .filter_map(|f| {
+            let relative = normalize_rel(&f.relative);
+            if relative.is_empty() {
+                return None;
+            }
+            let id = if f.id.is_empty() {
+                relative.clone()
+            } else {
+                f.id
+            };
+            Some((id, relative, f.bytes))
+        })
         .collect();
-    let filter_selected = !selected_set.is_empty();
-
-    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut id_map: HashMap<String, String> = HashMap::new();
-
-    for f in req.files {
-        let relative = normalize_rel(&f.relative);
-        if relative.is_empty() {
-            continue;
-        }
-        let id = if f.id.is_empty() {
-            relative.clone()
-        } else {
-            f.id.clone()
-        };
-        if filter_selected && !selected_set.contains_key(&relative) && !selected_set.contains_key(&id) {
-            continue;
-        }
-        id_map.insert(relative.clone(), id);
-        entries.push((relative, f.bytes));
-    }
-
-    if entries.is_empty() {
-        let resp = PackResponse {
-            dump: String::new(),
-            filename: "pulp-browser.txt".into(),
-            format: "txt".into(),
-            files_extracted: 0,
-            files_skipped: 0,
-            tokens_est: 0,
-            chars_emitted: 0,
-            dump_bytes: 0,
-            elapsed_ms: (js_now_ms() - t0).max(0.0) as u128,
-            truncated: false,
-            cancelled: false,
-            preview_truncated: false,
-            manifest_id: String::new(),
-            result_id: String::new(),
-            outcomes: Vec::new(),
-            error: Some("No readable files in selection".into()),
-        };
-        return to_js(&resp);
-    }
+    let mem: Vec<MemoryFile<'_>> = owned
+        .iter()
+        .map(|(id, relative, bytes)| MemoryFile {
+            id,
+            relative,
+            bytes,
+        })
+        .collect();
 
     let out_format = match req.format.to_ascii_lowercase().as_str() {
         "md" | "markdown" => OutputFormat::Markdown,
         "xml" => OutputFormat::Xml,
         _ => OutputFormat::Plain,
-    };
-
-    let selection = if filter_selected {
-        Selection::Only(req.selected.iter().map(|s| normalize_rel(s)).collect())
-    } else {
-        Selection::AllEligible
     };
 
     let opts = Options {
@@ -319,16 +294,16 @@ pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
         } else {
             TreeMode::Selected
         },
-        exclude: req.exclude,
+        exclude: resolved_exclude(req.exclude),
         max_file_size: req.max_file_size.unwrap_or(8 * 1024 * 1024),
         max_entries: req.max_entries.unwrap_or(5_000),
-        selection,
+        selection: Selection::Only(req.selected.iter().map(|s| normalize_rel(s)).collect()),
         jobs: 1,
         ..Options::default()
     };
 
     let cancel = AtomicBool::new(false);
-    let packed = pack_entries(&entries, &opts, Some(&cancel))
+    let packed = pack_entries(&mem, &opts, Some(&cancel))
         .map_err(|e| JsValue::from_str(&format!("pack_entries failed: {e}")))?;
 
     let mut dump_buf = Vec::new();
@@ -336,14 +311,19 @@ pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("render failed: {e}")))?;
     let dump = String::from_utf8_lossy(&dump_buf).into_owned();
     let dump_bytes = dump.len();
-    let preview_truncated = dump_bytes > 2_000_000;
+    const PREVIEW_BYTES: usize = 2_000_000;
+    let preview_truncated = dump_bytes > PREVIEW_BYTES;
     let dump_out = if preview_truncated {
-        let mut s = dump.chars().take(2_000_000).collect::<String>();
-        s.push_str("\n\n… preview truncated …\n");
-        s
+        let mut end = PREVIEW_BYTES;
+        while end > 0 && !dump.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}\n\n… preview truncated …\n", &dump[..end])
     } else {
-        dump
+        dump.clone()
     };
+    let result_id = new_handle();
+    store_artifact(&result_id, dump);
 
     let ext = out_format.extension();
     let filename = format!("pulp-browser.{ext}");
@@ -352,10 +332,7 @@ pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
         .files
         .iter()
         .map(|f| FileOutcome {
-            id: id_map
-                .get(&f.relative)
-                .cloned()
-                .unwrap_or_else(|| f.relative.clone()),
+            id: f.id.clone(),
             relative: f.relative.clone(),
             status: f.status.as_str(),
             message: f.status.message(f.size),
@@ -390,7 +367,7 @@ pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
         cancelled: packed.stats.cancelled || cancel.load(Ordering::Relaxed),
         preview_truncated,
         manifest_id: String::new(),
-        result_id: format!("r-{}", packed.stats.files_extracted),
+        result_id,
         outcomes,
         error,
     };
@@ -400,14 +377,19 @@ pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
 /// Tiny self-check used by the mill on load (pure Rust, no JS byte marshaling).
 #[wasm_bindgen]
 pub fn smoke_pack() -> Result<JsValue, JsValue> {
-    let entries = vec![("hello.rs".to_string(), b"fn main() {}
-".to_vec())];
+    let bytes = b"fn main() {}\n".to_vec();
+    let entries = [MemoryFile {
+        id: "hello.rs",
+        relative: "hello.rs",
+        bytes: &bytes,
+    }];
     let opts = Options {
         format: OutputFormat::Plain,
         tree: TreeMode::None,
         jobs: 1,
         max_file_size: 8 * 1024 * 1024,
         max_entries: 100,
+        selection: Selection::AllEligible,
         ..Options::default()
     };
     let packed = pack_entries(&entries, &opts, None)

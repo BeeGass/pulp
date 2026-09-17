@@ -2,6 +2,11 @@
 /* eslint-disable */
 
 /**
+ * Full dump for a previous [`pack_files`] result.
+ */
+export function artifact(result_id: string): string;
+
+/**
  * Pack selected files. Each file is `{ relative, bytes: Uint8Array, id? }`.
  */
 export function pack_files(input: any): any;
@@ -24,6 +29,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly artifact: (a: number, b: number) => [number, number, number, number];
     readonly pack_files: (a: any) => [number, number, number];
     readonly pulp_version: () => [number, number];
     readonly scan_files: (a: any) => [number, number, number];

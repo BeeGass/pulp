@@ -726,10 +726,12 @@
     <p class="deck">Grind a folder into one LLM-ready file in this tab. Rust, Lean, Office, PDFs — nothing leaves the browser.</p>
     <div class="toolbar">
       <div class="path-row">
-        <div id="path" class="path-display" style="flex:1;min-width:0;padding:10px 12px;border-radius:10px;border:1px solid color-mix(in srgb, var(--rule) 45%, transparent);background:#0c0a08;color:var(--mist);font-family:var(--mono);font-size:.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">No folder selected — Browse</div>
+        <div id="path" class="path-display" style="flex:1;min-width:0;padding:10px 12px;border-radius:10px;border:1px solid color-mix(in srgb, var(--rule) 45%, transparent);background:#0c0a08;color:var(--mist);font-family:var(--mono);font-size:.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Choose a folder or files. Only the files you grant access to are available to this tab.</div>
         <input id="dirInput" type="file" webkitdirectory multiple style="display:none">
+        <input id="fileInput" type="file" multiple style="display:none">
         <div class="path-actions">
-          <button id="browse" type="button">Browse</button>
+          <button id="browse" type="button">Choose folder</button>
+          <button id="browseFiles" type="button">Choose files</button>
           <button id="scan" class="primary" type="button">Scan</button>
         </div>
       </div>
@@ -748,9 +750,9 @@
         <span class="ctl">
           <span class="ctl-l">Output format</span>
           <span class="seg" role="group" aria-label="format">
-            <button type="button" data-fmt="txt">txt</button>
-            <button type="button" data-fmt="md">md</button>
-            <button type="button" data-fmt="xml" class="on">xml</button>
+            <button type="button" data-fmt="txt">Plain text</button>
+            <button type="button" data-fmt="md">Markdown</button>
+            <button type="button" data-fmt="xml" class="on">XML</button>
           </span>
         </span>
         <select id="format" hidden>
@@ -763,8 +765,8 @@
           <summary>Options</summary>
           <div class="settings-list">
             <div class="setting">
-              <label class="opt"><input type="checkbox" id="gitignore" checked> gitignore</label>
-              <button type="button" class="info" data-tip="Honor .gitignore, .ignore, and git exclude files when walking the tree." aria-label="Honor .gitignore, .ignore, and git exclude files when walking the tree.">i</button>
+              <label class="opt"><input type="checkbox" id="gitignore" disabled> gitignore</label>
+              <button type="button" class="info" data-tip="Gitignore walks need the native mill (pulp ui). This tab only sees files you grant." aria-label="Gitignore walks need the native mill.">i</button>
             </div>
             <div class="setting">
               <label class="opt"><input type="checkbox" id="hidden"> hidden</label>
@@ -849,7 +851,7 @@
   </div>
   
 <script type="module">
-import init, { scan_files, pack_files, pulp_version, smoke_pack } from './pkg/pulp_wasm.js';
+import init, { scan_files, pack_files, artifact, pulp_version, smoke_pack } from './pkg/pulp_wasm.js';
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -859,6 +861,8 @@ const state = {
   collapsed: new Set(),
   dump: '',
   filename: 'pulp-browser.xml',
+  resultId: '',
+  previewTruncated: false,
   outcomes: [],
   busy: false,
   cancel: false,
@@ -1123,7 +1127,9 @@ async function ingestFiles(list) {
     const relative = (file.webkitRelativePath || file.name || '').replace(/^\.\//, '');
     if (relative) state.fileMap.set(relative, file);
   }
-  $('path').textContent = state.fileMap.size ? `${state.fileMap.size} files selected` : 'No folder selected — Browse';
+  $('path').textContent = state.fileMap.size
+    ? `${state.fileMap.size} files granted to this tab`
+    : 'Choose a folder or files. Only the files you grant access to are available to this tab.';
   $('scan').disabled = state.fileMap.size === 0;
   refreshStats();
 }
@@ -1158,7 +1164,9 @@ function packViaWorker(payload) {
   return new Promise((resolve, reject) => {
     let w;
     try { w = ensureWorker(); } catch (e) { reject(e); return; }
+    const id = String(Date.now()) + '-' + Math.random().toString(16).slice(2);
     const onMsg = (ev) => {
+      if (ev.data?.id && ev.data.id !== id) return;
       w.removeEventListener('message', onMsg);
       w.removeEventListener('error', onErr);
       if (ev.data?.ok) resolve(ev.data.result);
@@ -1171,9 +1179,7 @@ function packViaWorker(payload) {
     };
     w.addEventListener('message', onMsg);
     w.addEventListener('error', onErr);
-    // Structured-clone only — do NOT transfer ArrayBuffers.
-    // Transfer detaches buffers and breaks main-thread fallback / reuse.
-    w.postMessage({ type: 'pack', payload });
+    w.postMessage({ type: 'pack', id, payload });
   });
 }
 
@@ -1220,6 +1226,8 @@ async function pulp() {
     if (data.error) setErr(data.error);
     state.dump = data.dump || '';
     state.filename = data.filename || 'pulp-browser.txt';
+    state.resultId = data.result_id || '';
+    state.previewTruncated = !!data.preview_truncated;
     state.outcomes = data.outcomes || [];
     $('preview').textContent = state.dump || (data.error ? `(${data.error})` : '(empty dump)');
     renderIssues();
@@ -1229,7 +1237,7 @@ async function pulp() {
     $('resultMeta').textContent =
       `${data.files_extracted || 0} extracted · ${data.files_skipped || 0} skipped · ~${data.tokens_est || 0} tok · ${human(data.dump_bytes || 0)} · ${data.elapsed_ms || 0} ms`;
     $('stats').textContent = $('resultMeta').textContent;
-    if (data.preview_truncated) setErr((data.error ? data.error + ' · ' : '') + 'Preview truncated in the UI; packed output may be larger.');
+    if (data.preview_truncated) setErr((data.error ? data.error + ' · ' : '') + 'Showing the first part of the dump; Download contains the full result.');
     if (!ok && !data.error) setErr('Pack produced no extracted text. Try enabling archives, or check Issues.');
   } catch (e) {
     setErr(String(e && e.message || e));
@@ -1242,7 +1250,7 @@ function cancelPulp() {
   state.cancel = true;
   if (state.worker) { try { state.worker.terminate(); } catch(_){} state.worker = null; }
   setBusy(false);
-  $('stats').textContent = 'cancelled';
+  $('stats').textContent = 'cancelled — unfinished work discarded';
 }
 
 async function copyTree() {
@@ -1250,13 +1258,20 @@ async function copyTree() {
   await navigator.clipboard.writeText(text);
   $('stats').textContent = 'tree copied';
 }
+async function fullDump() {
+  if (state.previewTruncated && state.resultId) {
+    try { return artifact(state.resultId); } catch (_) {}
+  }
+  return state.dump;
+}
 async function copyDump() {
-  await navigator.clipboard.writeText(state.dump);
+  await navigator.clipboard.writeText(await fullDump());
   $('stats').textContent = 'dump copied';
 }
-function downloadDump() {
+async function downloadDump() {
+  const text = await fullDump();
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([state.dump], { type: 'text/plain' }));
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
   a.download = state.filename;
   a.click();
   URL.revokeObjectURL(a.href);
@@ -1273,7 +1288,12 @@ document.querySelectorAll('[data-content]').forEach(b => b.addEventListener('cli
 }));
 
 $('browse').addEventListener('click', () => $('dirInput').click());
+$('browseFiles').addEventListener('click', () => $('fileInput').click());
 $('dirInput').addEventListener('change', async (e) => {
+  await ingestFiles([...e.target.files]);
+  await scan();
+});
+$('fileInput').addEventListener('change', async (e) => {
   await ingestFiles([...e.target.files]);
   await scan();
 });
