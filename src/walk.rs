@@ -6,13 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::SystemTime;
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::GlobSet;
 use ignore::overrides::OverrideBuilder;
 use ignore::{WalkBuilder, WalkState};
 
 use crate::config::Options;
 use crate::error::Error;
-pub(crate) use crate::filter::{build_globset, glob_matches, is_hidden_rel, keep_relative};
+use crate::filter::{build_globset, glob_matches};
 
 /// A file discovered under the pack roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,8 +357,6 @@ fn looks_like_archive(relative: &str) -> bool {
     let n = relative.to_ascii_lowercase();
     n.ends_with(".zip") || n.ends_with(".tar") || n.ends_with(".tgz") || n.ends_with(".tar.gz")
 }
-
-
 
 fn relative_for(root: &Path, path: &Path, multi: bool) -> String {
     let stripped = path.strip_prefix(root).unwrap_or(path);

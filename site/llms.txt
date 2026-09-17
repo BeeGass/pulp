@@ -1,0 +1,25 @@
+# Pulp
+
+> Pulp grinds a local folder into one LLM-ready text file. Runs on your machine. Browser mill at /mill — files stay in the tab.
+
+This file follows the llms.txt convention: a curated map of public pages, with clean markdown mirrors for agents.
+Human-facing HTML is unchanged; prefer `text/markdown` URLs below when you need the full text.
+
+Site: https://pulp.onlygass.dev
+Full corpus: https://pulp.onlygass.dev/llms-full.txt
+Source: https://github.com/BeeGass/pulp
+
+## Primary pages
+
+- [Home](https://pulp.onlygass.dev/): Overview — grind a folder into one LLM-ready dump
+  - Markdown: https://pulp.onlygass.dev/index.md
+- [Browser mill](https://pulp.onlygass.dev/mill): In-tab WASM packer; nothing uploaded
+  - Markdown: https://pulp.onlygass.dev/mill.md
+
+## Notes for agents
+
+- Files never leave the machine / tab. There is no cloud packer.
+- Per-page markdown mirrors use the `.md` suffix and `Content-Type: text/markdown`.
+- HTML pages advertise the mirror via `rel=alternate` / `type=text/markdown`.
+- Do not treat WASM/worker assets under `/mill/` as documentation corpus.
+- Local CLI mill: `pulp ui` binds loopback only (default `127.0.0.1:8747`).

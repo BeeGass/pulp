@@ -119,8 +119,10 @@ a:hover { color: var(--paper); }
   font-weight: 500;
   font-size: 0.95rem;
 }
-.btn-primary { background: var(--rust); color: #fff7ef; }
-.btn-primary:hover { background: #b3441f; color: #fff; }
+.btn-primary { background: #b3441f; color: #fff; }
+.btn-primary:hover { background: #8f3618; color: #fff; }
+.btn-primary:focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; }
+.btn-primary:disabled { opacity: 0.45; }
 .btn-ghost {
   border: 1px solid color-mix(in srgb, var(--rule) 55%, transparent);
   color: var(--paper);

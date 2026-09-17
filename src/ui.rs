@@ -20,7 +20,7 @@ use crate::config::{
 use crate::manifest;
 use crate::pack;
 use crate::pick;
-use crate::store::{self, Mill, StoredResult};
+use crate::store::{self, JobGuard, Mill, StoredResult};
 
 const INDEX: &str = include_str!("../web/index.html");
 
@@ -329,6 +329,9 @@ struct PackResponse {
     chars_emitted: usize,
     dump_bytes: usize,
     elapsed_ms: u128,
+    extract_ms: u128,
+    render_ms: u128,
+    cache_hit: bool,
     truncated: bool,
     cancelled: bool,
     preview_truncated: bool,
@@ -447,15 +450,19 @@ async fn pack_dump(
     Json(req): Json<PackRequest>,
 ) -> Result<Json<PackResponse>, ApiError> {
     authorize(&state, &headers)?;
-    if !state.mill.try_begin_pack() {
-        return Err(ApiError::busy());
-    }
+    let job = state.mill.try_begin_pack().ok_or_else(ApiError::busy)?;
     let mill = Arc::clone(&state.mill);
-    let result = tokio::task::spawn_blocking(move || pack_sync(req, &mill))
-        .await
-        .map_err(|err| ApiError::bad(err.to_string()));
-    state.mill.end_pack();
-    result?.map(Json)
+    let job_worker = Arc::clone(&job);
+    let result = tokio::task::spawn_blocking(move || {
+        let _guard = JobGuard {
+            mill: Arc::clone(&mill),
+            job: job_worker,
+        };
+        pack_sync(req, &mill)
+    })
+    .await
+    .map_err(|err| ApiError::bad(err.to_string()))?;
+    result.map(Json)
 }
 
 async fn render_dump(
@@ -561,24 +568,27 @@ fn pack_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> {
     let opts = options_from_pack(req.clone(), false, false)?;
     let (manifest_id, mut snapshot) = load_or_scan_manifest(&req, mill)?;
     if let Some(hit) = mill.find_result(&manifest_id, &extract_key) {
-        return finish_pack(hit, &opts, Some(Instant::now()));
+        return finish_pack(hit, &opts, true);
     }
     snapshot.entries.retain(|entry| {
         req.selected
             .iter()
             .any(|id| id == &entry.id || id == &entry.relative)
     });
-    let packed = pack::pack_manifest(&snapshot, &opts, Some(&mill.cancel), Some(Instant::now()))
+    let job = mill.current_job();
+    let cancel = job.as_ref().map(|j| &j.cancel);
+    let packed = pack::pack_manifest(&snapshot, &opts, cancel, Some(Instant::now()))
         .map_err(|err| ApiError::bad(err.to_string()))?;
-    let stored = StoredResult {
+    let stored = mill.put_result(StoredResult {
         id: store::new_id(),
-        manifest_id: manifest_id.clone(),
+        manifest_id,
         extract_key,
-        files: packed.files.clone(),
-        stats: packed.stats.clone(),
-    };
-    mill.put_result(stored.clone());
-    finish_pack(stored, &opts, Some(Instant::now()))
+        files: packed.files,
+        stats: packed.stats,
+        roots: opts.roots.clone(),
+        source_mode: opts.source_mode,
+    });
+    finish_pack(stored, &opts, false)
 }
 
 fn render_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> {
@@ -589,7 +599,7 @@ fn render_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> 
         .get_result(&req.result_id)
         .ok_or_else(|| ApiError::bad("unknown result"))?;
     let opts = options_from_pack(req, false, false)?;
-    finish_pack(stored, &opts, Some(Instant::now()))
+    finish_pack(stored, &opts, true)
 }
 
 fn artifact_sync(id: &str, query: &ArtifactQuery, mill: &Mill) -> Result<Response, ApiError> {
@@ -609,6 +619,8 @@ fn artifact_sync(id: &str, query: &ArtifactQuery, mill: &Mill) -> Result<Respons
         } else {
             TreeMode::Selected
         },
+        roots: stored.roots.clone(),
+        source_mode: stored.source_mode,
         ..Options::default()
     };
     let packed = packed_from_stored(&stored, &opts);
@@ -635,9 +647,13 @@ fn load_or_scan_manifest(
     req: &PackRequest,
     mill: &Mill,
 ) -> Result<(String, crate::manifest::ScanManifest), ApiError> {
+    let want = discovery_key_pack(req);
     if !req.manifest_id.is_empty() {
         if let Some(stored) = mill.get_manifest(&req.manifest_id) {
-            return Ok((stored.id, stored.manifest));
+            if stored.discovery_key == want {
+                return Ok((stored.id, stored.manifest));
+            }
+            return Err(ApiError::bad("manifest settings changed; rescan"));
         }
     }
     let opts = options_from_pack(req.clone(), true, false)?;
@@ -647,10 +663,11 @@ fn load_or_scan_manifest(
 }
 
 fn finish_pack(
-    stored: StoredResult,
+    stored: Arc<StoredResult>,
     opts: &Options,
-    start: Option<Instant>,
+    cache_hit: bool,
 ) -> Result<PackResponse, ApiError> {
+    let render_start = Instant::now();
     let packed = packed_from_stored(&stored, opts);
     let mut dump = Cursor::new(Vec::new());
     crate::render::write_all(&mut dump, &packed, opts)
@@ -670,6 +687,8 @@ fn finish_pack(
             message: file.status.message(file.size),
         })
         .collect();
+    let extract_ms = stored.stats.elapsed.as_millis();
+    let render_ms = render_start.elapsed().as_millis();
     Ok(PackResponse {
         dump,
         dump_bytes,
@@ -679,12 +698,15 @@ fn finish_pack(
         files_skipped: packed.stats.files_skipped,
         tokens_est: packed.stats.tokens_est,
         chars_emitted: packed.stats.chars_emitted,
-        elapsed_ms: start.map(|t| t.elapsed().as_millis()).unwrap_or(0),
+        elapsed_ms: extract_ms.saturating_add(render_ms),
+        extract_ms,
+        render_ms,
+        cache_hit,
         truncated: packed.stats.truncated,
         cancelled: packed.stats.cancelled,
         preview_truncated,
-        manifest_id: stored.manifest_id,
-        result_id: stored.id,
+        manifest_id: stored.manifest_id.clone(),
+        result_id: stored.id.clone(),
         outcomes,
     })
 }
@@ -699,7 +721,7 @@ fn packed_from_stored(stored: &StoredResult, opts: &Options) -> pack::Packed {
             .filter(|f| f.status == pack::FileStatus::Extracted)
             .map(|f| f.relative.clone())
             .collect();
-        crate::tree::render_tree(&pack::tree_label(&opts.roots), &paths)
+        crate::tree::render_tree(&pack::tree_label(&stored.roots), &paths)
     };
     pack::Packed {
         files: stored.files.clone(),
@@ -723,16 +745,17 @@ fn discovery_key_pack(req: &PackRequest) -> String {
 }
 
 fn extract_key(req: &PackRequest) -> String {
-    let mut ids = req.selected.clone();
-    ids.sort();
-    format!(
-        "{}|{}|{}|{}|{}",
-        ids.join(","),
-        req.source,
-        req.notebook_outputs,
-        req.archives,
-        req.binaries
-    )
+    let mut selected = req.selected.clone();
+    selected.sort();
+    serde_json::json!({
+        "selected": selected,
+        "source": req.source,
+        "notebook_outputs": req.notebook_outputs,
+        "archives": req.archives,
+        "binaries": req.binaries,
+        "max_file_size": req.max_file_size,
+    })
+    .to_string()
 }
 
 async fn preview(
@@ -741,10 +764,19 @@ async fn preview(
     Json(req): Json<PackRequest>,
 ) -> Result<Json<PreviewResponse>, ApiError> {
     authorize(&state, &headers)?;
-    tokio::task::spawn_blocking(move || preview_sync(req))
-        .await
-        .map_err(|err| ApiError::bad(err.to_string()))?
-        .map(Json)
+    let job = state.mill.try_begin_pack().ok_or_else(ApiError::busy)?;
+    let mill = Arc::clone(&state.mill);
+    let job_worker = Arc::clone(&job);
+    let result = tokio::task::spawn_blocking(move || {
+        let _guard = JobGuard {
+            mill,
+            job: job_worker,
+        };
+        preview_sync(req)
+    })
+    .await
+    .map_err(|err| ApiError::bad(err.to_string()))?;
+    result.map(Json)
 }
 
 fn preview_sync(req: PackRequest) -> Result<PreviewResponse, ApiError> {
@@ -1071,7 +1103,7 @@ mod tests {
     #[tokio::test]
     async fn test_pack_busy_returns_too_many_requests() {
         let mill = Arc::new(Mill::new());
-        assert!(mill.try_begin_pack());
+        assert!(mill.try_begin_pack().is_some());
         let app = router_with(AppState {
             pick: pick::pick_folder,
             token: Arc::from(TEST_TOKEN),

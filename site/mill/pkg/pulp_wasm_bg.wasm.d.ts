@@ -1,6 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const artifact: (a: number, b: number) => [number, number, number, number];
 export const pack_files: (a: any) => [number, number, number];
 export const pulp_version: () => [number, number];
 export const scan_files: (a: any) => [number, number, number];

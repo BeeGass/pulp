@@ -3,6 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "native")]
 use rayon::prelude::*;
 
 use crate::classify::{Kind, classify, looks_binary};
@@ -99,7 +100,16 @@ pub struct Packed {
     pub stats: Stats,
 }
 
+/// One in-memory input for [`pack_entries`].
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryFile<'a> {
+    pub id: &'a str,
+    pub relative: &'a str,
+    pub bytes: &'a [u8],
+}
+
 struct WorkItem {
+    id: String,
     relative: String,
     absolute: Option<PathBuf>,
     bytes: Vec<u8>,
@@ -200,34 +210,58 @@ pub fn pack_manifest(
     })
 }
 
-
 /// Pack an in-memory file set (browser / virtual trees). No filesystem reads.
+///
+/// Enforces [`Options::selection`], include/exclude, hidden, and byte/entry caps.
 pub fn pack_entries(
-    entries: &[(String, Vec<u8>)],
+    entries: &[MemoryFile<'_>],
     opts: &Options,
     cancel: Option<&AtomicBool>,
 ) -> Result<Packed, Error> {
     let start = pack_clock_start();
+    if opts.selection.is_empty_only() {
+        return Ok(Packed {
+            files: Vec::new(),
+            tree: String::new(),
+            stats: Stats {
+                elapsed: pack_clock_elapsed(start),
+                ..Stats::default()
+            },
+        });
+    }
+    let policy = crate::filter::PathPolicy::from_options(opts)?;
     let extract_opts = ExtractOpts::from_options(opts);
     let bytes_read = AtomicU64::new(0);
-
-    let work: Vec<(String, Vec<u8>)> = entries
-        .iter()
-        .cloned()
-        .take(opts.max_entries)
-        .collect();
-    let truncated_entries = entries.len() > opts.max_entries;
-
     let mut files: Vec<PackedFile> = Vec::new();
-    for (relative, bytes) in &work {
+    let mut kept = 0usize;
+    let mut total = 0u64;
+    let mut truncated = false;
+    for entry in entries {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             break;
         }
-        let size = bytes.len() as u64;
+        if !opts.selection.allows(entry.id) && !opts.selection.allows(entry.relative) {
+            continue;
+        }
+        if !policy.keep_walk(entry.relative) {
+            continue;
+        }
+        let size = entry.bytes.len() as u64;
+        if kept >= opts.max_entries {
+            truncated = true;
+            break;
+        }
+        if total.saturating_add(size) > opts.max_total_bytes {
+            truncated = true;
+            continue;
+        }
+        kept += 1;
+        total = total.saturating_add(size);
         if size > opts.max_file_size {
             files.push(packed_too_large(
-                relative.clone(),
-                classify(Path::new(relative), Some(bytes)),
+                entry.id.to_string(),
+                entry.relative.to_string(),
+                classify(Path::new(entry.relative), Some(entry.bytes)),
                 size,
                 opts.max_file_size,
             ));
@@ -236,9 +270,10 @@ pub fn pack_entries(
         bytes_read.fetch_add(size, Ordering::Relaxed);
         files.extend(process_item(
             WorkItem {
-                relative: relative.clone(),
+                id: entry.id.to_string(),
+                relative: entry.relative.to_string(),
                 absolute: None,
-                bytes: bytes.clone(),
+                bytes: entry.bytes.to_vec(),
                 depth: 0,
             },
             opts,
@@ -270,7 +305,7 @@ pub fn pack_entries(
             chars_emitted,
             tokens_est,
             elapsed: pack_clock_elapsed(start),
-            truncated: truncated_entries || cancelled,
+            truncated: truncated || cancelled,
             cancelled,
         },
     })
@@ -324,8 +359,9 @@ fn process_entry(
             status: FileStatus::Changed,
         }];
     }
-    if entry.oversized || entry.size > opts.max_file_size {
+    if entry.size > opts.max_file_size {
         return vec![packed_too_large(
+            entry.id.clone(),
             entry.relative.clone(),
             entry.kind,
             entry.size,
@@ -336,6 +372,7 @@ fn process_entry(
         Ok(Ok(bytes)) => bytes,
         Ok(Err(size)) => {
             return vec![packed_too_large(
+                entry.id.clone(),
                 entry.relative.clone(),
                 entry.kind,
                 size,
@@ -344,6 +381,7 @@ fn process_entry(
         }
         Err(err) => {
             return vec![packed_error(
+                entry.id.clone(),
                 entry.relative.clone(),
                 entry.kind,
                 entry.size,
@@ -354,6 +392,7 @@ fn process_entry(
     bytes_read.fetch_add(bytes.len() as u64, Ordering::Relaxed);
     process_item(
         WorkItem {
+            id: entry.id.clone(),
             relative: entry.relative.clone(),
             absolute: Some(entry.absolute.clone()),
             bytes,
@@ -389,6 +428,7 @@ fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> V
                 .is_some_and(|path| is_input_root(path, &opts.roots)));
     if should_expand {
         return expand_item(
+            &item.id,
             &item.relative,
             &item.bytes,
             kind,
@@ -398,6 +438,7 @@ fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> V
         );
     }
     vec![pack_one(
+        item.id,
         item.relative,
         item.absolute.as_deref(),
         kind,
@@ -425,7 +466,9 @@ fn changed_since_scan(entry: &ManifestEntry) -> Option<String> {
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pack_one(
+    id: String,
     relative: String,
     path: Option<&Path>,
     kind: Kind,
@@ -435,12 +478,12 @@ fn pack_one(
     extract_opts: &ExtractOpts,
 ) -> PackedFile {
     if size > opts.max_file_size {
-        return packed_too_large(relative, kind, size, opts.max_file_size);
+        return packed_too_large(id, relative, kind, size, opts.max_file_size);
     }
     if should_skip_binary(kind, bytes, opts.skip_binaries) {
         return PackedFile {
             text: format!("[binary file, {size} bytes]"),
-            id: relative.clone(),
+            id,
             relative,
             kind,
             size,
@@ -452,7 +495,7 @@ fn pack_one(
             text: format!(
                 "[archive {relative}, {size} bytes; pass --archives to expand nested archives]"
             ),
-            id: relative.clone(),
+            id,
             relative,
             kind,
             size,
@@ -466,18 +509,19 @@ fn pack_one(
     };
     match extracted {
         Ok(text) => PackedFile {
-            id: relative.clone(),
+            id,
             relative,
             kind,
             size,
             text,
             status: FileStatus::Extracted,
         },
-        Err(err) => packed_error(relative, kind, size, err.to_string()),
+        Err(err) => packed_error(id, relative, kind, size, err.to_string()),
     }
 }
 
 fn expand_item(
+    id: &str,
     relative: &str,
     bytes: &[u8],
     kind: Kind,
@@ -486,8 +530,9 @@ fn expand_item(
     depth: u8,
 ) -> Vec<PackedFile> {
     match expand_archive(bytes, kind, extract_opts) {
-        Ok(members) => take_archive_members(relative, members, opts, extract_opts, depth),
+        Ok(members) => take_archive_members(id, relative, members, opts, extract_opts, depth),
         Err(err) => vec![packed_error(
+            id.to_string(),
             relative.to_string(),
             kind,
             bytes.len() as u64,
@@ -497,6 +542,7 @@ fn expand_item(
 }
 
 fn take_archive_members(
+    parent_id: &str,
     relative: &str,
     members: Vec<(String, Vec<u8>)>,
     opts: &Options,
@@ -541,6 +587,7 @@ fn take_archive_members(
         total = total.saturating_add(n);
         out.extend(process_item(
             WorkItem {
+                id: format!("{parent_id}!{child}"),
                 relative: child,
                 absolute: None,
                 bytes: mem_bytes,
@@ -559,7 +606,7 @@ fn glob_exclude_only(relative: &str, exclude: &globset::GlobSet) -> bool {
 
 fn list_only_file(entry: &ManifestEntry, opts: &Options) -> PackedFile {
     let kind = entry.kind;
-    let status = if entry.oversized || entry.size > opts.max_file_size {
+    let status = if entry.size > opts.max_file_size {
         FileStatus::TooLarge
     } else if kind.is_archive() {
         FileStatus::SkippedArchive
@@ -683,10 +730,10 @@ fn normalize_rel(path: &str) -> String {
     parts.join("/")
 }
 
-fn packed_too_large(relative: String, kind: Kind, size: u64, limit: u64) -> PackedFile {
+fn packed_too_large(id: String, relative: String, kind: Kind, size: u64, limit: u64) -> PackedFile {
     PackedFile {
         text: format!("[too large: {size} bytes; limit {limit} bytes]"),
-        id: relative.clone(),
+        id,
         relative,
         kind,
         size,
@@ -694,10 +741,16 @@ fn packed_too_large(relative: String, kind: Kind, size: u64, limit: u64) -> Pack
     }
 }
 
-fn packed_error(relative: String, kind: Kind, size: u64, message: String) -> PackedFile {
+fn packed_error(
+    id: String,
+    relative: String,
+    kind: Kind,
+    size: u64,
+    message: String,
+) -> PackedFile {
     PackedFile {
         text: format!("[error extracting {relative}: {message}]"),
-        id: relative.clone(),
+        id,
         relative,
         kind,
         size,
@@ -723,6 +776,74 @@ mod tests {
             list_only: true,
             ..Options::default()
         }
+    }
+
+    #[test]
+    fn test_pack_entries_with_empty_only_returns_no_files() {
+        let bytes = b"fn x() {}\n";
+        let files = [MemoryFile {
+            id: "a.rs",
+            relative: "a.rs",
+            bytes,
+        }];
+        let opts = Options {
+            selection: crate::config::Selection::Only(Vec::new()),
+            ..Options::default()
+        };
+        let packed = pack_entries(&files, &opts, None).unwrap();
+        assert!(packed.files.is_empty());
+    }
+
+    #[test]
+    fn test_pack_entries_with_exclude_key_skips_key_file() {
+        let rs = b"fn x() {}\n";
+        let key = b"SECRET\n";
+        let files = [
+            MemoryFile {
+                id: "a.rs",
+                relative: "a.rs",
+                bytes: rs,
+            },
+            MemoryFile {
+                id: "a.key",
+                relative: "a.key",
+                bytes: key,
+            },
+        ];
+        let opts = Options {
+            exclude: vec!["*.key".into()],
+            selection: crate::config::Selection::AllEligible,
+            ..Options::default()
+        };
+        let packed = pack_entries(&files, &opts, None).unwrap();
+        let rels: Vec<&str> = packed.files.iter().map(|f| f.relative.as_str()).collect();
+        assert!(rels.contains(&"a.rs"), "{rels:?}");
+        assert!(!rels.contains(&"a.key"), "{rels:?}");
+    }
+
+    #[test]
+    fn test_pack_entries_preserves_distinct_ids() {
+        let bytes = b"fn x() {}\n";
+        let files = [
+            MemoryFile {
+                id: "0:repo/src/lib.rs",
+                relative: "repo/src/lib.rs",
+                bytes,
+            },
+            MemoryFile {
+                id: "1:repo/src/lib.rs",
+                relative: "repo/src/lib.rs",
+                bytes,
+            },
+        ];
+        let opts = Options {
+            selection: crate::config::Selection::AllEligible,
+            ..Options::default()
+        };
+        let packed = pack_entries(&files, &opts, None).unwrap();
+        let ids: Vec<&str> = packed.files.iter().map(|f| f.id.as_str()).collect();
+        assert!(ids.contains(&"0:repo/src/lib.rs"), "{ids:?}");
+        assert!(ids.contains(&"1:repo/src/lib.rs"), "{ids:?}");
     }
 
     #[test]

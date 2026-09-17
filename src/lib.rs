@@ -7,8 +7,8 @@
 pub mod classify;
 pub mod config;
 pub mod error;
-mod filter;
 pub mod extract;
+pub mod filter;
 pub mod manifest;
 pub mod pack;
 #[cfg(feature = "native")]
@@ -26,11 +26,13 @@ pub mod walk;
 pub use classify::{
     Kind, classify, is_default_selected, kind_from_label, language_label, looks_binary,
 };
-pub use config::{Options, OutputFormat, Selection, TreeMode};
+pub use config::{Options, OutputFormat, Selection, TreeMode, default_exclude_globs};
 pub use error::Error;
-pub use manifest::{ManifestEntry, ScanManifest};
+pub use filter::PathPolicy;
 #[cfg(feature = "native")]
 pub use manifest::scan_manifest;
+pub use manifest::{ManifestEntry, ScanManifest};
+pub use pack::MemoryFile;
 pub use pack::{FileStatus, Packed, PackedFile, Stats, pack_entries};
 #[cfg(feature = "native")]
 pub use pack::{pack, pack_manifest, pack_with_cancel};
