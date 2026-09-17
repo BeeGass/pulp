@@ -1,11 +1,10 @@
 //! Local mill: a localhost-only web UI over [`crate::pack`].
 
-use std::io::{Cursor, ErrorKind, Read};
+use std::io::{Cursor, ErrorKind};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -27,15 +26,18 @@ const INDEX: &str = include_str!("../web/index.html");
 struct AppState {
     pick: fn() -> Result<Option<PathBuf>, String>,
     token: Arc<str>,
+    origin: Arc<str>,
 }
 
 const TEST_TOKEN: &str = "test-token";
+const TEST_ORIGIN: &str = "http://127.0.0.1:8747";
 
 /// Axum router used by `pulp ui` and the HTTP tests.
 pub fn router() -> Router {
     router_with(AppState {
         pick: pick::pick_folder,
         token: Arc::from(TEST_TOKEN),
+        origin: Arc::from(TEST_ORIGIN),
     })
 }
 
@@ -47,6 +49,7 @@ fn router_with(state: AppState) -> Router {
         .route("/api/scan", post(scan))
         .route("/api/pack", post(pack_dump))
         .route("/api/tree", post(tree_dump))
+        .route("/api/preview", post(preview))
         .route("/api/browse", post(browse))
         .with_state(state)
 }
@@ -66,7 +69,8 @@ pub async fn serve(preferred: u16, try_next: bool, open_browser: bool) -> anyhow
     eprintln!("localhost only. nothing is uploaded.");
     let state = AppState {
         pick: pick::pick_folder,
-        token: Arc::from(new_session_token()),
+        token: Arc::from(new_session_token()?),
+        origin: Arc::from(url.as_str()),
     };
     if open_browser {
         let _ = opener::open(&url);
@@ -79,30 +83,17 @@ pub async fn serve(preferred: u16, try_next: bool, open_browser: bool) -> anyhow
     Ok(())
 }
 
-fn new_session_token() -> String {
+fn new_session_token() -> anyhow::Result<String> {
     let mut buf = [0u8; 16];
-    let filled = std::fs::File::open("/dev/urandom")
-        .ok()
-        .and_then(|mut f| f.read_exact(&mut buf).ok());
-    if filled.is_none() {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        buf[..8].copy_from_slice(&(nanos as u64).to_le_bytes());
-        buf[8..12].copy_from_slice(&std::process::id().to_le_bytes());
-    }
-    buf.iter().fold(String::with_capacity(32), |mut s, b| {
+    getrandom::fill(&mut buf).map_err(|err| anyhow::anyhow!("secure random unavailable: {err}"))?;
+    Ok(buf.iter().fold(String::with_capacity(32), |mut s, b| {
         s.push_str(&format!("{b:02x}"));
         s
-    })
+    }))
 }
 
-fn origin_ok(origin: &str) -> bool {
-    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
-        return false;
-    };
-    matches!(uri.scheme_str(), Some("http") | Some("https")) && uri.host().is_some_and(host_name_ok)
+fn origin_matches(got: &str, allowed: &str) -> bool {
+    got == allowed
 }
 
 fn host_name_ok(host: &str) -> bool {
@@ -129,21 +120,33 @@ fn header_host_ok(host: &str) -> bool {
 }
 
 fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
-        && !origin_ok(origin)
-    {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: "bad origin".into(),
-        });
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        if !origin_matches(origin, state.origin.as_ref()) {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                message: "bad origin".into(),
+            });
+        }
     }
-    if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok())
-        && !header_host_ok(host)
-    {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            message: "bad host".into(),
-        });
+    if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
+        if !header_host_ok(host) {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                message: "bad host".into(),
+            });
+        }
+        if let Ok(uri) = state.origin.parse::<axum::http::Uri>() {
+            let expected = match uri.port_u16() {
+                Some(port) => format!("{}:{port}", uri.host().unwrap_or("127.0.0.1")),
+                None => uri.host().unwrap_or("127.0.0.1").to_string(),
+            };
+            if host != expected && host != uri.host().unwrap_or("") {
+                return Err(ApiError {
+                    status: StatusCode::FORBIDDEN,
+                    message: "bad host".into(),
+                });
+            }
+        }
     }
     let got = headers
         .get("x-pulp-token")
@@ -264,9 +267,11 @@ struct ScanResponse {
 
 #[derive(Debug, Serialize)]
 struct FileEntry {
+    id: String,
     relative: String,
     size: u64,
     kind: &'static str,
+    language: &'static str,
     default_on: bool,
     oversized: bool,
 }
@@ -309,8 +314,31 @@ struct PackResponse {
     files_skipped: usize,
     tokens_est: usize,
     chars_emitted: usize,
+    dump_bytes: usize,
     elapsed_ms: u128,
     truncated: bool,
+    outcomes: Vec<FileOutcome>,
+}
+
+#[derive(Debug, Serialize)]
+struct FileOutcome {
+    id: String,
+    relative: String,
+    status: &'static str,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PreviewResponse {
+    id: String,
+    relative: String,
+    text: String,
+    status: &'static str,
+    message: String,
+    truncated: bool,
+    kind: &'static str,
+    language: &'static str,
+    size: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -428,9 +456,11 @@ fn scan_sync(req: ScanRequest) -> Result<ScanResponse, ApiError> {
         .entries
         .iter()
         .map(|entry| FileEntry {
+            id: entry.id.clone(),
             relative: entry.relative.clone(),
             size: entry.size,
-            kind: entry.language,
+            kind: entry.kind.as_str(),
+            language: entry.language,
             default_on: entry.default_on,
             oversized: entry.oversized,
         })
@@ -457,7 +487,18 @@ fn pack_sync(req: PackRequest) -> Result<PackResponse, ApiError> {
     let dump =
         String::from_utf8(dump.into_inner()).map_err(|err| ApiError::bad(err.to_string()))?;
     let ext = format.extension();
+    let outcomes = packed
+        .files
+        .iter()
+        .map(|file| FileOutcome {
+            id: file.id.clone(),
+            relative: file.relative.clone(),
+            status: file.status.as_str(),
+            message: file.status.message(file.size),
+        })
+        .collect();
     Ok(PackResponse {
+        dump_bytes: dump.len(),
         dump,
         filename: format!("pulp.{ext}"),
         format: ext.to_string(),
@@ -467,6 +508,53 @@ fn pack_sync(req: PackRequest) -> Result<PackResponse, ApiError> {
         chars_emitted: packed.stats.chars_emitted,
         elapsed_ms: packed.stats.elapsed.as_millis(),
         truncated: packed.stats.truncated,
+        outcomes,
+    })
+}
+
+async fn preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PackRequest>,
+) -> Result<Json<PreviewResponse>, ApiError> {
+    authorize(&state, &headers)?;
+    tokio::task::spawn_blocking(move || preview_sync(req))
+        .await
+        .map_err(|err| ApiError::bad(err.to_string()))?
+        .map(Json)
+}
+
+fn preview_sync(req: PackRequest) -> Result<PreviewResponse, ApiError> {
+    if req.selected.len() != 1 {
+        return Err(ApiError::bad("preview one file"));
+    }
+    let opts = options_from_pack(req, false, false)?;
+    let packed = pack::pack(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let file = packed
+        .files
+        .first()
+        .ok_or_else(|| ApiError::bad("file not found"))?;
+    const CAP: usize = 16 * 1024;
+    let truncated = file.text.len() > CAP;
+    let text = if truncated {
+        let mut end = CAP;
+        while end > 0 && !file.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        file.text[..end].to_string()
+    } else {
+        file.text.clone()
+    };
+    Ok(PreviewResponse {
+        id: file.id.clone(),
+        relative: file.relative.clone(),
+        status: file.status.as_str(),
+        message: file.status.message(file.size),
+        kind: file.kind.as_str(),
+        language: crate::language_label(std::path::Path::new(&file.relative)),
+        size: file.size,
+        truncated,
+        text,
     })
 }
 
@@ -699,14 +787,16 @@ mod tests {
             .iter()
             .find(|f| f["relative"].as_str() == Some("Hello.lean"))
             .unwrap();
-        assert_eq!(lean["kind"].as_str(), Some("lean"));
+        assert_eq!(lean["language"].as_str(), Some("lean"));
+        assert_eq!(lean["kind"].as_str(), Some("text"));
         let rust = json["files"]
             .as_array()
             .unwrap()
             .iter()
             .find(|f| f["relative"].as_str() == Some("hello.rs"))
             .unwrap();
-        assert_eq!(rust["kind"].as_str(), Some("rust"));
+        assert_eq!(rust["language"].as_str(), Some("rust"));
+        assert_eq!(rust["kind"].as_str(), Some("text"));
     }
 
     #[tokio::test]
@@ -731,6 +821,27 @@ mod tests {
         assert!(dump.contains("```"), "{dump}");
         assert_eq!(json["filename"].as_str(), Some("pulp.md"));
         assert!(json["tokens_est"].as_u64().unwrap() > 0);
+        assert!(json["outcomes"].as_array().unwrap().iter().any(|o| {
+            o["relative"].as_str() == Some("hello.rs") && o["status"].as_str() == Some("extracted")
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_preview_with_hello_rs_returns_source() {
+        let path = testdata().display().to_string();
+        let (status, json) = post_json(
+            "/api/preview",
+            serde_json::json!({
+                "path": path,
+                "gitignore": false,
+                "selected": ["hello.rs"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(json["text"].as_str().unwrap().contains("fn hello"));
+        assert_eq!(json["relative"].as_str(), Some("hello.rs"));
+        assert_eq!(json["status"].as_str(), Some("extracted"));
     }
 
     #[tokio::test]
@@ -765,6 +876,7 @@ mod tests {
         let app = router_with(AppState {
             pick: stub_pick_testdata,
             token: Arc::from(TEST_TOKEN),
+            origin: Arc::from(TEST_ORIGIN),
         });
         let response = app
             .oneshot(
@@ -792,6 +904,7 @@ mod tests {
         let app = router_with(AppState {
             pick: stub_pick_cancel,
             token: Arc::from(TEST_TOKEN),
+            origin: Arc::from(TEST_ORIGIN),
         });
         let response = app
             .oneshot(
@@ -834,16 +947,31 @@ mod tests {
         assert!(html.contains("<option value=\"xml\" selected>"));
         assert!(html.contains("id=\"github\""));
         assert!(html.contains("https://github.com/BeeGass/pulp"));
+        assert!(html.contains("Preserve source"));
+        assert!(html.contains("Readable text"));
+        assert!(html.contains("Select matches"));
+        assert!(html.contains("data-out=\"issues\""));
+        assert!(html.contains("/api/preview"));
     }
 
     #[test]
-    fn test_origin_ok_with_loopback_returns_true() {
-        assert!(origin_ok("http://127.0.0.1:8747"));
-        assert!(origin_ok("http://localhost"));
-        assert!(origin_ok("http://[::1]"));
-        assert!(!origin_ok("http://127.0.0.1.evil.test"));
-        assert!(!origin_ok("http://example.com"));
-        assert!(!origin_ok("not a uri"));
+    fn test_origin_matches_with_exact_origin_returns_true() {
+        assert!(origin_matches(
+            "http://127.0.0.1:8747",
+            "http://127.0.0.1:8747"
+        ));
+        assert!(!origin_matches(
+            "http://127.0.0.1:9000",
+            "http://127.0.0.1:8747"
+        ));
+        assert!(!origin_matches(
+            "http://localhost:8747",
+            "http://127.0.0.1:8747"
+        ));
+        assert!(!origin_matches(
+            "http://127.0.0.1.evil.test",
+            "http://127.0.0.1:8747"
+        ));
     }
 
     #[test]

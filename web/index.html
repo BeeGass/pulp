@@ -188,6 +188,98 @@
       gap: 8px 12px;
       align-items: flex-start;
     }
+    .ctl {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .ctl-l {
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--mist);
+    }
+    .hint {
+      flex: 1 1 100%;
+      margin: 0;
+      font-size: 12px;
+      color: var(--mist);
+      line-height: 1.4;
+    }
+    .out-views {
+      display: inline-flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .out-views button {
+      min-height: 36px;
+      padding: 0 10px;
+      text-transform: none;
+      letter-spacing: 0.04em;
+    }
+    .out-views button.on {
+      background: var(--ink-3);
+      border-color: var(--brass);
+    }
+    .paper .out-views button.on {
+      background: var(--paper-2);
+      color: var(--ink);
+    }
+    .result-strip {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--mist);
+      border-bottom: 1px solid #3a3228;
+    }
+    .paper .result-strip { border-bottom-color: var(--rule); color: var(--rust-2); }
+    .file-preview { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+    .preview-head {
+      padding: 10px 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--mist);
+      border-bottom: 1px solid var(--rule);
+      overflow-wrap: anywhere;
+    }
+    .issues { overflow: auto; flex: 1; padding: 8px 12px 16px; }
+    .issue {
+      padding: 12px 0;
+      border-bottom: 1px solid #3a3228;
+    }
+    .paper .issue { border-bottom-color: var(--rule); }
+    .issue h3 { margin: 0 0 6px; font: 600 13px var(--mono); }
+    .issue p { margin: 0 0 8px; font-size: 13px; }
+    .row .name {
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+    button.name {
+      min-height: 28px;
+      padding: 4px 6px;
+      border: 0;
+      background: transparent;
+      text-transform: none;
+      letter-spacing: 0;
+      text-align: left;
+      color: inherit;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .row.active { box-shadow: inset 3px 0 var(--rust); }
+    .check-hit {
+      min-width: 28px;
+      min-height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
     .settings {
       flex: 1 1 240px;
       border: 1px solid #3d342a;
@@ -454,13 +546,14 @@
       line-height: 1.5;
     }
     .preview {
-      white-space: pre-wrap;
+      white-space: pre;
       word-break: break-word;
       font-size: 13px;
       line-height: 1.55;
       background: transparent;
       margin: 0;
     }
+    .preview.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
     .empty {
       color: var(--mist);
       padding: 28px 8px;
@@ -639,16 +732,31 @@
         </div>
       </div>
       <div class="opts">
-        <span class="seg" role="group" aria-label="format">
-          <button type="button" data-fmt="txt">txt</button>
-          <button type="button" data-fmt="md">md</button>
-          <button type="button" data-fmt="xml" class="on">xml</button>
+        <span class="ctl">
+          <span class="ctl-l">Content</span>
+          <span class="seg" role="group" aria-label="content">
+            <button type="button" data-content="source">Preserve source</button>
+            <button type="button" data-content="readable" class="on">Readable text</button>
+          </span>
+        </span>
+        <select id="content" hidden>
+          <option value="readable" selected>readable</option>
+          <option value="source">source</option>
+        </select>
+        <span class="ctl">
+          <span class="ctl-l">Output format</span>
+          <span class="seg" role="group" aria-label="format">
+            <button type="button" data-fmt="txt">txt</button>
+            <button type="button" data-fmt="md">md</button>
+            <button type="button" data-fmt="xml" class="on">xml</button>
+          </span>
         </span>
         <select id="format" hidden>
           <option value="txt">txt</option>
           <option value="md">md</option>
           <option value="xml" selected>xml</option>
         </select>
+        <p class="hint" id="contentHint">PDFs and Office files are still converted to text. HTML, XML, and JSON stay as decoded source when Preserve source is on.</p>
         <details class="settings" id="settings">
           <summary>Options</summary>
           <div class="settings-list">
@@ -669,12 +777,12 @@
               <button type="button" class="info" data-tip="Keep Jupyter cell outputs in the dump, not only the source cells." aria-label="Keep Jupyter cell outputs in the dump, not only the source cells.">i</button>
             </div>
             <div class="setting">
-              <label class="opt"><input type="checkbox" id="source"> source files</label>
-              <button type="button" class="info" data-tip="Keep HTML, XML, and JSON as source instead of converting to readable text." aria-label="Keep HTML, XML, and JSON as source instead of converting to readable text.">i</button>
-            </div>
-            <div class="setting">
               <label class="opt"><input type="checkbox" id="notree"> no tree</label>
               <button type="button" class="info" data-tip="Omit the directory map from the top of the dump." aria-label="Omit the directory map from the top of the dump.">i</button>
+            </div>
+            <div class="setting">
+              <label class="opt"><input type="checkbox" id="wrap"> wrap preview</label>
+              <button type="button" class="info" data-tip="Wrap lines in Combined and File preview. View only; does not change the dump." aria-label="Wrap lines in Combined and File preview. View only; does not change the dump.">i</button>
             </div>
           </div>
         </details>
@@ -692,8 +800,8 @@
           <span>Files <small>proof</small></span>
           <div class="tools">
             <input id="filter" type="text" placeholder="filter" spellcheck="false">
-            <button type="button" id="all">all</button>
-            <button type="button" id="none">none</button>
+            <button type="button" id="all">Select matches</button>
+            <button type="button" id="none">Clear matches</button>
             <button type="button" id="copytree" disabled>Copy tree</button>
           </div>
         </div>
@@ -704,13 +812,24 @@
         <div class="pane-h">
           <span>Output <small>galley</small></span>
           <div class="tools">
+            <span class="out-views" role="group" aria-label="Output view">
+              <button type="button" data-out="dump" class="on">Combined</button>
+              <button type="button" data-out="preview">File preview</button>
+              <button type="button" data-out="issues" id="issuesTab">Issues</button>
+            </span>
             <button type="button" id="pulp" class="primary" disabled>Pulp</button>
             <button type="button" id="copytreeDump" disabled>Copy tree</button>
             <button type="button" id="copy" disabled>Copy</button>
             <button type="button" id="download" disabled>Download</button>
           </div>
         </div>
-        <pre class="preview" id="preview"><div class="empty">The dump lands here — txt, md, or xml.</div></pre>
+        <div class="result-strip"><span id="resultState">Not generated</span><span id="resultMeta"></span></div>
+        <pre class="preview" id="preview"><div class="empty">The dump lands here — xml, md, or txt.</div></pre>
+        <div class="file-preview" id="filePreview" hidden>
+          <div class="preview-head" id="previewHead"></div>
+          <pre class="preview" id="previewBody"></pre>
+        </div>
+        <div class="issues" id="issues" hidden></div>
       </section>
     </main>
     <div class="dock" id="dock">
@@ -737,13 +856,21 @@
       reqId: 0,
       dumpKey: "",
       stale: false,
+      active: "",
+      outView: "dump",
+      outcomes: [],
+      dumpBytes: 0,
     };
+
+    function fileId(f) { return f.id || f.relative; }
+    function fileLang(f) { return f.language || f.kind; }
 
     function settingsKey() {
       return JSON.stringify({
         path: $("path").value.trim(),
         selected: [...state.selected].sort(),
         format: $("format").value,
+        content: $("content").value,
         gitignore: $("gitignore").checked,
         hidden: $("hidden").checked,
         archives: $("archives").checked,
@@ -754,7 +881,10 @@
     }
 
     function markStaleIfDump() {
-      if (!state.dump) return;
+      if (!state.dump) {
+        $("resultState").textContent = "Not generated";
+        return;
+      }
       const stale = settingsKey() !== state.dumpKey;
       state.stale = stale;
       $("stale").hidden = !stale;
@@ -762,6 +892,11 @@
       ["copy", "copy2", "download", "download2"].forEach((id) => {
         $(id).title = title;
       });
+      setDumpActions(!stale);
+      const issues = (state.outcomes || []).filter((o) => o.status && o.status !== "extracted");
+      $("resultState").textContent = stale
+        ? "Out of date"
+        : (issues.length ? "Ready with issues" : "Ready");
     }
 
     function opts() {
@@ -771,7 +906,7 @@
         hidden: $("hidden").checked,
         archives: $("archives").checked,
         notebook_outputs: $("notebook").checked,
-        source: $("source").checked,
+        source: $("content").value === "source",
         no_tree: $("notree").checked,
         format: $("format").value,
       };
@@ -852,19 +987,22 @@
 
     function kindsOf(files) {
       const m = new Map();
-      for (const f of files) m.set(f.kind, (m.get(f.kind) || 0) + 1);
+      for (const f of files) {
+        const lang = fileLang(f);
+        m.set(lang, (m.get(lang) || 0) + 1);
+      }
       return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
     }
 
     function filesOfKind(kind) {
-      return state.files.filter((f) => f.kind === kind);
+      return state.files.filter((f) => fileLang(f) === kind);
     }
 
     function kindTick(kind) {
       const files = filesOfKind(kind);
       const selectable = files.filter((f) => !f.oversized);
       let on = 0;
-      for (const f of selectable) if (state.selected.has(f.relative)) on += 1;
+      for (const f of selectable) if (state.selected.has(fileId(f))) on += 1;
       return {
         total: files.length,
         on,
@@ -876,8 +1014,8 @@
     function setKindSelected(kind, on) {
       for (const f of filesOfKind(kind)) {
         if (f.oversized) continue;
-        if (on) state.selected.add(f.relative);
-        else state.selected.delete(f.relative);
+        if (on) state.selected.add(fileId(f));
+        else state.selected.delete(fileId(f));
       }
       renderTree();
     }
@@ -954,12 +1092,12 @@
         twist.addEventListener("click", (e) => { e.preventDefault(); toggleDir(path); });
         const cb = document.createElement("input");
         cb.type = "checkbox";
-        const allOn = shown.every((f) => state.selected.has(f.relative));
-        const some = shown.some((f) => state.selected.has(f.relative));
+        const allOn = shown.every((f) => state.selected.has(fileId(f)));
+        const some = shown.some((f) => state.selected.has(fileId(f)));
         cb.checked = allOn;
         cb.indeterminate = some && !allOn;
         cb.addEventListener("change", () => {
-          shown.forEach((f) => cb.checked ? state.selected.add(f.relative) : state.selected.delete(f.relative));
+          shown.forEach((f) => cb.checked ? state.selected.add(fileId(f)) : state.selected.delete(fileId(f)));
           renderTree();
         });
         const name = document.createElement("span");
@@ -973,29 +1111,37 @@
       const files = node.files.filter(visible).sort((a, b) => a.name.localeCompare(b.name));
       for (const f of files) {
         const row = document.createElement("div");
-        row.className = "row" + (f.oversized ? " oversize" : "");
+        row.className = "row" + (f.oversized ? " oversize" : "") + (state.active === fileId(f) ? " active" : "");
+        const hit = document.createElement("label");
+        hit.className = "check-hit";
         const cb = document.createElement("input");
         cb.type = "checkbox";
-        cb.checked = state.selected.has(f.relative);
+        cb.checked = state.selected.has(fileId(f));
+        cb.setAttribute("aria-label", "Include " + f.relative);
         if (f.oversized) {
           cb.disabled = true;
           cb.title = "over the size cap";
         }
         cb.addEventListener("change", () => {
-          if (cb.checked) state.selected.add(f.relative); else state.selected.delete(f.relative);
+          if (cb.checked) state.selected.add(fileId(f)); else state.selected.delete(fileId(f));
           setPulpEnabled(state.selected.size > 0);
           renderTree();
         });
-        const name = document.createElement("span");
+        hit.appendChild(cb);
+        const name = document.createElement("button");
+        name.type = "button";
         name.className = "name";
         name.textContent = f.name;
+        name.title = f.relative;
+        name.setAttribute("aria-label", "Preview " + f.relative);
+        name.addEventListener("click", () => inspectFile(f));
         const kind = document.createElement("span");
         kind.className = "kind";
-        kind.textContent = f.kind;
+        kind.textContent = fileLang(f);
         const meta = document.createElement("span");
         meta.className = "meta";
         meta.textContent = human(f.size);
-        row.append(cb, name, kind, meta);
+        row.append(hit, name, kind, meta);
         wrap.appendChild(row);
       }
       el.appendChild(wrap);
@@ -1021,13 +1167,14 @@
       const o = opts();
       if (!o.path) { setErr("Give the mill a path."); return; }
       $("scan").disabled = true;
-      $("stats").innerHTML = '<span class="spin">+</span> scanning';
+      $("stats").innerHTML = '<span class="spin">+</span> Scanning';
+      $("resultState").textContent = "Scanning";
       try {
         const data = await api("/api/scan", o);
         state.files = data.files;
         state.bytes = data.bytes || 0;
         state.selected = new Set(
-          data.files.filter((f) => f.default_on !== false && !f.oversized).map((f) => f.relative)
+          data.files.filter((f) => f.default_on !== false && !f.oversized).map(fileId)
         );
         state.collapsed = new Set();
         renderTree();
@@ -1051,20 +1198,28 @@
       const id = ++state.reqId;
       const key = settingsKey();
       setPulpEnabled(false);
-      $("stats").innerHTML = '<span class="spin">+</span> pulping';
+      $("stats").innerHTML = '<span class="spin">+</span> Extracting';
+      $("resultState").textContent = "Extracting";
       try {
         const data = await api("/api/pack", o);
         if (id !== state.reqId) return;
         state.dump = data.dump;
         state.filename = data.filename;
         state.dumpKey = key;
+        state.outcomes = data.outcomes || [];
+        state.dumpBytes = data.dump_bytes || data.dump.length;
         $("preview").textContent = data.dump;
+        applyWrap();
         setDumpActions(true);
         markStaleIfDump();
+        setOutView("dump");
         setView("dump");
+        const issueN = state.outcomes.filter((o) => o.status !== "extracted").length;
+        $("issuesTab").textContent = "Issues" + (issueN ? " " + issueN : "");
+        $("resultMeta").textContent = human(state.dumpBytes) + " output · content-only ~" + data.tokens_est + " tokens";
         $("stats").innerHTML =
           "<strong>" + data.files_extracted + "</strong> pulped · ~<strong>" +
-          data.tokens_est + "</strong> tokens · " + data.elapsed_ms + "ms" +
+          data.tokens_est + "</strong> tokens (content-only) · " + data.elapsed_ms + "ms" +
           (data.files_skipped ? " · " + data.files_skipped + " skipped" : "") +
           (data.truncated ? " · truncated" : "");
       } catch (e) {
@@ -1117,13 +1272,15 @@
     }
 
     async function copyDump() {
+      if (state.stale || !state.dump) return;
       try {
         await navigator.clipboard.writeText(state.dump);
-        $("stats").textContent = "copied " + state.filename + (state.stale ? " (out of date)" : "");
+        $("stats").textContent = "copied " + state.filename;
       } catch (e) { setErr("clipboard: " + e.message); }
     }
 
     function downloadDump() {
+      if (state.stale || !state.dump) return;
       const blob = new Blob([state.dump], { type: "text/plain" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
@@ -1132,7 +1289,71 @@
         : state.filename;
       a.click();
       URL.revokeObjectURL(a.href);
-      $("stats").textContent = "downloaded " + a.download + (state.stale ? " (out of date)" : "");
+      $("stats").textContent = "downloaded " + a.download;
+    }
+
+    function applyWrap() {
+      const on = $("wrap").checked;
+      $("preview").classList.toggle("wrap", on);
+      $("previewBody").classList.toggle("wrap", on);
+    }
+
+    function setOutView(name) {
+      state.outView = name;
+      document.querySelectorAll("[data-out]").forEach((b) => b.classList.toggle("on", b.dataset.out === name));
+      $("preview").hidden = name !== "dump";
+      $("filePreview").hidden = name !== "preview";
+      $("issues").hidden = name !== "issues";
+      if (name === "issues") renderIssues();
+    }
+
+    function renderIssues() {
+      const box = $("issues");
+      box.innerHTML = "";
+      const rows = (state.outcomes || []).filter((o) => o.status && o.status !== "extracted");
+      if (!rows.length) {
+        box.innerHTML = '<div class="empty">No extraction issues.</div>';
+        return;
+      }
+      for (const o of rows) {
+        const card = document.createElement("div");
+        card.className = "issue";
+        const h = document.createElement("h3");
+        h.textContent = o.relative;
+        const p = document.createElement("p");
+        p.textContent = o.message || o.status;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "Remove from selection";
+        btn.addEventListener("click", () => {
+          state.selected.delete(o.id || o.relative);
+          renderTree();
+        });
+        card.append(h, p, btn);
+        box.appendChild(card);
+      }
+    }
+
+    async function inspectFile(f) {
+      state.active = fileId(f);
+      setOutView("preview");
+      setView("dump");
+      $("previewHead").textContent = f.relative + " · " + human(f.size) + " input · " + ($("content").value === "source" ? "source" : "readable text");
+      $("previewBody").textContent = "Extracting preview…";
+      renderTree();
+      const o = opts();
+      o.selected = [fileId(f)];
+      try {
+        const data = await api("/api/preview", o);
+        $("previewHead").textContent =
+          data.relative + " · " + human(data.size) + " input · " +
+          ($("content").value === "source" ? "source" : "readable text") +
+          (data.truncated ? " · preview truncated" : "");
+        $("previewBody").textContent = data.text || data.message || "";
+        applyWrap();
+      } catch (e) {
+        $("previewBody").textContent = e.message;
+      }
     }
 
     document.querySelectorAll("[data-fmt]").forEach((b) => {
@@ -1142,7 +1363,18 @@
         markStaleIfDump();
       };
     });
-    ["gitignore", "hidden", "archives", "notebook", "source", "notree", "path"].forEach((id) => {
+    document.querySelectorAll("[data-content]").forEach((b) => {
+      b.onclick = () => {
+        $("content").value = b.dataset.content;
+        document.querySelectorAll("[data-content]").forEach((x) => x.classList.toggle("on", x === b));
+        markStaleIfDump();
+      };
+    });
+    document.querySelectorAll("[data-out]").forEach((b) => {
+      b.onclick = () => setOutView(b.dataset.out);
+    });
+    $("wrap").addEventListener("change", applyWrap);
+    ["gitignore", "hidden", "archives", "notebook", "notree", "path"].forEach((id) => {
       const el = $(id);
       if (!el) return;
       el.addEventListener("change", markStaleIfDump);
@@ -1165,11 +1397,11 @@
     $("path").addEventListener("keydown", (e) => { if (e.key === "Enter") scan(); });
     $("filter").addEventListener("input", renderTree);
     $("all").onclick = () => {
-      state.files.filter(visible).filter((f) => !f.oversized).forEach((f) => state.selected.add(f.relative));
+      state.files.filter(visible).filter((f) => !f.oversized).forEach((f) => state.selected.add(fileId(f)));
       renderTree();
     };
     $("none").onclick = () => {
-      state.files.filter(visible).forEach((f) => state.selected.delete(f.relative));
+      state.files.filter(visible).forEach((f) => state.selected.delete(fileId(f)));
       renderTree();
     };
   </script>
