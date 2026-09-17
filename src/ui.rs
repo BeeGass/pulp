@@ -832,6 +832,8 @@ mod tests {
         assert!(html.contains("data-tip"));
         assert!(html.contains("data-fmt=\"xml\" class=\"on\""));
         assert!(html.contains("<option value=\"xml\" selected>"));
+        assert!(html.contains("id=\"github\""));
+        assert!(html.contains("https://github.com/BeeGass/pulp"));
     }
 
     #[test]
