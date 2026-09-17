@@ -1,3 +1,7 @@
+[workspace]
+members = ["xtask"]
+resolver = "2"
+
 [package]
 name = "pulp"
 version = "0.1.0"

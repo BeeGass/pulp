@@ -12,6 +12,31 @@ cargo install --git https://github.com/BeeGass/pulp --locked
 
 Requires Rust 1.85 or newer.
 
+## xtask (per machine / OS)
+
+`cargo xtask` picks jobs and compiler env from the box you are on:
+
+| Hostname | OS | Notes |
+| --- | --- | --- |
+| `Matrix` | macOS aarch64 | M1 Pro laptop. Uses Command Line Tools clang (Xcode license is unsigned). |
+| `manifold` | Linux x86_64 | 9950X3D. Caps cargo at 24 jobs. Release builds use `target-cpu=native`. |
+| `tensor` | Linux x86_64 | 3900X. Caps at 16 jobs. |
+| `jacobian` | Linux aarch64 | Pi 5. Caps at 4 jobs. |
+| `hessian` | Linux aarch64 | Pi 4. Caps at 2 jobs. |
+
+```
+cargo xtask doctor          # who we think this machine is
+cargo xtask build           # debug
+cargo xtask build --release
+cargo xtask test
+cargo xtask clippy
+cargo xtask fmt
+cargo xtask ui              # mill, with this host's env
+cargo xtask run -- ui --no-open
+```
+
+Override the hostname with `PULP_HOST=manifold` if the kernel name is not the box name.
+
 ## Usage
 
 ```
