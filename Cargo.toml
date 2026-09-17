@@ -1,5 +1,5 @@
 [workspace]
-members = ["xtask"]
+members = ["xtask", "crates/pulp-wasm"]
 resolver = "2"
 
 [package]
@@ -9,7 +9,7 @@ edition = "2024"
 license = "MIT"
 description = "Pulp a local folder of mixed documents into one LLM-ready text file"
 repository = "https://github.com/BeeGass/pulp"
-homepage = "https://github.com/BeeGass/pulp"
+homepage = "https://pulp.onlygass.dev"
 readme = "README.md"
 authors = ["Bryan Gass"]
 keywords = ["llm", "prompt", "text", "extract", "cli"]
@@ -23,23 +23,32 @@ path = "src/lib.rs"
 [[bin]]
 name = "pulp"
 path = "src/main.rs"
+required-features = ["native"]
+
+[features]
+default = ["native"]
+# Local CLI + axum mill + filesystem walk.
+native = [
+    "dep:anyhow",
+    "dep:axum",
+    "dep:clap",
+    "dep:crossbeam-channel",
+    "dep:ignore",
+    "dep:opener",
+    "dep:tokio",
+    "dep:tower",
+]
 
 [dependencies]
-anyhow = "1.0.104"
-axum = { version = "0.8.9", features = ["json"] }
-calamine = "0.36.1"
 chardetng = "1.0.0"
-clap = { version = "4.6.7", features = ["derive"] }
-crossbeam-channel = "0.5.17"
 csv = "1.4.0"
 encoding_rs = "0.8.41"
 flate2 = "1.1.10"
 getrandom = "0.3.4"
 globset = "0.4.20"
 html2text = "0.17.1"
-ignore = "0.4.33"
 infer = "0.22.0"
-opener = "0.8.5"
+calamine = "0.36.1"
 pdf-extract = "0.12.1"
 quick-xml = "0.42.0"
 rayon = "1.12.0"
@@ -48,9 +57,20 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tar = "0.4.46"
 thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal"] }
-tower = { version = "0.5.3", features = ["util"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+# native-only
+anyhow = { version = "1.0.104", optional = true }
+axum = { version = "0.8.9", features = ["json"], optional = true }
+clap = { version = "4.6.7", features = ["derive"], optional = true }
+crossbeam-channel = { version = "0.5.17", optional = true }
+ignore = { version = "0.4.33", optional = true }
+opener = { version = "0.8.5", optional = true }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal"], optional = true }
+tower = { version = "0.5.3", features = ["util"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 http-body-util = "0.1.5"
@@ -61,3 +81,6 @@ tempfile = "3.27.0"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]

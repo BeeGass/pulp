@@ -561,14 +561,14 @@ fn pack_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> {
     let opts = options_from_pack(req.clone(), false, false)?;
     let (manifest_id, mut snapshot) = load_or_scan_manifest(&req, mill)?;
     if let Some(hit) = mill.find_result(&manifest_id, &extract_key) {
-        return finish_pack(hit, &opts, Instant::now());
+        return finish_pack(hit, &opts, Some(Instant::now()));
     }
     snapshot.entries.retain(|entry| {
         req.selected
             .iter()
             .any(|id| id == &entry.id || id == &entry.relative)
     });
-    let packed = pack::pack_manifest(&snapshot, &opts, Some(&mill.cancel), Instant::now())
+    let packed = pack::pack_manifest(&snapshot, &opts, Some(&mill.cancel), Some(Instant::now()))
         .map_err(|err| ApiError::bad(err.to_string()))?;
     let stored = StoredResult {
         id: store::new_id(),
@@ -578,7 +578,7 @@ fn pack_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> {
         stats: packed.stats.clone(),
     };
     mill.put_result(stored.clone());
-    finish_pack(stored, &opts, Instant::now())
+    finish_pack(stored, &opts, Some(Instant::now()))
 }
 
 fn render_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> {
@@ -589,7 +589,7 @@ fn render_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> 
         .get_result(&req.result_id)
         .ok_or_else(|| ApiError::bad("unknown result"))?;
     let opts = options_from_pack(req, false, false)?;
-    finish_pack(stored, &opts, Instant::now())
+    finish_pack(stored, &opts, Some(Instant::now()))
 }
 
 fn artifact_sync(id: &str, query: &ArtifactQuery, mill: &Mill) -> Result<Response, ApiError> {
@@ -649,7 +649,7 @@ fn load_or_scan_manifest(
 fn finish_pack(
     stored: StoredResult,
     opts: &Options,
-    start: Instant,
+    start: Option<Instant>,
 ) -> Result<PackResponse, ApiError> {
     let packed = packed_from_stored(&stored, opts);
     let mut dump = Cursor::new(Vec::new());
@@ -679,7 +679,7 @@ fn finish_pack(
         files_skipped: packed.stats.files_skipped,
         tokens_est: packed.stats.tokens_est,
         chars_emitted: packed.stats.chars_emitted,
-        elapsed_ms: start.elapsed().as_millis(),
+        elapsed_ms: start.map(|t| t.elapsed().as_millis()).unwrap_or(0),
         truncated: packed.stats.truncated,
         cancelled: packed.stats.cancelled,
         preview_truncated,

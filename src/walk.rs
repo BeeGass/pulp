@@ -12,6 +12,7 @@ use ignore::{WalkBuilder, WalkState};
 
 use crate::config::Options;
 use crate::error::Error;
+pub(crate) use crate::filter::{build_globset, glob_matches, is_hidden_rel, keep_relative};
 
 /// A file discovered under the pack roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,56 +353,12 @@ pub(crate) fn keep_for_walk(
     }
 }
 
-pub(crate) fn keep_relative(relative: &str, include: Option<&GlobSet>, exclude: &GlobSet) -> bool {
-    if glob_matches(exclude, relative) {
-        return false;
-    }
-    match include {
-        None => true,
-        Some(set) => glob_matches(set, relative),
-    }
-}
-
 fn looks_like_archive(relative: &str) -> bool {
     let n = relative.to_ascii_lowercase();
     n.ends_with(".zip") || n.ends_with(".tar") || n.ends_with(".tgz") || n.ends_with(".tar.gz")
 }
 
-fn glob_matches(set: &GlobSet, relative: &str) -> bool {
-    if set.is_match(relative) {
-        return true;
-    }
-    Path::new(relative)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| set.is_match(name))
-}
 
-pub(crate) fn build_globset(patterns: &[String]) -> Result<GlobSet, Error> {
-    let mut builder = GlobSetBuilder::new();
-    for pat in patterns {
-        if pat.is_empty() {
-            continue;
-        }
-        add_glob(&mut builder, pat)?;
-    }
-    builder.build().map_err(|err| Error::msg(err.to_string()))
-}
-
-fn add_glob(builder: &mut GlobSetBuilder, pat: &str) -> Result<(), Error> {
-    let glob = Glob::new(pat).map_err(|err| Error::msg(format!("invalid glob {pat}: {err}")))?;
-    builder.add(glob);
-    let trimmed = pat.trim_start_matches('/');
-    if !pat.starts_with("**/") && !trimmed.is_empty() {
-        let nested = format!("**/{trimmed}");
-        if nested != pat {
-            if let Ok(glob) = Glob::new(&nested) {
-                builder.add(glob);
-            }
-        }
-    }
-    Ok(())
-}
 
 fn relative_for(root: &Path, path: &Path, multi: bool) -> String {
     let stripped = path.strip_prefix(root).unwrap_or(path);
@@ -450,12 +407,6 @@ fn make_absolute(path: &Path) -> PathBuf {
             .map(|cwd| cwd.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
     }
-}
-
-pub(crate) fn is_hidden_rel(relative: &str) -> bool {
-    relative
-        .split('/')
-        .any(|part| part.starts_with('.') && part != "." && part != "..")
 }
 
 fn is_skipped_path(path: &Path, skip: &[PathBuf]) -> bool {

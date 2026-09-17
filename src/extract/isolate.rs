@@ -29,6 +29,7 @@ pub fn needs_isolation(kind: Kind) -> bool {
 
 /// True when this process is the `pulp` CLI, not a test harness.
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn running_as_pulp_bin() -> bool {
     std::env::current_exe()
         .ok()
@@ -47,26 +48,35 @@ pub fn extract_heavy(
     kind: Kind,
     opts: &ExtractOpts,
 ) -> Result<String, Error> {
-    if !running_as_pulp_bin() {
-        return crate::extract::extract(
-            path.and_then(|p| p.to_str()).unwrap_or("file"),
-            bytes,
-            kind,
-            opts,
-        );
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        return crate::extract::extract("file", bytes, kind, opts);
     }
-    match path {
-        Some(path) => spawn_extract(path, kind, opts),
-        None => {
-            let tmp = temp_extract_path();
-            std::fs::write(&tmp, bytes)?;
-            let result = spawn_extract(&tmp, kind, opts);
-            let _ = std::fs::remove_file(&tmp);
-            result
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if !running_as_pulp_bin() {
+            return crate::extract::extract(
+                path.and_then(|p| p.to_str()).unwrap_or("file"),
+                bytes,
+                kind,
+                opts,
+            );
+        }
+        match path {
+            Some(path) => spawn_extract(path, kind, opts),
+            None => {
+                let tmp = temp_extract_path();
+                std::fs::write(&tmp, bytes)?;
+                let result = spawn_extract(&tmp, kind, opts);
+                let _ = std::fs::remove_file(&tmp);
+                result
+            }
         }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn temp_extract_path() -> std::path::PathBuf {
     let mut buf = [0u8; 8];
     let _ = getrandom::fill(&mut buf);
@@ -77,6 +87,7 @@ fn temp_extract_path() -> std::path::PathBuf {
     std::env::temp_dir().join(name)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_extract(path: &Path, kind: Kind, opts: &ExtractOpts) -> Result<String, Error> {
     let exe = std::env::current_exe().map_err(|err| Error::msg(err.to_string()))?;
     let timeout = extract_timeout();
@@ -137,6 +148,7 @@ fn spawn_extract(path: &Path, kind: Kind, opts: &ExtractOpts) -> Result<String, 
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn extract_timeout() -> Duration {
     std::env::var("PULP_EXTRACT_TIMEOUT_MS")
         .ok()

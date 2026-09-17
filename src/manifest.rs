@@ -3,9 +3,14 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use crate::classify::{Kind, classify, is_default_selected, language_label};
+use crate::classify::Kind;
+#[cfg(feature = "native")]
+use crate::classify::{classify, is_default_selected, language_label};
+#[cfg(feature = "native")]
 use crate::config::Options;
+#[cfg(feature = "native")]
 use crate::error::Error;
+#[cfg(feature = "native")]
 use crate::walk::{self, WalkedFile};
 
 /// One discovered file. `id` is the stable key used for selection.
@@ -33,6 +38,7 @@ pub struct ScanManifest {
 }
 
 /// Walk roots with `opts` and record every eligible entry once.
+#[cfg(feature = "native")]
 pub fn scan_manifest(opts: &Options) -> Result<ScanManifest, Error> {
     let walked = walk::collect_detailed(opts)?;
     let entries = entries_from_walked(walked.files, opts);
@@ -50,6 +56,7 @@ pub fn scan_manifest(opts: &Options) -> Result<ScanManifest, Error> {
     })
 }
 
+#[cfg(feature = "native")]
 fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestEntry> {
     walked
         .into_iter()
@@ -72,7 +79,7 @@ fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestE
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use std::fs;

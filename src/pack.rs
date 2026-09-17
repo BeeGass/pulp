@@ -10,7 +10,6 @@ use crate::config::{Options, TreeMode};
 use crate::error::Error;
 use crate::extract::{ExtractOpts, expand_archive, extract};
 use crate::manifest::ManifestEntry;
-use crate::walk;
 
 const MAX_ARCHIVE_DEPTH: u8 = 3;
 const MAX_ARCHIVE_MEMBERS: usize = 10_000;
@@ -107,20 +106,40 @@ struct WorkItem {
     depth: u8,
 }
 
+fn pack_clock_start() -> Option<Instant> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(Instant::now())
+    }
+}
+
+fn pack_clock_elapsed(start: Option<Instant>) -> Duration {
+    match start {
+        Some(t) => t.elapsed(),
+        None => Duration::ZERO,
+    }
+}
+
 /// Walk `opts.roots` and extract each file into LLM-readable text.
+#[cfg(feature = "native")]
 pub fn pack(opts: &Options) -> Result<Packed, Error> {
     pack_with_cancel(opts, None)
 }
 
 /// [`pack`] with cooperative cancel checked between files.
+#[cfg(feature = "native")]
 pub fn pack_with_cancel(opts: &Options, cancel: Option<&AtomicBool>) -> Result<Packed, Error> {
-    let start = Instant::now();
+    let start = pack_clock_start();
     if opts.selection.is_empty_only() {
         return Ok(Packed {
             files: Vec::new(),
             tree: String::new(),
             stats: Stats {
-                elapsed: start.elapsed(),
+                elapsed: pack_clock_elapsed(start),
                 ..Stats::default()
             },
         });
@@ -130,11 +149,12 @@ pub fn pack_with_cancel(opts: &Options, cancel: Option<&AtomicBool>) -> Result<P
 }
 
 /// Extract already-discovered entries. Used by the mill to avoid a second walk.
+#[cfg(feature = "native")]
 pub fn pack_manifest(
     manifest: &crate::manifest::ScanManifest,
     opts: &Options,
     cancel: Option<&AtomicBool>,
-    start: Instant,
+    start: Option<Instant>,
 ) -> Result<Packed, Error> {
     let extract_opts = ExtractOpts::from_options(opts);
     let bytes_read = AtomicU64::new(0);
@@ -173,8 +193,84 @@ pub fn pack_manifest(
             bytes_read: bytes_read.load(Ordering::Relaxed),
             chars_emitted,
             tokens_est,
-            elapsed: start.elapsed(),
+            elapsed: pack_clock_elapsed(start),
             truncated: manifest.truncated || cancelled,
+            cancelled,
+        },
+    })
+}
+
+
+/// Pack an in-memory file set (browser / virtual trees). No filesystem reads.
+pub fn pack_entries(
+    entries: &[(String, Vec<u8>)],
+    opts: &Options,
+    cancel: Option<&AtomicBool>,
+) -> Result<Packed, Error> {
+    let start = pack_clock_start();
+    let extract_opts = ExtractOpts::from_options(opts);
+    let bytes_read = AtomicU64::new(0);
+
+    let work: Vec<(String, Vec<u8>)> = entries
+        .iter()
+        .cloned()
+        .take(opts.max_entries)
+        .collect();
+    let truncated_entries = entries.len() > opts.max_entries;
+
+    let mut files: Vec<PackedFile> = Vec::new();
+    for (relative, bytes) in &work {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            break;
+        }
+        let size = bytes.len() as u64;
+        if size > opts.max_file_size {
+            files.push(packed_too_large(
+                relative.clone(),
+                classify(Path::new(relative), Some(bytes)),
+                size,
+                opts.max_file_size,
+            ));
+            continue;
+        }
+        bytes_read.fetch_add(size, Ordering::Relaxed);
+        files.extend(process_item(
+            WorkItem {
+                relative: relative.clone(),
+                absolute: None,
+                bytes: bytes.clone(),
+                depth: 0,
+            },
+            opts,
+            &extract_opts,
+        ));
+    }
+    files.sort_by(|a, b| a.relative.cmp(&b.relative));
+    let cancelled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+    let tree = render_pack_tree(opts, &files);
+    let files_extracted = files
+        .iter()
+        .filter(|f| f.status == FileStatus::Extracted)
+        .count();
+    let files_skipped = files.len().saturating_sub(files_extracted);
+    let chunks = std::iter::once(tree.as_str()).chain(
+        files
+            .iter()
+            .filter(|file| file.status == FileStatus::Extracted)
+            .map(|file| file.text.as_str()),
+    );
+    let (chars_emitted, tokens_est) = crate::tokens::summarize_chunks(chunks);
+    Ok(Packed {
+        files,
+        tree,
+        stats: Stats {
+            files_extracted,
+            files_skipped,
+            bytes_read: bytes_read.load(Ordering::Relaxed),
+            chars_emitted,
+            tokens_est,
+            elapsed: pack_clock_elapsed(start),
+            truncated: truncated_entries || cancelled,
             cancelled,
         },
     })
@@ -185,14 +281,23 @@ where
     T: Send,
     F: FnOnce() -> T + Send,
 {
-    if jobs == 0 {
-        Ok(f())
-    } else {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(jobs)
-            .build()
-            .map_err(|err| Error::msg(err.to_string()))
-            .map(|pool| pool.install(f))
+    // wasm32 has no threads; building a Rayon pool panics as `unreachable`.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = jobs;
+        return Ok(f());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if jobs == 0 {
+            Ok(f())
+        } else {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(jobs)
+                .build()
+                .map_err(|err| Error::msg(err.to_string()))
+                .map(|pool| pool.install(f))
+        }
     }
 }
 
@@ -401,9 +506,9 @@ fn take_archive_members(
     let include = if opts.include.is_empty() {
         None
     } else {
-        walk::build_globset(&opts.include).ok()
+        crate::filter::build_globset(&opts.include).ok()
     };
-    let Ok(exclude) = walk::build_globset(&opts.exclude) else {
+    let Ok(exclude) = crate::filter::build_globset(&opts.exclude) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -414,7 +519,7 @@ fn take_archive_members(
             continue;
         }
         let child = join_rel(relative, &name);
-        if !opts.hidden && walk::is_hidden_rel(&child) {
+        if !opts.hidden && crate::filter::is_hidden_rel(&child) {
             continue;
         }
         if kept >= MAX_ARCHIVE_MEMBERS {
@@ -426,7 +531,7 @@ fn take_archive_members(
         }
         let kind = classify(Path::new(&child), Some(&mem_bytes));
         let emit = !kind.is_archive();
-        if emit && !walk::keep_relative(&child, include.as_ref(), &exclude) {
+        if emit && !crate::filter::keep_relative(&child, include.as_ref(), &exclude) {
             continue;
         }
         if !emit && glob_exclude_only(&child, &exclude) {
@@ -449,7 +554,7 @@ fn take_archive_members(
 }
 
 fn glob_exclude_only(relative: &str, exclude: &globset::GlobSet) -> bool {
-    !walk::keep_relative(relative, None, exclude)
+    !crate::filter::keep_relative(relative, None, exclude)
 }
 
 fn list_only_file(entry: &ManifestEntry, opts: &Options) -> PackedFile {

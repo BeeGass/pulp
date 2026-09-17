@@ -7,15 +7,20 @@
 pub mod classify;
 pub mod config;
 pub mod error;
+mod filter;
 pub mod extract;
 pub mod manifest;
 pub mod pack;
+#[cfg(feature = "native")]
 mod pick;
 pub mod render;
+#[cfg(feature = "native")]
 mod store;
 pub mod tokens;
 pub mod tree;
+#[cfg(feature = "native")]
 pub mod ui;
+#[cfg(feature = "native")]
 pub mod walk;
 
 pub use classify::{
@@ -23,5 +28,9 @@ pub use classify::{
 };
 pub use config::{Options, OutputFormat, Selection, TreeMode};
 pub use error::Error;
-pub use manifest::{ManifestEntry, ScanManifest, scan_manifest};
-pub use pack::{FileStatus, Packed, PackedFile, Stats, pack, pack_manifest, pack_with_cancel};
+pub use manifest::{ManifestEntry, ScanManifest};
+#[cfg(feature = "native")]
+pub use manifest::scan_manifest;
+pub use pack::{FileStatus, Packed, PackedFile, Stats, pack_entries};
+#[cfg(feature = "native")]
+pub use pack::{pack, pack_manifest, pack_with_cancel};
