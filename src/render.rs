@@ -13,6 +13,26 @@ pub fn write_all<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::Re
     }
 }
 
+/// Directory map in the dump format, with no file bodies.
+pub fn format_directory_map(
+    root_label: &str,
+    paths: &[String],
+    format: OutputFormat,
+) -> io::Result<String> {
+    let packed = Packed {
+        files: Vec::new(),
+        tree: crate::tree::render_tree(root_label, paths),
+        stats: crate::Stats::default(),
+    };
+    let opts = Options {
+        format,
+        ..Options::default()
+    };
+    let mut buf = Vec::new();
+    write_tree(&mut buf, &packed, &opts)?;
+    String::from_utf8(buf).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
 /// Write only the directory map in the selected dump format.
 pub fn write_tree<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::Result<()> {
     if packed.tree.is_empty() {
@@ -279,6 +299,28 @@ mod tests {
         assert_eq!(fence_for(text), "``````");
         assert_eq!(fence_for("no ticks"), "```");
         assert_eq!(fence_for("has ``` fence"), "````");
+    }
+
+    #[test]
+    fn test_format_directory_map_with_each_format_omits_file_bodies() {
+        let paths = ["README.md".to_string(), "src/main.rs".to_string()];
+        let xml = format_directory_map("website", &paths, OutputFormat::Xml).unwrap();
+        assert!(xml.starts_with("<document_tree>\n"));
+        assert!(xml.contains("website/\n"));
+        assert!(xml.contains("└── src/\n"));
+        assert!(xml.trim_end().ends_with("</document_tree>"));
+        assert!(!xml.contains("<documents>"));
+        assert!(!xml.contains("<document_content>"));
+        assert!(!xml.contains("FILE:"));
+
+        let md = format_directory_map("website", &paths, OutputFormat::Markdown).unwrap();
+        assert!(md.starts_with("# Directory structure\n"));
+        assert!(md.contains("```\nwebsite/\n"));
+        assert!(!md.contains("## README.md"));
+
+        let plain = format_directory_map("website", &paths, OutputFormat::Plain).unwrap();
+        assert!(plain.starts_with("Directory structure:\nwebsite/\n"));
+        assert!(!plain.contains("FILE:"));
     }
 
     #[test]
