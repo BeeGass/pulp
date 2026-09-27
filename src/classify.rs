@@ -402,14 +402,33 @@ fn ext_label(ext: &str) -> Option<&'static str> {
 
 /// Whether the mill should tick this file after a scan.
 ///
-/// Lockfiles, raster images, virtualenv trees, binary media, and generated
-/// paths (`.next/`, `out/`, `toolchains/`, `next-env.d.ts`, …) start unchecked.
+/// Lockfiles, raster images, virtualenv trees, binary media, PGP keys,
+/// Cython sources, and generated paths (`.next/`, `out/`, `toolchains/`,
+/// `next-env.d.ts`, …) start unchecked.
 #[must_use]
 pub fn is_default_selected(path: &Path, kind: Kind) -> bool {
     if kind.is_binary_media() || is_generated_path(path) {
         return false;
     }
-    !is_lock_file(path) && !is_image_file(path) && !is_venv_path(path)
+    !is_lock_file(path)
+        && !is_image_file(path)
+        && !is_venv_path(path)
+        && !is_pgp_file(path)
+        && !is_cython_file(path)
+}
+
+fn path_extension_is(path: &Path, exts: &[&str]) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| exts.iter().any(|want| ext.eq_ignore_ascii_case(want)))
+}
+
+fn is_pgp_file(path: &Path) -> bool {
+    path_extension_is(path, &["asc", "pgp", "gpg"])
+}
+
+fn is_cython_file(path: &Path) -> bool {
+    path_extension_is(path, &["pyx", "pxd", "pxi"])
 }
 
 fn is_generated_path(path: &Path) -> bool {
@@ -785,6 +804,23 @@ mod tests {
         ));
         assert!(is_default_selected(Path::new("app/page.tsx"), Kind::Text));
         assert!(is_default_selected(Path::new("src/build.rs"), Kind::Text));
+        assert!(!is_default_selected(
+            Path::new("public/bryan-gass.asc"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(Path::new("keys/me.pgp"), Kind::Text));
+        assert!(!is_default_selected(
+            Path::new("native/checks.pyx"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(
+            Path::new("native/checks.pxd"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(
+            Path::new("native/checks.pxi"),
+            Kind::Text
+        ));
         assert!(is_default_selected(Path::new("src/app.py"), Kind::Text));
     }
 
