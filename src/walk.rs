@@ -445,6 +445,27 @@ mod tests {
     }
 
     #[test]
+    fn test_collect_with_hidden_still_skips_generated_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("app/page.tsx"), b"export {}\n");
+        write(&dir.path().join(".next/server/page.js"), b"export {}\n");
+        write(&dir.path().join("out/index.html"), b"<p>x</p>\n");
+        write(
+            &dir.path().join("toolchains/sdk/a.f90"),
+            b"subroutine a\nend\n",
+        );
+        let mut opts = opts_for(dir.path().to_path_buf());
+        opts.hidden = true;
+        opts.gitignore = false;
+        let files = collect(&opts).unwrap();
+        let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
+        assert!(rels.contains(&"app/page.tsx"), "{rels:?}");
+        assert!(!rels.iter().any(|r| r.contains(".next")), "{rels:?}");
+        assert!(!rels.iter().any(|r| r.starts_with("out/")), "{rels:?}");
+        assert!(!rels.iter().any(|r| r.contains("toolchains")), "{rels:?}");
+    }
+
+    #[test]
     fn test_collect_with_node_modules_skips_nested_files() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join("src/lib.rs"), b"pub fn x() {}\n");
@@ -468,7 +489,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join("src/lib.rs"), b"pub fn x() {}\n");
         write(&dir.path().join("Math/Basic.lean"), b"def x := 1\n");
-        write(&dir.path().join("runs/params.npz"), b"PK\x03\x04npy");
+        write(&dir.path().join("arrays/params.npz"), b"PK\x03\x04npy");
         write(
             &dir.path().join("cache/batch.npy"),
             &[0x93, b'N', b'U', b'M', b'P', b'Y'],
@@ -483,7 +504,7 @@ mod tests {
         let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
         assert!(rels.contains(&"src/lib.rs"));
         assert!(rels.contains(&"Math/Basic.lean"));
-        assert!(rels.contains(&"runs/params.npz"));
+        assert!(rels.contains(&"arrays/params.npz"));
         assert!(rels.contains(&"cache/batch.npy"));
         assert!(!rels.iter().any(|r| r.starts_with("target/")));
         assert!(

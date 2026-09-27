@@ -107,7 +107,7 @@ pulped 12 files (48.2 KiB read, 12100 chars, ~12100 tokens) in 35ms
 
 Binary media (images, audio, wasm, …) is skipped unless `--binaries`.
 
-Noisy trees stay out even when they are tracked: `node_modules/`, `target/`, `dist/`, `build/`, virtualenvs, `__pycache__/`, VCS dirs, lockfiles, `.env`, keys, object files, and similar. Rust `.rs`, Lean `.lean`, and NumPy arrays next to a skipped `target/` are still included.
+Noisy trees stay out even when they are tracked: `node_modules/`, `.next/`, `out/`, `runs/`, `target/`, `dist/`, `build/`, `toolchains/`, virtualenvs, `__pycache__/`, VCS dirs, lockfiles, `.env`, keys, object files, and similar. Rust `.rs`, Lean `.lean`, and NumPy arrays next to a skipped `target/` are still included. Generated paths that do show up start unchecked.
 
 `.gitignore` is honored unless `--no-gitignore`. `--exclude GLOB` adds patterns. `--no-default-excludes` starts from an empty deny list.
 
