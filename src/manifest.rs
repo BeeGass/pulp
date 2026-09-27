@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use crate::classify::Kind;
 #[cfg(feature = "native")]
-use crate::classify::{classify, is_default_selected, language_label};
+use crate::classify::{classify, is_default_selected, kind_from_name, language_name};
 #[cfg(feature = "native")]
 use crate::config::Options;
 #[cfg(feature = "native")]
@@ -21,7 +21,7 @@ pub struct ManifestEntry {
     pub absolute: PathBuf,
     pub size: u64,
     pub kind: Kind,
-    pub language: &'static str,
+    pub language: String,
     pub default_on: bool,
     pub oversized: bool,
     pub is_symlink: bool,
@@ -61,13 +61,16 @@ fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestE
     walked
         .into_iter()
         .map(|wf| {
-            let kind = classify(&wf.absolute, None);
+            let sniff = sniff_prefix(&wf.absolute);
+            let kind = classify(&wf.absolute, sniff.as_deref());
             let oversized = wf.size > opts.max_file_size;
             ManifestEntry {
                 id: wf.id,
                 relative: wf.relative.clone(),
-                language: language_label(&wf.absolute),
-                default_on: is_default_selected(&wf.absolute, kind) && !oversized,
+                language: language_name(&wf.absolute, kind),
+                default_on: is_default_selected(&wf.absolute, kind)
+                    && !oversized
+                    && (!kind.is_archive() || opts.follow_archives),
                 oversized,
                 is_symlink: wf.is_symlink,
                 modified: wf.modified,
@@ -77,6 +80,20 @@ fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestE
             }
         })
         .collect()
+}
+
+/// Read a short prefix when the name alone does not decide the kind.
+#[cfg(feature = "native")]
+fn sniff_prefix(path: &std::path::Path) -> Option<Vec<u8>> {
+    if kind_from_name(path).is_some() {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; 8192];
+    use std::io::Read;
+    let n = file.read(&mut buf).ok()?;
+    buf.truncate(n);
+    if buf.is_empty() { None } else { Some(buf) }
 }
 
 #[cfg(all(test, feature = "native"))]
@@ -176,6 +193,79 @@ mod tests {
             .find(|e| e.relative == "src/app.py")
             .unwrap();
         assert!(app.default_on);
+    }
+
+    #[test]
+    fn test_scan_manifest_with_generated_dirs_omits_them() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("content/index.math"), b"V(h)=1\n");
+        write(&dir.path().join("rates.f90"), b"subroutine r\nend\n");
+        write(&dir.path().join(".next/server/page.js"), b"export {}\n");
+        write(&dir.path().join("out/index.html"), b"<p>x</p>\n");
+        write(
+            &dir.path().join("toolchains/sdk/a.f90"),
+            b"subroutine a\nend\n",
+        );
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            hidden: true,
+            gitignore: false,
+            ..Options::default()
+        };
+        let manifest = scan_manifest(&opts).unwrap();
+        let rels: Vec<&str> = manifest
+            .entries
+            .iter()
+            .map(|e| e.relative.as_str())
+            .collect();
+        assert!(rels.contains(&"content/index.math"), "{rels:?}");
+        assert!(rels.contains(&"rates.f90"), "{rels:?}");
+        assert!(!rels.iter().any(|r| r.contains(".next")), "{rels:?}");
+        assert!(!rels.iter().any(|r| r.starts_with("out/")), "{rels:?}");
+        assert!(!rels.iter().any(|r| r.contains("toolchains")), "{rels:?}");
+        let math = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == "content/index.math")
+            .unwrap();
+        assert!(math.default_on);
+        assert_eq!(math.language, "math");
+    }
+
+    #[test]
+    fn test_scan_manifest_with_unknown_extension_sniffs_text_and_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("notes.xyzzy"), b"hello\n");
+        write(&dir.path().join("blob.xyzzy"), &[0, 1, 2, 3]);
+        write(&dir.path().join("bundle.zip"), b"PK\x03\x04");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            gitignore: false,
+            ..Options::default()
+        };
+        let manifest = scan_manifest(&opts).unwrap();
+        let notes = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == "notes.xyzzy")
+            .unwrap();
+        assert_eq!(notes.kind, Kind::Text);
+        assert_eq!(notes.language, "xyzzy");
+        assert!(notes.default_on);
+        let blob = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == "blob.xyzzy")
+            .unwrap();
+        assert_eq!(blob.kind, Kind::Binary);
+        assert!(!blob.default_on);
+        let zip = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == "bundle.zip")
+            .unwrap();
+        assert!(zip.kind.is_archive());
+        assert!(!zip.default_on);
     }
 
     #[test]

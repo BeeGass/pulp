@@ -4,9 +4,7 @@ use std::io::{Cursor, Read};
 
 use zip::ZipArchive;
 
-use super::archive::{
-    MAX_ARCHIVE_FILES, MAX_ARCHIVE_UNCOMPRESSED, is_rejected_member_name, normalize_member_name,
-};
+use super::archive::{MAX_ARCHIVE_UNCOMPRESSED, is_rejected_member_name, normalize_member_name};
 use crate::error::Error;
 
 const NPY_MAGIC: &[u8] = b"\x93NUMPY";
@@ -29,9 +27,6 @@ pub fn extract_npz(bytes: &[u8]) -> Result<String, Error> {
     let mut catalog: Vec<(usize, String, u64)> = Vec::new();
     let mut claimed_total = 0u64;
     for i in 0..archive.len() {
-        if catalog.len() >= MAX_ARCHIVE_FILES {
-            break;
-        }
         let file = match archive.by_index(i) {
             Ok(file) => file,
             Err(_) => continue,

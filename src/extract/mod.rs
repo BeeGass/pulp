@@ -37,7 +37,20 @@ impl ExtractOpts {
 /// Convert one file's bytes into LLM-readable text.
 ///
 /// Archives are not expanded here; call [`expand_archive`] first.
+/// A parser failure becomes a short note so one odd file does not fail the pack.
 pub fn extract(
+    relative: &str,
+    bytes: &[u8],
+    kind: Kind,
+    opts: &ExtractOpts,
+) -> Result<String, Error> {
+    match extract_kind(relative, bytes, kind, opts) {
+        Ok(text) => Ok(text),
+        Err(err) => Ok(format!("[{} unreadable: {err}]", kind.as_str())),
+    }
+}
+
+fn extract_kind(
     relative: &str,
     bytes: &[u8],
     kind: Kind,
@@ -114,5 +127,16 @@ mod tests {
         let got = extract("page.html", b"<p>Hi</p>", Kind::Html, &opts).unwrap();
         assert!(got.contains("Hi"), "{got}");
         assert!(!got.contains("<p>"), "{got}");
+    }
+
+    #[test]
+    fn test_extract_with_garbage_pdf_returns_note() {
+        let opts = ExtractOpts {
+            max_file_size: 8 * 1024 * 1024,
+            notebook_outputs: false,
+            source_mode: false,
+        };
+        let got = extract("paper.pdf", b"not a pdf", Kind::Pdf, &opts).unwrap();
+        assert!(got.contains("unreadable"), "{got}");
     }
 }

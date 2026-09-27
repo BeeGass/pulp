@@ -86,7 +86,7 @@ pub struct Options {
     pub skip_paths: Vec<PathBuf>,
     /// Preserve HTML/XML/JSON as source instead of converting to readable text.
     pub source_mode: bool,
-    /// Cap on discovered file entries (examined, not only emitted).
+    /// Cap on discovered file entries. `0` means no cap.
     pub max_entries: usize,
     /// Cap on summed input sizes processed in one operation.
     pub max_total_bytes: u64,
@@ -137,7 +137,7 @@ impl Default for Options {
             selection: Selection::AllEligible,
             skip_paths: Vec::new(),
             source_mode: false,
-            max_entries: 100_000,
+            max_entries: 0,
             max_total_bytes: 1 << 30,
         }
     }
@@ -174,56 +174,107 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
     Ok(n.saturating_mul(mul))
 }
 
+/// Directory names for build output, dependency installs, caches, and vendored
+/// toolchains. Matched as a whole path component, so `src/build.rs` is kept.
+pub fn generated_dir_names() -> &'static [&'static str] {
+    &[
+        ".angular",
+        ".astro",
+        ".bin",
+        ".cache",
+        ".dart_tool",
+        ".docusaurus",
+        ".eggs",
+        ".figure-audit",
+        ".git",
+        ".gradle",
+        ".hg",
+        ".hypothesis",
+        ".ipynb_checkpoints",
+        ".mypy_cache",
+        ".next",
+        ".nox",
+        ".nuxt",
+        ".open-next",
+        ".output",
+        ".parcel-cache",
+        ".pnp",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".serverless",
+        ".svelte-kit",
+        ".svn",
+        ".tox",
+        ".turbo",
+        ".venv",
+        ".vercel",
+        ".vite",
+        ".worktrees",
+        ".wrangler",
+        ".yarn",
+        "CMakeFiles",
+        "__pycache__",
+        "bower_components",
+        "build",
+        "coverage",
+        "dist",
+        "htmlcov",
+        "node_modules",
+        "out",
+        "runs",
+        "site-packages",
+        "storybook-static",
+        "target",
+        "toolchains",
+        "vendor",
+        "venv",
+    ]
+}
+
 /// Globs applied on top of gitignore so noisy trees stay out even when
 /// they are tracked or the folder is not a git repo.
 pub fn default_exclude_globs() -> Vec<String> {
-    [
-        "node_modules/**",
-        "target/**",
-        "dist/**",
-        "build/**",
-        ".venv/**",
-        "venv/**",
-        "__pycache__/**",
-        ".mypy_cache/**",
-        ".pytest_cache/**",
-        ".ruff_cache/**",
-        ".git/**",
-        ".hg/**",
-        ".svn/**",
-        ".next/**",
-        ".nuxt/**",
-        "coverage/**",
-        "vendor/**",
-        "*.min.js",
-        "*.min.css",
-        "package-lock.json",
-        "yarn.lock",
-        "pnpm-lock.yaml",
-        "bun.lock",
-        "bun.lockb",
-        ".env",
-        ".env.*",
-        "*.pem",
-        "*.key",
-        "id_rsa",
-        "id_rsa.*",
-        "*.pyc",
-        "*.pyo",
-        "*.class",
-        "*.o",
-        "*.a",
-        "*.so",
-        "*.dylib",
-        "*.dll",
-        "*.exe",
-        "*.wasm",
-        ".DS_Store",
-        "Thumbs.db",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    let mut globs: Vec<String> = generated_dir_names()
+        .iter()
+        .map(|dir| format!("{dir}/**"))
+        .collect();
+    globs.extend(
+        [
+            "*.min.js",
+            "*.min.css",
+            "*.tsbuildinfo",
+            "next-env.d.ts",
+            "*.egg-info/**",
+            "*.dist-info/**",
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "bun.lock",
+            "bun.lockb",
+            ".env",
+            ".env.*",
+            "*.pem",
+            "*.key",
+            "id_rsa",
+            "id_rsa.*",
+            "*.pyc",
+            "*.pyo",
+            "*.class",
+            "*.o",
+            "*.a",
+            "*.so",
+            "*.dylib",
+            "*.dll",
+            "*.exe",
+            "*.wasm",
+            "*.bin",
+            ".DS_Store",
+            "Thumbs.db",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    globs
 }
 
 #[cfg(test)]
@@ -269,5 +320,21 @@ mod tests {
         assert!(Selection::AllEligible.allows("src/lib.rs"));
         assert!(Selection::Only(vec!["src/lib.rs".into()]).allows("src/lib.rs"));
         assert!(!Selection::Only(vec!["src/lib.rs".into()]).allows("src/main.rs"));
+    }
+
+    #[test]
+    fn test_default_exclude_globs_include_next_out_and_toolchains() {
+        let globs = default_exclude_globs();
+        for pat in [
+            ".next/**",
+            "out/**",
+            "toolchains/**",
+            "runs/**",
+            ".worktrees/**",
+            "node_modules/**",
+            "*.bin",
+        ] {
+            assert!(globs.iter().any(|g| g == pat), "missing {pat}");
+        }
     }
 }

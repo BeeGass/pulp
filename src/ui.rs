@@ -214,7 +214,9 @@ fn port_holder(port: u16) -> Option<String> {
 }
 
 async fn index(State(state): State<AppState>) -> impl IntoResponse {
-    let html = INDEX.replace("__PULP_TOKEN__", state.token.as_ref());
+    let html = INDEX
+        .replace("__PULP_TOKEN__", state.token.as_ref())
+        .replace("__PULP_VERSION__", env!("CARGO_PKG_VERSION"));
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         Html(html),
@@ -280,7 +282,7 @@ struct FileEntry {
     relative: String,
     size: u64,
     kind: &'static str,
-    language: &'static str,
+    language: String,
     default_on: bool,
     oversized: bool,
 }
@@ -345,6 +347,9 @@ struct FileOutcome {
     id: String,
     relative: String,
     status: &'static str,
+    kind: &'static str,
+    language: String,
+    size: u64,
     message: String,
 }
 
@@ -357,7 +362,7 @@ struct PreviewResponse {
     message: String,
     truncated: bool,
     kind: &'static str,
-    language: &'static str,
+    language: String,
     size: u64,
 }
 
@@ -542,7 +547,7 @@ fn scan_sync(req: ScanRequest, mill: &Mill) -> Result<ScanResponse, ApiError> {
             relative: entry.relative.clone(),
             size: entry.size,
             kind: entry.kind.as_str(),
-            language: entry.language,
+            language: entry.language.clone(),
             default_on: entry.default_on,
             oversized: entry.oversized,
         })
@@ -684,6 +689,9 @@ fn finish_pack(
             id: file.id.clone(),
             relative: file.relative.clone(),
             status: file.status.as_str(),
+            kind: file.kind.as_str(),
+            language: crate::language_name(std::path::Path::new(&file.relative), file.kind),
+            size: file.size,
             message: file.status.message(file.size),
         })
         .collect();
@@ -806,7 +814,7 @@ fn preview_sync(req: PackRequest) -> Result<PreviewResponse, ApiError> {
         status: file.status.as_str(),
         message: file.status.message(file.size),
         kind: file.kind.as_str(),
-        language: crate::language_label(std::path::Path::new(&file.relative)),
+        language: crate::language_name(std::path::Path::new(&file.relative), file.kind),
         size: file.size,
         truncated,
         text,
@@ -1316,6 +1324,10 @@ mod tests {
         assert!(html.contains("<option value=\"xml\" selected>"));
         assert!(html.contains("id=\"github\""));
         assert!(html.contains("https://github.com/BeeGass/pulp"));
+        assert!(html.contains("https://github.com/BeeGass/pulp/issues/new"));
+        assert!(html.contains(env!("CARGO_PKG_VERSION")));
+        assert!(html.contains("Open GitHub issue"));
+        assert!(!html.contains("__PULP_VERSION__"));
         assert!(html.contains("Preserve source"));
         assert!(html.contains("Readable text"));
         assert!(html.contains("Select matches"));

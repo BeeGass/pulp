@@ -446,6 +446,36 @@
       font-family: var(--mono);
       font-size: 12px;
       min-height: 1em;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .err-text { margin: 0; }
+    .err-actions, .issue-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 8px 0 0;
+    }
+    .issue dl {
+      margin: 6px 0 0;
+      display: grid;
+      grid-template-columns: 6.5rem 1fr;
+      gap: 2px 8px;
+      font: 12px/1.4 var(--mono);
+    }
+    .issue dt { color: var(--mist); }
+    .issue dd { margin: 0; overflow-wrap: anywhere; }
+    .issue pre {
+      margin: 8px 0 0;
+      padding: 8px;
+      max-height: 12rem;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #0c0a08;
+      border: 1px solid var(--rule);
+      font: 12px/1.45 var(--mono);
+      color: var(--paper);
     }
     .stale {
       font-family: var(--mono);
@@ -847,6 +877,9 @@
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
+    const PULP_VERSION = "__PULP_VERSION__";
+    const PULP_SURFACE = "local mill";
+    const PULP_ISSUES = "https://github.com/BeeGass/pulp/issues/new";
     const TOKEN = document.querySelector('meta[name="pulp-token"]')?.content || "";
     const state = {
       files: [],
@@ -954,7 +987,108 @@
       return (n / (1024 * 1024)).toFixed(1) + " MiB";
     }
 
-    function setErr(msg) { $("err").textContent = msg || ""; }
+    function fence(text) {
+      const body = String(text || "");
+      const runs = body.match(/`+/g) || [];
+      const width = runs.reduce((max, run) => Math.max(max, run.length), 0) + 1;
+      const ticks = "`".repeat(Math.max(3, width));
+      return ticks + "text\n" + body + "\n" + ticks;
+    }
+
+    function millContext() {
+      const on = (id) => ($(id) && $(id).checked ? "on" : "off");
+      return [
+        "surface: " + PULP_SURFACE,
+        "version: " + PULP_VERSION,
+        "format: " + ($("format") ? $("format").value : ""),
+        "content: " + ($("content") ? $("content").value : ""),
+        "archives: " + on("archives"),
+        "hidden: " + on("hidden"),
+        "gitignore: " + on("gitignore"),
+      ].join("\n");
+    }
+
+    function formatIssue(report) {
+      const title = ("mill: " + (report.title || "error")).slice(0, 120);
+      const lines = [];
+      if (report.relative) lines.push("path: " + report.relative);
+      if (report.status) lines.push("status: " + report.status);
+      if (report.kind) lines.push("kind: " + report.kind);
+      if (report.language) lines.push("language: " + report.language);
+      if (report.size != null && report.size !== "") lines.push("size_bytes: " + report.size);
+      const diagnostic = (lines.join("\n") + "\n\n" + (report.message || report.summary || "")).trim();
+      const body = [
+        "## What happened",
+        "",
+        report.summary || report.message || "The mill reported an error.",
+        "",
+        "## Diagnostic",
+        "",
+        fence(diagnostic),
+        "",
+        "## Mill",
+        "",
+        fence(millContext()),
+        "",
+        "Files stayed on this machine. This report has the path and the error text only.",
+      ].join("\n");
+      return { title, body };
+    }
+
+    function openGithubIssue(report) {
+      const issue = formatIssue(report);
+      let body = issue.body;
+      let title = issue.title;
+      const urlFor = (t, b) => PULP_ISSUES + "?title=" + encodeURIComponent(t) + "&body=" + encodeURIComponent(b);
+      let url = urlFor(title, body);
+      if (url.length > 7000) {
+        const clipped = formatIssue({
+          ...report,
+          message: String(report.message || report.summary || "").slice(0, 1200) +
+            "\n\n… clipped for the GitHub form. Copy report has the full text.",
+        });
+        title = clipped.title;
+        body = clipped.body;
+        url = urlFor(title, body);
+      }
+      window.open(url, "_blank", "noopener");
+    }
+
+    async function copyReport(report) {
+      const issue = formatIssue(report);
+      await navigator.clipboard.writeText(issue.title + "\n\n" + issue.body);
+    }
+
+    function reportButton(label, onClick) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = label;
+      btn.addEventListener("click", onClick);
+      return btn;
+    }
+
+    function setErr(msg, reportable) {
+      const el = $("err");
+      el.replaceChildren();
+      if (!msg) return;
+      const text = document.createElement("p");
+      text.className = "err-text";
+      text.textContent = msg;
+      el.append(text);
+      if (!reportable) return;
+      const actions = document.createElement("p");
+      actions.className = "err-actions";
+      const report = {
+        title: String(msg).split("\n")[0].slice(0, 100),
+        summary: msg,
+        message: msg,
+      };
+      actions.append(
+        reportButton("Open GitHub issue", () => openGithubIssue(report)),
+        reportButton("Copy report", () => copyReport(report).catch((e) => setErr("clipboard: " + e.message))),
+      );
+      el.append(actions);
+    }
 
     function setView(name) {
       $("stage").className = "view-" + name;
@@ -1205,10 +1339,10 @@
         renderTree();
         setView("files");
         if (data.truncated) {
-          setErr("List is truncated at the entry or size cap.");
+          setErr("Scan stopped because the summed input reached the size cap, so some files were left out. Raise the cap or narrow the folder, then scan again.", true);
         }
       } catch (e) {
-        setErr(e.message);
+        setErr("Scan failed.\n" + (e && e.message ? e.message : e), true);
         $("stats").textContent = "scan failed";
       } finally {
         $("scan").disabled = false;
@@ -1232,7 +1366,7 @@
         applyPack(data, key);
       } catch (e) {
         if (id !== state.reqId) return;
-        setErr(e.message);
+        setErr("Pack failed.\n" + (e && e.message ? e.message : e), true);
         $("stats").textContent = "pulp failed";
       } finally {
         setBusy(false);
@@ -1256,8 +1390,17 @@
       markStaleIfDump();
       setOutView("dump");
       setView("dump");
-      const issueN = state.outcomes.filter((o) => o.status !== "extracted").length;
+      const issueRows = state.outcomes.filter((o) => o.status && o.status !== "extracted");
+      const issueN = issueRows.length;
       $("issuesTab").textContent = "Issues" + (issueN ? " " + issueN : "");
+      if (issueN) {
+        const sample = issueRows.slice(0, 8).map((o) => {
+          const bits = [o.status, o.kind, o.language].filter(Boolean).join(" / ");
+          return o.relative + " — " + bits + (o.size != null ? " — " + o.size + " bytes" : "") +
+            (o.message ? "\n" + o.message : "");
+        }).join("\n\n");
+        setErr(issueN + " file" + (issueN === 1 ? "" : "s") + " not extracted. Open Issues for the full record.\n\n" + sample, true);
+      }
       $("resultMeta").textContent = human(state.dumpBytes) + " output · content-only ~" + data.tokens_est + " tokens";
       $("stats").innerHTML =
         "<strong>" + data.files_extracted + "</strong> pulped · ~<strong>" +
@@ -1281,7 +1424,7 @@
         const data = await api("/api/render", o);
         applyPack(data, extractKey());
       } catch (e) {
-        setErr(e.message);
+        setErr("Could not redraw the stored dump.\n" + (e && e.message ? e.message : e), true);
       }
     }
 
@@ -1306,7 +1449,7 @@
         $("path").value = data.path;
         await scan();
       } catch (e) {
-        setErr(e.message);
+        setErr("Browse failed.\n" + (e && e.message ? e.message : e), true);
         $("stats").textContent = "browse failed";
       } finally {
         $("browse").disabled = false;
@@ -1324,7 +1467,7 @@
         await navigator.clipboard.writeText(data.tree);
         $("stats").textContent = "copied " + data.filename;
       } catch (e) {
-        setErr(e.message);
+        setErr("Could not copy the directory map.\n" + (e && e.message ? e.message : e), true);
         $("stats").textContent = "copy tree failed";
       }
     }
@@ -1335,7 +1478,7 @@
         const text = await fullDump();
         await navigator.clipboard.writeText(text);
         $("stats").textContent = "copied " + state.filename;
-      } catch (e) { setErr("clipboard: " + e.message); }
+      } catch (e) { setErr("Clipboard copy failed.\n" + e.message, true); }
     }
 
     async function downloadDump() {
@@ -1377,6 +1520,38 @@
       if (name === "issues") renderIssues();
     }
 
+    function outcomeReport(o) {
+      return {
+        title: (o.status || "error") + " " + (o.relative || "file"),
+        summary: (o.status || "error") + " while packing `" + (o.relative || "a file") + "`.",
+        relative: o.relative,
+        status: o.status,
+        kind: o.kind,
+        language: o.language,
+        size: o.size,
+        message: o.message || o.status || "",
+      };
+    }
+
+    function issueFacts(o) {
+      const dl = document.createElement("dl");
+      const rows = [
+        ["status", o.status || ""],
+        ["kind", o.kind || ""],
+        ["language", o.language || ""],
+        ["size", o.size != null ? o.size + " bytes" : ""],
+      ];
+      for (const [name, value] of rows) {
+        if (!value) continue;
+        const dt = document.createElement("dt");
+        dt.textContent = name;
+        const dd = document.createElement("dd");
+        dd.textContent = value;
+        dl.append(dt, dd);
+      }
+      return dl;
+    }
+
     function renderIssues() {
       const box = $("issues");
       box.innerHTML = "";
@@ -1389,17 +1564,25 @@
         const card = document.createElement("div");
         card.className = "issue";
         const h = document.createElement("h3");
-        h.textContent = o.relative;
-        const p = document.createElement("p");
-        p.textContent = o.message || o.status;
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.textContent = "Remove from selection";
-        btn.addEventListener("click", () => {
+        h.textContent = o.relative || o.id || "file";
+        const pre = document.createElement("pre");
+        pre.textContent = o.message || o.status || "";
+        const actions = document.createElement("p");
+        actions.className = "issue-actions";
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "Remove from selection";
+        remove.addEventListener("click", () => {
           state.selected.delete(o.id || o.relative);
           renderTree();
         });
-        card.append(h, p, btn);
+        const report = outcomeReport(o);
+        actions.append(
+          remove,
+          reportButton("Open GitHub issue", () => openGithubIssue(report)),
+          reportButton("Copy report", () => copyReport(report).catch((e) => setErr("Clipboard copy failed.\n" + e.message, true))),
+        );
+        card.append(h, issueFacts(o), pre, actions);
         box.appendChild(card);
       }
     }
@@ -1422,7 +1605,9 @@
         $("previewBody").textContent = data.text || data.message || "";
         applyWrap();
       } catch (e) {
-        $("previewBody").textContent = e.message;
+        const msg = "Preview failed for " + f.relative + ".\n" + (e && e.message ? e.message : e);
+        $("previewBody").textContent = msg;
+        setErr(msg, true);
       }
     }
 

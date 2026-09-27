@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::path::{Component, Path};
+
+use crate::config::generated_dir_names;
 
 /// Detected input kind. Extension wins over magic bytes so `.ts` is
 /// TypeScript, not MPEG-TS.
@@ -108,27 +110,8 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
 
 #[must_use]
 pub fn classify(path: &Path, sniff: Option<&[u8]>) -> Kind {
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if is_known_text_filename(&name) {
-        return Kind::Text;
-    }
-
-    let lower = path.to_string_lossy().to_ascii_lowercase();
-    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        return Kind::TarGz;
-    }
-    if lower.ends_with(".tar") {
-        return Kind::Tar;
-    }
-
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if let Some(kind) = ext_kind(&ext.to_ascii_lowercase()) {
-            return kind;
-        }
+    if let Some(kind) = kind_from_name(path) {
+        return kind;
     }
 
     if let Some(bytes) = sniff {
@@ -144,23 +127,80 @@ pub fn classify(path: &Path, sniff: Option<&[u8]>) -> Kind {
     Kind::Unknown
 }
 
+/// Kind decided by file name or extension, before magic bytes.
+///
+/// `None` means the caller should sniff. Gzip bytes are not treated as
+/// `.tar.gz` here; only the file name does that.
+#[must_use]
+pub fn kind_from_name(path: &Path) -> Option<Kind> {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if is_known_text_filename(&name) {
+        return Some(Kind::Text);
+    }
+
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        return Some(Kind::TarGz);
+    }
+    if lower.ends_with(".tar") {
+        return Some(Kind::Tar);
+    }
+
+    path.extension()
+        .and_then(|e| e.to_str())
+        .and_then(|ext| ext_kind(&ext.to_ascii_lowercase()))
+}
+
 /// Short language / format tag for the mill tree (never a mystery for `.lean`).
 #[must_use]
 pub fn language_label(path: &Path) -> &'static str {
+    known_language(path).unwrap_or_else(|| classify(path, None).as_str())
+}
+
+/// Label shown in the mill. Known languages keep their names. Anything else
+/// uses the extension (`math`, `f18`, `fits`) so the type list is not `unknown`.
+#[must_use]
+pub fn language_name(path: &Path, kind: Kind) -> String {
+    if let Some(label) = known_language(path) {
+        return label.to_string();
+    }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let ext = ext.to_ascii_lowercase();
+        if is_label_token(&ext) {
+            return ext;
+        }
+    }
+    match kind {
+        Kind::Unknown => "text".to_string(),
+        other => other.as_str().to_string(),
+    }
+}
+
+fn known_language(path: &Path) -> Option<&'static str> {
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
     if let Some(label) = filename_label(&name) {
-        return label;
+        return Some(label);
     }
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if let Some(label) = ext_label(&ext.to_ascii_lowercase()) {
-            return label;
-        }
-    }
-    classify(path, None).as_str()
+    path.extension()
+        .and_then(|e| e.to_str())
+        .and_then(|ext| ext_label(&ext.to_ascii_lowercase()))
+}
+
+fn is_label_token(ext: &str) -> bool {
+    let bytes = ext.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 32
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'+' || *b == b'-')
 }
 
 fn filename_label(name: &str) -> Option<&'static str> {
@@ -175,7 +215,7 @@ fn filename_label(name: &str) -> Option<&'static str> {
         "procfile" => "procfile",
         "vagrantfile" => "ruby",
         "cargo.lock" => "toml",
-        "go.mod" | "go.sum" => "go",
+        "go.mod" | "go.sum" | "go.work" => "go",
         "build.gradle" | "settings.gradle" => "groovy",
         "podfile" => "ruby",
         "brewfile" => "ruby",
@@ -185,6 +225,9 @@ fn filename_label(name: &str) -> Option<&'static str> {
 }
 
 fn ext_label(ext: &str) -> Option<&'static str> {
+    if is_numeric_ext(ext) {
+        return Some("text");
+    }
     Some(match ext {
         "lean" => "lean",
         "olean" => "olean",
@@ -296,8 +339,6 @@ fn ext_label(ext: &str) -> Option<&'static str> {
         "mp4" | "avi" | "mov" | "mkv" | "webm" => "video",
         "lock" => "lock",
         "sum" => "sum",
-        "mod" => "go",
-        "work" => "go",
         "csproj" | "fsproj" | "vbproj" | "sln" => "dotnet",
         "gitignore" | "gitattributes" | "dockerignore" | "editorconfig" => "config",
         "env" | "properties" | "ini" | "cfg" | "conf" | "cnf" => "config",
@@ -307,7 +348,9 @@ fn ext_label(ext: &str) -> Option<&'static str> {
         "elm" => "elm",
         "rkt" => "racket",
         "scm" | "ss" => "scheme",
-        "f90" | "f95" | "f03" | "for" => "fortran",
+        "f" | "f77" | "f90" | "f95" | "f03" | "f08" | "for" | "ftn" | "fypp" | "fpp" | "fi" => {
+            "fortran"
+        }
         "cob" | "cbl" => "cobol",
         "adb" | "ads" => "ada",
         "cr" => "crystal",
@@ -333,20 +376,94 @@ fn ext_label(ext: &str) -> Option<&'static str> {
         "pug" | "jade" | "haml" | "slim" => "template",
         "cshtml" | "razor" => "razor",
         "jsp" | "jspx" => "jsp",
+        "math" => "math",
+        "asc" | "pgp" | "gpg" => "pgp",
+        "rules" => "rules",
+        "command" => "shell",
+        "dat" | "data" => "data",
+        "pyx" | "pxd" | "pxi" => "cython",
+        "afm" => "afm",
+        "pc" => "pkgconfig",
+        "la" => "libtool",
+        "modulemap" => "modulemap",
+        "mplstyle" => "mplstyle",
+        "pro" => "idl",
+        "info" => "texinfo",
+        "in" => "template",
+        "fits" | "fit" | "fts" | "ftz" => "fits",
+        "h5" | "hdf5" | "hdf" => "hdf5",
+        "nc" => "netcdf",
+        "mat" => "matlab",
+        "gz" | "bz2" | "xz" | "zst" | "lzma" | "lz4" => "compressed",
+        "pkg" | "dmg" => "package",
         _ => return None,
     })
 }
 
 /// Whether the mill should tick this file after a scan.
 ///
-/// Lockfiles, raster/vector images, virtualenv trees, and other binary
-/// media stay in the tree but start unchecked.
+/// Lockfiles, raster images, virtualenv trees, binary media, PGP keys,
+/// Cython sources, and generated paths (`.next/`, `out/`, `toolchains/`,
+/// `next-env.d.ts`, …) start unchecked.
 #[must_use]
 pub fn is_default_selected(path: &Path, kind: Kind) -> bool {
-    if kind.is_binary_media() {
+    if kind.is_binary_media() || is_generated_path(path) {
         return false;
     }
-    !is_lock_file(path) && !is_image_file(path) && !is_venv_path(path)
+    !is_lock_file(path)
+        && !is_image_file(path)
+        && !is_venv_path(path)
+        && !is_pgp_file(path)
+        && !is_cython_file(path)
+}
+
+fn path_extension_is(path: &Path, exts: &[&str]) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| exts.iter().any(|want| ext.eq_ignore_ascii_case(want)))
+}
+
+fn is_pgp_file(path: &Path) -> bool {
+    path_extension_is(path, &["asc", "pgp", "gpg"])
+}
+
+fn is_cython_file(path: &Path) -> bool {
+    path_extension_is(path, &["pyx", "pxd", "pxi"])
+}
+
+fn is_generated_path(path: &Path) -> bool {
+    let parts: Vec<&str> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(os) => os.to_str(),
+            _ => None,
+        })
+        .collect();
+    let Some((file, dirs)) = parts.split_last() else {
+        return false;
+    };
+    dirs.iter().any(|dir| is_generated_dir_name(dir)) || is_generated_file_name(file)
+}
+
+fn is_generated_dir_name(name: &str) -> bool {
+    generated_dir_names()
+        .iter()
+        .any(|dir| name.eq_ignore_ascii_case(dir))
+}
+
+fn is_generated_file_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "next-env.d.ts"
+        || lower == ".ds_store"
+        || lower == "thumbs.db"
+        || lower.ends_with(".tsbuildinfo")
+        || lower.ends_with(".min.js")
+        || lower.ends_with(".min.css")
+}
+
+fn is_numeric_ext(ext: &str) -> bool {
+    let bytes = ext.as_bytes();
+    !bytes.is_empty() && bytes.len() <= 4 && bytes.iter().all(|b| b.is_ascii_digit())
 }
 
 fn is_venv_path(path: &Path) -> bool {
@@ -426,10 +543,15 @@ fn is_known_text_filename(name: &str) -> bool {
             | "vagrantfile"
             | "lakefile.lean"
             | "lakefile.toml"
+            | "go.mod"
+            | "go.work"
     )
 }
 
 fn ext_kind(ext: &str) -> Option<Kind> {
+    if is_numeric_ext(ext) {
+        return Some(Kind::Text);
+    }
     Some(match ext {
         "html" | "htm" | "xhtml" => Kind::Html,
         "xml" | "xsl" | "xslt" | "plist" => Kind::Xml,
@@ -452,10 +574,11 @@ fn ext_kind(ext: &str) -> Option<Kind> {
         | "avif" | "psd" | "woff" | "woff2" | "ttf" | "otf" | "eot" | "mp3" | "mp4" | "m4a"
         | "aac" | "ogg" | "flac" | "wav" | "avi" | "mov" | "mkv" | "webm" | "exe" | "dll"
         | "so" | "dylib" | "o" | "a" | "lib" | "class" | "pyc" | "pyo" | "rlib" | "rmeta"
-        | "wasm" | "bin" | "dat" | "sqlite" | "sqlite3" | "db" | "parquet" | "arrow"
-        | "feather" | "pkl" | "pickle" | "joblib" | "safetensors" | "pt" | "pth" | "onnx"
-        | "gguf" | "ggml" | "binpb" | "icns" | "dmg" | "iso" | "img" | "pack" | "idx" | "pdb"
-        | "ilk" | "obj" => Kind::Binary,
+        | "wasm" | "bin" | "sqlite" | "sqlite3" | "db" | "parquet" | "arrow" | "feather"
+        | "pkl" | "pickle" | "joblib" | "safetensors" | "pt" | "pth" | "onnx" | "gguf" | "ggml"
+        | "binpb" | "icns" | "dmg" | "iso" | "img" | "pack" | "idx" | "pdb" | "ilk" | "obj"
+        | "fits" | "fit" | "fts" | "ftz" | "h5" | "hdf5" | "hdf" | "nc" | "mat" | "sav" | "gz"
+        | "bz2" | "xz" | "zst" | "lzma" | "lz4" | "pkg" | "mod" | "smod" => Kind::Binary,
         "rs" | "lean" | "py" | "pyi" | "pyw" | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx"
         | "go" | "java" | "kt" | "kts" | "c" | "h" | "hh" | "hpp" | "hxx" | "cpp" | "cc"
         | "cxx" | "m" | "mm" | "cs" | "fs" | "fsx" | "fsi" | "swift" | "rb" | "php" | "lua"
@@ -470,15 +593,18 @@ fn ext_kind(ext: &str) -> Option<Kind> {
         | "sol" | "move" | "wgsl" | "glsl" | "hlsl" | "metal" | "asm" | "s" | "diff" | "patch"
         | "gitignore" | "gitattributes" | "dockerignore" | "editorconfig" | "env"
         | "properties" | "csvmd" | "svg" | "dot" | "gv" | "puml" | "plantuml" | "lock" | "sum"
-        | "mod" | "work" | "cabal" | "hsig" | "rake" | "gemspec" | "podspec" | "csproj"
-        | "fsproj" | "vbproj" | "sln" | "dtd" | "xsd" | "wsdl" | "tomlrc" | "npmrc" | "nvmrc"
-        | "prettierrc" | "eslintrc" | "babelrc" | "zshrc" | "bashrc" | "profile" | "gitconfig"
-        | "hurl" | "http" | "rest" | "ron" | "kdl" | "hjson" | "cson" | "jade" | "pug" | "haml"
-        | "slim" | "mustache" | "hbs" | "jinja" | "j2" | "njk" | "ejs" | "erb" | "twig"
-        | "liquid" | "mjml" | "adoc" | "asciidoc" | "textile" | "wiki" | "pod" | "rdoc" | "1"
-        | "2" | "3" | "man" | "mdoc" | "header" | "ipp" | "tpp" | "inl" | "inc" | "def"
-        | "asmx" | "aspx" | "ascx" | "master" | "cshtml" | "razor" | "jsp" | "jspx" | "cfm"
-        | "cfc" => Kind::Text,
+        | "cabal" | "hsig" | "rake" | "gemspec" | "podspec" | "csproj" | "fsproj" | "vbproj"
+        | "sln" | "dtd" | "xsd" | "wsdl" | "tomlrc" | "npmrc" | "nvmrc" | "prettierrc"
+        | "eslintrc" | "babelrc" | "zshrc" | "bashrc" | "profile" | "gitconfig" | "hurl"
+        | "http" | "rest" | "ron" | "kdl" | "hjson" | "cson" | "jade" | "pug" | "haml" | "slim"
+        | "mustache" | "hbs" | "jinja" | "j2" | "njk" | "ejs" | "erb" | "twig" | "liquid"
+        | "mjml" | "adoc" | "asciidoc" | "textile" | "wiki" | "pod" | "rdoc" | "man" | "mdoc"
+        | "header" | "ipp" | "tpp" | "inl" | "inc" | "def" | "asmx" | "aspx" | "ascx"
+        | "master" | "cshtml" | "razor" | "jsp" | "jspx" | "cfm" | "cfc" | "f" | "f77" | "f90"
+        | "f95" | "f03" | "f08" | "for" | "ftn" | "fypp" | "fpp" | "fi" | "math" | "asc"
+        | "rules" | "command" | "dat" | "data" | "pyx" | "pxd" | "pxi" | "pgp" | "gpg" | "afm"
+        | "pc" | "la" | "modulemap" | "mplstyle" | "pro" | "info" | "in" | "upl" | "f18"
+        | "f13" => Kind::Text,
         _ => return None,
     })
 }
@@ -490,8 +616,10 @@ fn sniff_kind(bytes: &[u8]) -> Option<Kind> {
     if bytes.starts_with(br"{\rtf") {
         return Some(Kind::Rtf);
     }
+    // `.tar.gz` / `.tgz` are classified by name. Bare gzip is compressed bytes,
+    // not a tar archive, so it must not be expanded as one.
     if bytes.starts_with(&[0x1f, 0x8b]) {
-        return Some(Kind::TarGz);
+        return Some(Kind::Binary);
     }
     if let Some(info) = infer::get(bytes) {
         return Some(match info.mime_type() {
@@ -573,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_classify_with_npz_extension_returns_npz() {
-        assert_eq!(classify(Path::new("runs/params.npz"), None), Kind::Npz);
+        assert_eq!(classify(Path::new("arrays/params.npz"), None), Kind::Npz);
     }
 
     #[test]
@@ -644,5 +772,107 @@ mod tests {
         assert_eq!(language_label(Path::new("main.py")), "python");
         assert_eq!(language_label(Path::new("Main.agda")), "agda");
         assert_eq!(language_label(Path::new("Dockerfile")), "docker");
+    }
+
+    #[test]
+    fn test_classify_with_website_text_extensions_returns_text() {
+        assert_eq!(classify(Path::new("content/index.math"), None), Kind::Text);
+        assert_eq!(language_label(Path::new("content/index.math")), "math");
+        assert_eq!(classify(Path::new("rates.f90"), None), Kind::Text);
+        assert_eq!(language_label(Path::new("rates.f90")), "fortran");
+        assert_eq!(
+            classify(Path::new("public/bryan-gass.asc"), None),
+            Kind::Text
+        );
+        assert_eq!(language_label(Path::new("public/bryan-gass.asc")), "pgp");
+        assert_eq!(
+            classify(Path::new("atomic-data.dat"), Some(&[0, 1])),
+            Kind::Text
+        );
+        assert_eq!(classify(Path::new("history.data"), None), Kind::Text);
+        assert_eq!(classify(Path::new("ensdf.016"), None), Kind::Text);
+        assert_eq!(language_label(Path::new("ensdf.016")), "text");
+        assert_eq!(classify(Path::new("go.mod"), None), Kind::Text);
+        assert_eq!(language_label(Path::new("go.mod")), "go");
+        assert_eq!(
+            classify(Path::new("src/run_star_extras.mod"), None),
+            Kind::Binary
+        );
+        assert!(is_default_selected(
+            Path::new("content/index.math"),
+            Kind::Text
+        ));
+        assert!(is_default_selected(Path::new("app/page.tsx"), Kind::Text));
+        assert!(is_default_selected(Path::new("src/build.rs"), Kind::Text));
+        assert!(!is_default_selected(
+            Path::new("public/bryan-gass.asc"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(Path::new("keys/me.pgp"), Kind::Text));
+        assert!(!is_default_selected(
+            Path::new("native/checks.pyx"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(
+            Path::new("native/checks.pxd"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(
+            Path::new("native/checks.pxi"),
+            Kind::Text
+        ));
+        assert!(is_default_selected(Path::new("src/app.py"), Kind::Text));
+    }
+
+    #[test]
+    fn test_classify_with_gzip_bytes_is_binary_unless_named_tar_gz() {
+        let gzip = [0x1f, 0x8b, 0x08, 0x00];
+        assert_eq!(
+            classify(Path::new("atlas.dat.gz"), Some(&gzip)),
+            Kind::Binary
+        );
+        assert_eq!(classify(Path::new("blob"), Some(&gzip)), Kind::Binary);
+        assert_eq!(
+            classify(Path::new("bundle.tar.gz"), Some(&gzip)),
+            Kind::TarGz
+        );
+        assert_eq!(classify(Path::new("bundle.tgz"), Some(&gzip)), Kind::TarGz);
+        assert_eq!(classify(Path::new("star.fits"), None), Kind::Binary);
+    }
+
+    #[test]
+    fn test_language_name_with_unknown_extension_uses_extension() {
+        assert_eq!(language_name(Path::new("notes.xyzzy"), Kind::Text), "xyzzy");
+        assert_eq!(language_name(Path::new("blob.smod"), Kind::Binary), "smod");
+    }
+
+    #[test]
+    fn test_is_default_selected_with_generated_paths_returns_false() {
+        assert!(!is_default_selected(
+            Path::new(".next/server/page.js"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(
+            Path::new("out/index.html"),
+            Kind::Html
+        ));
+        assert!(!is_default_selected(
+            Path::new("research/toolchains/sdk/a.f90"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(
+            Path::new("research/metastable/runs/out.bin"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(
+            Path::new("node_modules/leftpad/index.js"),
+            Kind::Text
+        ));
+        assert!(!is_default_selected(Path::new("next-env.d.ts"), Kind::Text));
+        assert!(!is_default_selected(
+            Path::new("app/tsconfig.tsbuildinfo"),
+            Kind::Json
+        ));
+        assert!(is_default_selected(Path::new("src/lib.rs"), Kind::Text));
     }
 }

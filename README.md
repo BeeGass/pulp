@@ -107,7 +107,7 @@ pulped 12 files (48.2 KiB read, 12100 chars, ~12100 tokens) in 35ms
 
 Binary media (images, audio, wasm, …) is skipped unless `--binaries`.
 
-Noisy trees stay out even when they are tracked: `node_modules/`, `target/`, `dist/`, `build/`, virtualenvs, `__pycache__/`, VCS dirs, lockfiles, `.env`, keys, object files, and similar. Rust `.rs`, Lean `.lean`, and NumPy arrays next to a skipped `target/` are still included.
+Noisy trees stay out even when they are tracked: `node_modules/`, `.next/`, `out/`, `runs/`, `target/`, `dist/`, `build/`, `toolchains/`, virtualenvs, `__pycache__/`, VCS dirs, lockfiles, `.env`, keys, object files, and similar. Rust `.rs`, Lean `.lean`, and NumPy arrays next to a skipped `target/` are still included. Generated paths that do show up start unchecked.
 
 `.gitignore` is honored unless `--no-gitignore`. `--exclude GLOB` adds patterns. `--no-default-excludes` starts from an empty deny list.
 
@@ -123,7 +123,7 @@ Noisy trees stay out even when they are tracked: `node_modules/`, `target/`, `di
 | `--no-tree` | Same as `--tree none` |
 | `-j, --jobs N` | Parallelism (`0` = all available cores) |
 | `--max-file-size SIZE` | Cap per file (default `8MiB`) |
-| `--max-entries N` | Cap discovered files (default `100000`) |
+| `--max-entries N` | Optional cap on discovered files (`0`, the default, means no cap) |
 | `--max-total-bytes SIZE` | Cap summed input (default `1GiB`) |
 | `--include GLOB` | Repeatable allow-list |
 | `--exclude GLOB` | Repeatable extra deny-list |

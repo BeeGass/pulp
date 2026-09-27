@@ -461,6 +461,36 @@
       font-family: var(--mono);
       font-size: 12px;
       min-height: 1em;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .err-text { margin: 0; }
+    .err-actions, .issue-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 8px 0 0;
+    }
+    .issue dl {
+      margin: 6px 0 0;
+      display: grid;
+      grid-template-columns: 6.5rem 1fr;
+      gap: 2px 8px;
+      font: 12px/1.4 var(--mono);
+    }
+    .issue dt { color: var(--mist); }
+    .issue dd { margin: 0; overflow-wrap: anywhere; }
+    .issue pre {
+      margin: 8px 0 0;
+      padding: 8px;
+      max-height: 12rem;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #0c0a08;
+      border: 1px solid var(--rule);
+      font: 12px/1.45 var(--mono);
+      color: var(--paper);
     }
     .stale {
       font-family: var(--mono);
@@ -869,6 +899,8 @@
 import init, { scan_files, pack_files, artifact, pulp_version, smoke_pack } from './pkg/pulp_wasm.js';
 
 const $ = (id) => document.getElementById(id);
+const PULP_SURFACE = "browser mill";
+const PULP_ISSUES = "https://github.com/BeeGass/pulp/issues/new";
 const state = {
   files: [],
   fileMap: new Map(),
@@ -912,7 +944,109 @@ function human(n) {
   if (n < 1048576) return (n / 1024).toFixed(1) + ' KiB';
   return (n / 1048576).toFixed(1) + ' MiB';
 }
-function setErr(msg) { $('err').textContent = msg || ''; }
+function fence(text) {
+  const body = String(text || '');
+  const runs = body.match(/`+/g) || [];
+  const width = runs.reduce((max, run) => Math.max(max, run.length), 0) + 1;
+  const ticks = '`'.repeat(Math.max(3, width));
+  return ticks + 'text\n' + body + '\n' + ticks;
+}
+
+function millContext() {
+  const on = (id) => ($(id) && $(id).checked ? 'on' : 'off');
+  let version = 'unknown';
+  try { version = pulp_version(); } catch (e) { version = 'unknown'; }
+  return [
+    'surface: ' + PULP_SURFACE,
+    'version: ' + version,
+    'format: ' + ($('format') ? $('format').value : ''),
+    'content: ' + ($('content') ? $('content').value : ''),
+    'archives: ' + on('archives'),
+    'hidden: ' + on('hidden'),
+  ].join('\n');
+}
+
+function formatIssue(report) {
+  const title = ('mill: ' + (report.title || 'error')).slice(0, 120);
+  const lines = [];
+  if (report.relative) lines.push('path: ' + report.relative);
+  if (report.status) lines.push('status: ' + report.status);
+  if (report.kind) lines.push('kind: ' + report.kind);
+  if (report.language) lines.push('language: ' + report.language);
+  if (report.size != null && report.size !== '') lines.push('size_bytes: ' + report.size);
+  const diagnostic = (lines.join('\n') + '\n\n' + (report.message || report.summary || '')).trim();
+  const body = [
+    '## What happened',
+    '',
+    report.summary || report.message || 'The mill reported an error.',
+    '',
+    '## Diagnostic',
+    '',
+    fence(diagnostic),
+    '',
+    '## Mill',
+    '',
+    fence(millContext()),
+    '',
+    'Files stayed on this machine. This report has the path and the error text only.',
+  ].join('\n');
+  return { title, body };
+}
+
+function openGithubIssue(report) {
+  const issue = formatIssue(report);
+  const urlFor = (t, b) => PULP_ISSUES + '?title=' + encodeURIComponent(t) + '&body=' + encodeURIComponent(b);
+  let body = issue.body;
+  let title = issue.title;
+  let url = urlFor(title, body);
+  if (url.length > 7000) {
+    const clipped = formatIssue({
+      ...report,
+      message: String(report.message || report.summary || '').slice(0, 1200) +
+        '\n\n… clipped for the GitHub form. Copy report has the full text.',
+    });
+    title = clipped.title;
+    body = clipped.body;
+    url = urlFor(title, body);
+  }
+  window.open(url, '_blank', 'noopener');
+}
+
+async function copyReport(report) {
+  const issue = formatIssue(report);
+  await navigator.clipboard.writeText(issue.title + '\n\n' + issue.body);
+}
+
+function reportButton(label, onClick) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = label;
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+function setErr(msg, reportable) {
+  const el = $('err');
+  el.replaceChildren();
+  if (!msg) return;
+  const text = document.createElement('p');
+  text.className = 'err-text';
+  text.textContent = msg;
+  el.append(text);
+  if (!reportable) return;
+  const actions = document.createElement('p');
+  actions.className = 'err-actions';
+  const report = {
+    title: String(msg).split('\n')[0].slice(0, 100),
+    summary: msg,
+    message: msg,
+  };
+  actions.append(
+    reportButton('Open GitHub issue', () => openGithubIssue(report)),
+    reportButton('Copy report', () => copyReport(report).catch((e) => setErr('clipboard: ' + e.message))),
+  );
+  el.append(actions);
+}
 function fileId(f) { return f.id || f.relative; }
 
 function contentMode() {
@@ -1085,6 +1219,38 @@ function renderTree() {
   renderNode(buildTree(state.files), tree, '');
 }
 
+function outcomeReport(o) {
+  return {
+    title: (o.status || 'error') + ' ' + (o.relative || 'file'),
+    summary: (o.status || 'error') + ' while packing `' + (o.relative || 'a file') + '`.',
+    relative: o.relative,
+    status: o.status,
+    kind: o.kind,
+    language: o.language,
+    size: o.size,
+    message: o.message || o.status || '',
+  };
+}
+
+function issueFacts(o) {
+  const dl = document.createElement('dl');
+  const rows = [
+    ['status', o.status || ''],
+    ['kind', o.kind || ''],
+    ['language', o.language || ''],
+    ['size', o.size != null ? o.size + ' bytes' : ''],
+  ];
+  for (const [name, value] of rows) {
+    if (!value) continue;
+    const dt = document.createElement('dt');
+    dt.textContent = name;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    dl.append(dt, dd);
+  }
+  return dl;
+}
+
 function renderIssues() {
   const el = $('issues');
   el.innerHTML = '';
@@ -1094,7 +1260,18 @@ function renderIssues() {
   for (const o of bad) {
     const d = document.createElement('div');
     d.className = 'issue';
-    d.textContent = `${o.status}: ${o.relative}`;
+    const h = document.createElement('h3');
+    h.textContent = o.relative || o.id || 'file';
+    const pre = document.createElement('pre');
+    pre.textContent = o.message || o.status || '';
+    const actions = document.createElement('p');
+    actions.className = 'issue-actions';
+    const report = outcomeReport(o);
+    actions.append(
+      reportButton('Open GitHub issue', () => openGithubIssue(report)),
+      reportButton('Copy report', () => copyReport(report).catch((e) => setErr('Clipboard copy failed.\n' + e.message, true))),
+    );
+    d.append(h, issueFacts(o), pre, actions);
     el.appendChild(d);
   }
 }
@@ -1154,17 +1331,28 @@ async function scan() {
   setBusy(true);
   $('stats').innerHTML = '<span class="spin"></span> scanning…';
   try {
-    const files = [];
+    const metas = [];
     for (const [relative, file] of state.fileMap) {
-      files.push({ relative, size: file.size });
+      metas.push({ relative, size: file.size });
     }
-    const data = scan_files({ files, ...optsScan() });
+    let data = scan_files({ files: metas, ...optsScan() });
+    const unknown = (data.files || []).filter((f) => f.kind === 'unknown');
+    if (unknown.length) {
+      const heads = await mapPool(unknown, 24, async (f) => {
+        const file = state.fileMap.get(f.relative);
+        const buf = file ? await file.slice(0, 8192).arrayBuffer() : new ArrayBuffer(0);
+        return { relative: f.relative, size: f.size || 0, head: new Uint8Array(buf) };
+      });
+      const headByRel = new Map(heads.map((h) => [h.relative, h]));
+      const files = metas.map((m) => headByRel.get(m.relative) || m);
+      data = scan_files({ files, ...optsScan() });
+    }
     state.files = data.files || [];
     state.selected = new Set(state.files.filter(f => f.default_on).map(fileId));
     renderTypes(); renderTree(); refreshStats(); setView('files');
-    if (data.truncated) setErr('Scan hit entry limit — some files omitted.');
+    if (data.truncated) setErr('Scan stopped because the summed input reached the size cap, so some files were left out. Raise the cap or narrow the folder, then scan again.', true);
   } catch (e) {
-    setErr(String(e && e.message || e));
+    setErr('Scan failed.\n' + String(e && e.message || e), true);
     $('stats').textContent = 'scan failed';
   } finally { setBusy(false); refreshStats(); }
 }
@@ -1238,7 +1426,6 @@ async function pulp() {
       data = pack_files(retry);
     }
     if (state.cancel) { $('stats').textContent = 'cancelled'; return; }
-    if (data.error) setErr(data.error);
     state.dump = data.dump || '';
     state.filename = data.filename || 'pulp-browser.txt';
     state.resultId = data.result_id || '';
@@ -1252,10 +1439,24 @@ async function pulp() {
     $('resultMeta').textContent =
       `${data.files_extracted || 0} extracted · ${data.files_skipped || 0} skipped · ~${data.tokens_est || 0} tok · ${human(data.dump_bytes || 0)} · ${data.elapsed_ms || 0} ms`;
     $('stats').textContent = $('resultMeta').textContent;
-    if (data.preview_truncated) setErr((data.error ? data.error + ' · ' : '') + 'Showing the first part of the dump; Download contains the full result.');
-    if (!ok && !data.error) setErr('Pack produced no extracted text. Try enabling archives, or check Issues.');
+    const issueRows = (state.outcomes || []).filter((o) => o.status && o.status !== 'extracted');
+    if (issueRows.length) {
+      const sample = issueRows.slice(0, 8).map((o) => {
+        const bits = [o.status, o.kind, o.language].filter(Boolean).join(' / ');
+        return (o.relative || '') + ' — ' + bits + (o.size != null ? ' — ' + o.size + ' bytes' : '') +
+          (o.message ? '\n' + o.message : '');
+      }).join('\n\n');
+      const head = data.error ? 'Pack failed.\n' + data.error + '\n\n' : '';
+      setErr(head + issueRows.length + ' file' + (issueRows.length === 1 ? '' : 's') + ' not extracted. Open Issues for the full record.\n\n' + sample, true);
+    } else if (data.error) {
+      setErr('Pack failed.\n' + data.error, true);
+    } else if (data.preview_truncated) {
+      setErr('Showing the first part of the dump. Download contains the full result.', true);
+    } else if (!ok && !data.error) {
+      setErr('Pack produced no extracted text. Try enabling archives, or open Issues.', true);
+    }
   } catch (e) {
-    setErr(String(e && e.message || e));
+    setErr('Pack failed.\n' + String(e && e.message || e), true);
     $('stats').textContent = 'pack failed';
     $('resultState').textContent = 'Failed';
   } finally { setBusy(false); refreshStats(); }
@@ -1352,13 +1553,13 @@ try {
   const smoke = smoke_pack();
   if (!smoke || !(smoke.files_extracted > 0)) {
     console.warn('smoke_pack empty', smoke);
-    setErr('WASM smoke pack returned empty — try a hard refresh. If it persists, pack is broken.');
+    setErr('WASM smoke pack returned empty.\nHard-refresh the tab. If it persists, the in-browser packer failed its self-check.', true);
   } else {
     console.log('smoke_pack ok', smoke.files_extracted, smoke.elapsed_ms + 'ms');
   }
 } catch (e) {
   console.error('smoke_pack failed', e);
-  setErr('WASM smoke failed: ' + (e && e.message || e) + ' — hard-refresh; if stuck, report this.');
+  setErr('WASM smoke failed.\n' + String(e && e.message || e) + '\nHard-refresh the tab. If it persists, open a GitHub issue with this text.', true);
 }
 $('stats').textContent = `wasm v${pulp_version()} · browse a folder`;
 $('scan').disabled = true;

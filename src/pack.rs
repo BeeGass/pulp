@@ -13,7 +13,6 @@ use crate::extract::{ExtractOpts, expand_archive, extract};
 use crate::manifest::ManifestEntry;
 
 const MAX_ARCHIVE_DEPTH: u8 = 3;
-const MAX_ARCHIVE_MEMBERS: usize = 10_000;
 const MAX_ARCHIVE_UNCOMPRESSED: u64 = 512 * 1024 * 1024;
 
 /// Outcome of packing one input (or archive member).
@@ -21,7 +20,8 @@ const MAX_ARCHIVE_UNCOMPRESSED: u64 = 512 * 1024 * 1024;
 pub enum FileStatus {
     Extracted,
     SkippedBinary,
-    TooLarge,
+    /// Per-file cap, in bytes, that this file exceeded.
+    TooLarge(u64),
     SkippedArchive,
     Changed,
     Error(String),
@@ -44,7 +44,7 @@ impl FileStatus {
         match self {
             Self::Extracted => "extracted",
             Self::SkippedBinary => "skipped_binary",
-            Self::TooLarge => "too_large",
+            Self::TooLarge(_) => "too_large",
             Self::SkippedArchive => "skipped_archive",
             Self::Changed => "changed",
             Self::Error(_) => "error",
@@ -55,11 +55,17 @@ impl FileStatus {
     pub fn message(&self, size: u64) -> String {
         match self {
             Self::Extracted => String::new(),
-            Self::SkippedBinary => format!("binary file, {size} bytes"),
-            Self::TooLarge => format!("{size} bytes exceeds the size limit"),
-            Self::SkippedArchive => "archive not expanded".into(),
-            Self::Changed => "file changed since scan; rescan".into(),
-            Self::Error(err) => err.clone(),
+            Self::SkippedBinary => format!(
+                "Skipped a binary file ({size} bytes). The bytes are not written into the dump. Enable binaries to keep a one-line placeholder instead."
+            ),
+            Self::TooLarge(limit) => format!(
+                "File is {size} bytes, over the {limit}-byte cap. Raise the cap or leave this file unchecked."
+            ),
+            Self::SkippedArchive => format!(
+                "Archive ({size} bytes) was not expanded. Turn on archives to unpack zip and tar members into the dump."
+            ),
+            Self::Changed => "File changed on disk after the scan. Rescan, then pulp again so the dump matches the current bytes.".into(),
+            Self::Error(err) => format!("Extraction failed for a {size}-byte file. {err}"),
         }
     }
 }
@@ -212,7 +218,8 @@ pub fn pack_manifest(
 
 /// Pack an in-memory file set (browser / virtual trees). No filesystem reads.
 ///
-/// Enforces [`Options::selection`], include/exclude, hidden, and byte/entry caps.
+/// Enforces [`Options::selection`], include/exclude, hidden, and the byte budget.
+/// A `max_entries` of `0` does not stop the pack.
 pub fn pack_entries(
     entries: &[MemoryFile<'_>],
     opts: &Options,
@@ -247,7 +254,7 @@ pub fn pack_entries(
             continue;
         }
         let size = entry.bytes.len() as u64;
-        if kept >= opts.max_entries {
+        if opts.max_entries != 0 && kept >= opts.max_entries {
             truncated = true;
             break;
         }
@@ -559,7 +566,6 @@ fn take_archive_members(
     };
     let mut out = Vec::new();
     let mut total = 0u64;
-    let mut kept = 0usize;
     for (name, mem_bytes) in members {
         if is_unsafe_entry(&name) {
             continue;
@@ -567,9 +573,6 @@ fn take_archive_members(
         let child = join_rel(relative, &name);
         if !opts.hidden && crate::filter::is_hidden_rel(&child) {
             continue;
-        }
-        if kept >= MAX_ARCHIVE_MEMBERS {
-            break;
         }
         let n = mem_bytes.len() as u64;
         if total.saturating_add(n) > MAX_ARCHIVE_UNCOMPRESSED {
@@ -583,7 +586,6 @@ fn take_archive_members(
         if !emit && glob_exclude_only(&child, &exclude) {
             continue;
         }
-        kept += 1;
         total = total.saturating_add(n);
         out.extend(process_item(
             WorkItem {
@@ -607,7 +609,7 @@ fn glob_exclude_only(relative: &str, exclude: &globset::GlobSet) -> bool {
 fn list_only_file(entry: &ManifestEntry, opts: &Options) -> PackedFile {
     let kind = entry.kind;
     let status = if entry.size > opts.max_file_size {
-        FileStatus::TooLarge
+        FileStatus::TooLarge(opts.max_file_size)
     } else if kind.is_archive() {
         FileStatus::SkippedArchive
     } else if opts.skip_binaries && kind == Kind::Binary {
@@ -737,7 +739,7 @@ fn packed_too_large(id: String, relative: String, kind: Kind, size: u64, limit: 
         relative,
         kind,
         size,
-        status: FileStatus::TooLarge,
+        status: FileStatus::TooLarge(limit),
     }
 }
 
@@ -779,6 +781,17 @@ mod tests {
     }
 
     #[test]
+    fn test_file_status_message_with_too_large_includes_size_and_cap() {
+        let msg = FileStatus::TooLarge(1024).message(4096);
+        assert!(msg.contains("4096"));
+        assert!(msg.contains("1024"));
+        let err = FileStatus::Error("pdf header missing".into()).message(80);
+        assert!(err.contains("pdf header missing"));
+        assert!(err.contains("80"));
+        assert!(FileStatus::SkippedArchive.message(12).contains("archives"));
+    }
+
+    #[test]
     fn test_pack_entries_with_empty_only_returns_no_files() {
         let bytes = b"fn x() {}\n";
         let files = [MemoryFile {
@@ -792,6 +805,100 @@ mod tests {
         };
         let packed = pack_entries(&files, &opts, None).unwrap();
         assert!(packed.files.is_empty());
+    }
+
+    #[test]
+    fn test_pack_entries_with_website_types_extracts_text_and_skips_generated() {
+        let math = b"V(h)=1\n";
+        let f90 = b"subroutine r\nend\n";
+        let gz = [0x1f_u8, 0x8b, 0x08, 0x00];
+        let pdf = b"not a pdf";
+        let files = [
+            MemoryFile {
+                id: "index.math",
+                relative: "content/index.math",
+                bytes: math,
+            },
+            MemoryFile {
+                id: "rates.f90",
+                relative: "rates.f90",
+                bytes: f90,
+            },
+            MemoryFile {
+                id: "key.asc",
+                relative: "public/key.asc",
+                bytes: b"-----BEGIN PGP PUBLIC KEY BLOCK-----\n",
+            },
+            MemoryFile {
+                id: "atlas.dat.gz",
+                relative: "data/atlas.dat.gz",
+                bytes: &gz,
+            },
+            MemoryFile {
+                id: "paper.pdf",
+                relative: "paper.pdf",
+                bytes: pdf,
+            },
+            MemoryFile {
+                id: "page.js",
+                relative: ".next/server/page.js",
+                bytes: b"export {}\n",
+            },
+            MemoryFile {
+                id: "built.html",
+                relative: "out/index.html",
+                bytes: b"<p>built</p>\n",
+            },
+            MemoryFile {
+                id: "sdk.f90",
+                relative: "toolchains/sdk/a.f90",
+                bytes: b"subroutine a\nend\n",
+            },
+        ];
+        let opts = Options {
+            hidden: true,
+            ..Options::default()
+        };
+        let packed = pack_entries(&files, &opts, None).unwrap();
+        let math_file = packed
+            .files
+            .iter()
+            .find(|f| f.relative == "content/index.math")
+            .unwrap();
+        assert_eq!(math_file.status, FileStatus::Extracted);
+        assert!(math_file.text.contains("V(h)=1"));
+        let f90_file = packed
+            .files
+            .iter()
+            .find(|f| f.relative == "rates.f90")
+            .unwrap();
+        assert_eq!(f90_file.kind, Kind::Text);
+        assert_eq!(f90_file.status, FileStatus::Extracted);
+        assert!(f90_file.text.contains("subroutine r"));
+        let asc = packed
+            .files
+            .iter()
+            .find(|f| f.relative == "public/key.asc")
+            .unwrap();
+        assert_eq!(asc.status, FileStatus::Extracted);
+        let gz_file = packed
+            .files
+            .iter()
+            .find(|f| f.relative == "data/atlas.dat.gz")
+            .unwrap();
+        assert_eq!(gz_file.kind, Kind::Binary);
+        assert_eq!(gz_file.status, FileStatus::SkippedBinary);
+        let pdf_file = packed
+            .files
+            .iter()
+            .find(|f| f.relative == "paper.pdf")
+            .unwrap();
+        assert_eq!(pdf_file.status, FileStatus::Extracted);
+        assert!(pdf_file.text.contains("unreadable"), "{}", pdf_file.text);
+        let rels: Vec<&str> = packed.files.iter().map(|f| f.relative.as_str()).collect();
+        assert!(!rels.iter().any(|r| r.contains(".next")), "{rels:?}");
+        assert!(!rels.iter().any(|r| r.starts_with("out/")), "{rels:?}");
+        assert!(!rels.iter().any(|r| r.contains("toolchains")), "{rels:?}");
     }
 
     #[test]
@@ -880,7 +987,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join("src/lib.rs"), b"pub fn x() {}\n");
         write(&dir.path().join("Math/Basic.lean"), b"def x := 1\n");
-        write(&dir.path().join("runs/params.npz"), &[0, 1, 2, 3, 4]);
+        write(&dir.path().join("arrays/params.npz"), &[0, 1, 2, 3, 4]);
         write(&dir.path().join("pic.png"), &[0x89, b'P', b'N', b'G']);
         write(&dir.path().join("target/debug/foo.rs"), b"fn main() {}\n");
 
@@ -898,7 +1005,7 @@ mod tests {
             *r == "Math/Basic.lean" && *k == Kind::Text && *s == FileStatus::Extracted
         }));
         assert!(by_rel.iter().any(|(r, k, s)| {
-            *r == "runs/params.npz" && *k == Kind::Npz && *s == FileStatus::Extracted
+            *r == "arrays/params.npz" && *k == Kind::Npz && *s == FileStatus::Extracted
         }));
         assert!(by_rel.iter().any(|(r, k, s)| {
             *r == "pic.png" && *k == Kind::Binary && *s == FileStatus::SkippedBinary
@@ -959,6 +1066,32 @@ mod tests {
         };
         let packed = pack(&opts).unwrap();
         assert!(packed.files.is_empty());
+        assert!(!packed.stats.truncated);
+    }
+
+    #[test]
+    fn test_pack_entries_with_no_entry_cap_keeps_every_file() {
+        let a = b"fn a() {}\n";
+        let b = b"fn b() {}\n";
+        let files = [
+            MemoryFile {
+                id: "a.rs",
+                relative: "a.rs",
+                bytes: a,
+            },
+            MemoryFile {
+                id: "b.rs",
+                relative: "b.rs",
+                bytes: b,
+            },
+        ];
+        let opts = Options {
+            max_entries: 0,
+            exclude: Vec::new(),
+            ..Options::default()
+        };
+        let packed = pack_entries(&files, &opts, None).unwrap();
+        assert_eq!(packed.files.len(), 2);
         assert!(!packed.stats.truncated);
     }
 

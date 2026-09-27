@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pulp::{
-    classify, default_exclude_globs, is_default_selected, language_label, pack_entries, MemoryFile,
+    classify, default_exclude_globs, is_default_selected, language_name, pack_entries, MemoryFile,
     Options, OutputFormat, PathPolicy, Selection, TreeMode,
 };
 use serde::ser::Serialize as SerdeSerialize;
@@ -94,7 +94,7 @@ struct FileEntry {
     relative: String,
     size: u64,
     kind: &'static str,
-    language: &'static str,
+    language: String,
     default_on: bool,
     oversized: bool,
 }
@@ -124,6 +124,9 @@ struct FileOutcome {
     id: String,
     relative: String,
     status: &'static str,
+    kind: &'static str,
+    language: String,
+    size: u64,
     message: String,
 }
 
@@ -132,6 +135,9 @@ struct ScanFileIn {
     relative: String,
     #[serde(default)]
     size: u64,
+    /// Optional leading bytes so unknown extensions can be sniffed.
+    #[serde(default)]
+    head: Vec<u8>,
 }
 
 #[derive(serde::Deserialize)]
@@ -165,14 +171,9 @@ pub fn scan_files(input: JsValue) -> Result<JsValue, JsValue> {
 
     let mut files = Vec::new();
     let mut bytes = 0u64;
-    let mut truncated = false;
-    let limit = 50_000usize;
+    let truncated = false;
 
     for f in req.files {
-        if files.len() >= limit {
-            truncated = true;
-            break;
-        }
         let relative = normalize_rel(&f.relative);
         if relative.is_empty() {
             continue;
@@ -180,7 +181,12 @@ pub fn scan_files(input: JsValue) -> Result<JsValue, JsValue> {
         if !policy.keep_walk(&relative) {
             continue;
         }
-        let kind = classify(Path::new(&relative), None);
+        let sniff = if f.head.is_empty() {
+            None
+        } else {
+            Some(f.head.as_slice())
+        };
+        let kind = classify(Path::new(&relative), sniff);
         let oversized = f.size > max_file;
         let default_on = is_default_selected(Path::new(&relative), kind)
             && !oversized
@@ -191,7 +197,7 @@ pub fn scan_files(input: JsValue) -> Result<JsValue, JsValue> {
             relative: relative.clone(),
             size: f.size,
             kind: kind.as_str(),
-            language: language_label(Path::new(&relative)),
+            language: language_name(Path::new(&relative), kind),
             default_on,
             oversized,
         });
@@ -296,7 +302,7 @@ pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
         },
         exclude: resolved_exclude(req.exclude),
         max_file_size: req.max_file_size.unwrap_or(8 * 1024 * 1024),
-        max_entries: req.max_entries.unwrap_or(5_000),
+        max_entries: req.max_entries.unwrap_or(0),
         selection: Selection::Only(req.selected.iter().map(|s| normalize_rel(s)).collect()),
         jobs: 1,
         ..Options::default()
@@ -335,6 +341,9 @@ pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
             id: f.id.clone(),
             relative: f.relative.clone(),
             status: f.status.as_str(),
+            kind: f.kind.as_str(),
+            language: language_name(Path::new(&f.relative), f.kind),
+            size: f.size,
             message: f.status.message(f.size),
         })
         .collect();
@@ -343,7 +352,7 @@ pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
         let sample = outcomes
             .iter()
             .take(5)
-            .map(|o| format!("{} ({})", o.relative, o.status))
+            .map(|o| format!("{} [{}]: {}", o.relative, o.status, o.message))
             .collect::<Vec<_>>()
             .join(", ");
         Some(format!(
@@ -388,7 +397,7 @@ pub fn smoke_pack() -> Result<JsValue, JsValue> {
         tree: TreeMode::None,
         jobs: 1,
         max_file_size: 8 * 1024 * 1024,
-        max_entries: 100,
+        max_entries: 0,
         selection: Selection::AllEligible,
         ..Options::default()
     };

@@ -43,8 +43,8 @@ struct Cli {
     #[arg(long, default_value = "8MiB", value_parser = parse_size)]
     max_file_size: u64,
 
-    /// Stop after this many discovered files.
-    #[arg(long, default_value_t = 100_000)]
+    /// Stop after this many discovered files. `0` (the default) means no cap.
+    #[arg(long, default_value_t = 0)]
     max_entries: usize,
 
     /// Stop after this much summed input (e.g. 1GiB).

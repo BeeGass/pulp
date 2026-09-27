@@ -160,6 +160,25 @@ mod tests {
     }
 
     #[test]
+    fn test_keep_emit_with_default_excludes_drops_generated_dirs() {
+        let opts = Options {
+            exclude: default_exclude_globs(),
+            ..Options::default()
+        };
+        let p = PathPolicy::from_options(&opts).unwrap();
+        assert!(!p.keep_emit(".next/server/page.js"));
+        assert!(!p.keep_emit("out/index.html"));
+        assert!(!p.keep_emit("toolchains/sdk/a.f90"));
+        assert!(!p.keep_emit("research/metastable/runs/out.bin"));
+        assert!(!p.keep_emit("cache/weights.bin"));
+        assert!(!p.keep_emit(".worktrees/dev/app/page.tsx"));
+        assert!(!p.keep_emit("node_modules/pkg/index.js"));
+        assert!(p.keep_emit("src/build.rs"));
+        assert!(p.keep_emit("content/index.math"));
+        assert!(p.keep_emit("app/page.tsx"));
+    }
+
+    #[test]
     fn test_keep_emit_with_default_excludes_drops_key_not_rust() {
         let opts = Options {
             exclude: default_exclude_globs(),

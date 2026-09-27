@@ -28,7 +28,7 @@ Requires Rust 1.85+.
 
 - **Mixed documents** — code, Markdown, HTML, JSON/CSV, PDF, Office, notebooks, archives
 - **Formats you pick** — plain text, Markdown, or Claude-style XML (`-f` or `-o` extension)
-- **Quiet by default** — skips `node_modules`, `target`, venvs, secrets, and other noisy trees
+- **Quiet by default** — skips `node_modules`, `.next`, `out`, `runs`, `target`, venvs, `toolchains`, secrets, and other generated trees
 - **Local mill** — `pulp ui` at `127.0.0.1:8747`; nothing uploaded
 
 ## Browser mill
