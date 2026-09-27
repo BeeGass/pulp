@@ -509,11 +509,7 @@ fn pack_one(
             status: FileStatus::SkippedArchive,
         };
     }
-    let extracted = if crate::extract::isolate::needs_isolation(kind) {
-        crate::extract::isolate::extract_heavy(path, bytes, kind, extract_opts)
-    } else {
-        extract(&relative, bytes, kind, extract_opts)
-    };
+    let extracted = extract_contained(path, bytes, kind, &relative, extract_opts);
     match extracted {
         Ok(text) => PackedFile {
             id,
@@ -732,6 +728,43 @@ fn normalize_rel(path: &str) -> String {
     parts.join("/")
 }
 
+/// Run an extractor and turn a panic into an error.
+///
+/// PDF and Office parsers can panic on hostile or unusual files. In the
+/// browser that abort surfaces as `unreachable` and drops the whole pack.
+fn extract_contained(
+    path: Option<&Path>,
+    bytes: &[u8],
+    kind: Kind,
+    relative: &str,
+    extract_opts: &ExtractOpts,
+) -> Result<String, Error> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if crate::extract::isolate::needs_isolation(kind) {
+            crate::extract::isolate::extract_heavy(path, bytes, kind, extract_opts)
+        } else {
+            extract(relative, bytes, kind, extract_opts)
+        }
+    }));
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => Err(Error::msg(format!(
+            "extractor panicked: {}",
+            panic_message(payload.as_ref())
+        ))),
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "unknown panic".to_string()
+}
+
 fn packed_too_large(id: String, relative: String, kind: Kind, size: u64, limit: u64) -> PackedFile {
     PackedFile {
         text: format!("[too large: {size} bytes; limit {limit} bytes]"),
@@ -778,6 +811,12 @@ mod tests {
             list_only: true,
             ..Options::default()
         }
+    }
+
+    #[test]
+    fn test_panic_message_with_str_payload_returns_text() {
+        let payload = std::panic::catch_unwind(|| panic!("missing width")).unwrap_err();
+        assert_eq!(panic_message(payload.as_ref()), "missing width");
     }
 
     #[test]

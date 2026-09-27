@@ -15,7 +15,12 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
 pub fn start() {
-    console_error_panic_hook::set_once();
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        // panic=abort turns the trap into the JS message "unreachable".
+        // Throwing here keeps the panic text on the error the mill shows.
+        wasm_bindgen::throw_str(&info.to_string());
+    }));
 }
 
 #[wasm_bindgen]
