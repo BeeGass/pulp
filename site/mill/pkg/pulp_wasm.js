@@ -27,6 +27,30 @@ export function artifact(result_id) {
 }
 
 /**
+ * Directory map for `paths` in the dump format. Reads no file bytes.
+ * @param {any} input
+ * @returns {string}
+ */
+export function format_tree(input) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.format_tree(input);
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * Pack selected files. Each file is `{ relative, bytes: Uint8Array, id? }`.
  * @param {any} input
  * @returns {any}

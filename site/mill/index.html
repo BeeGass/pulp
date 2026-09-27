@@ -896,7 +896,7 @@
   </div>
   
 <script type="module">
-import init, { scan_files, pack_files, artifact, pulp_version, smoke_pack } from './pkg/pulp_wasm.js';
+import init, { scan_files, pack_files, artifact, pulp_version, smoke_pack, format_tree } from './pkg/pulp_wasm.js';
 
 const $ = (id) => document.getElementById(id);
 const PULP_SURFACE = "browser mill";
@@ -1280,9 +1280,10 @@ function refreshStats() {
   const n = state.selected.size;
   $('pulp').disabled = state.busy || n === 0;
   $('pulp2').disabled = state.busy || n === 0;
-  $('copytree').disabled = !state.files.length;
-  $('copytreeDump').disabled = !state.files.length;
-  $('copytree2').disabled = !state.files.length;
+  const canTree = state.selected.size > 0;
+  $('copytree').disabled = !canTree;
+  $('copytreeDump').disabled = !canTree;
+  $('copytree2').disabled = !canTree;
   const bytes = state.files.filter(f => state.selected.has(fileId(f))).reduce((a,f)=>a+(f.size||0),0);
   if (!state.dump) {
     $('stats').textContent = state.files.length
@@ -1470,9 +1471,21 @@ function cancelPulp() {
 }
 
 async function copyTree() {
-  const text = state.files.filter(f => state.selected.has(fileId(f))).map(f => f.relative).join('\n');
-  await navigator.clipboard.writeText(text);
-  $('stats').textContent = 'tree copied';
+  const paths = state.files.filter(f => state.selected.has(fileId(f))).map(f => f.relative);
+  if (!paths.length) {
+    setErr('Tick at least one file.');
+    return;
+  }
+  const format = formatMode();
+  try {
+    const text = format_tree({ paths, format });
+    await navigator.clipboard.writeText(text);
+    const ext = format === 'md' ? 'md' : format === 'txt' ? 'txt' : 'xml';
+    $('stats').textContent = 'copied pulp-tree.' + ext;
+  } catch (e) {
+    setErr('Could not copy the directory map.\n' + (e && e.message ? e.message : e), true);
+    $('stats').textContent = 'copy tree failed';
+  }
 }
 async function fullDump() {
   if (state.previewTruncated && state.resultId) {

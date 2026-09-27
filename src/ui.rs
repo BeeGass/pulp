@@ -837,19 +837,9 @@ fn tree_sync(req: PackRequest, mill: &Mill) -> Result<TreeResponse, ApiError> {
         .iter()
         .map(|entry| entry.relative.clone())
         .collect();
-    let packed = pack::Packed {
-        files: Vec::new(),
-        tree: crate::tree::render_tree(&pack::tree_label(&opts.roots), &paths),
-        stats: pack::Stats {
-            truncated: manifest.truncated,
-            ..pack::Stats::default()
-        },
-    };
-    let mut dump = Cursor::new(Vec::new());
-    crate::render::write_tree(&mut dump, &packed, &opts)
-        .map_err(|err| ApiError::bad(err.to_string()))?;
     let tree =
-        String::from_utf8(dump.into_inner()).map_err(|err| ApiError::bad(err.to_string()))?;
+        crate::render::format_directory_map(&pack::tree_label(&opts.roots), &paths, opts.format)
+            .map_err(|err| ApiError::bad(err.to_string()))?;
     let ext = opts.format.extension();
     Ok(TreeResponse {
         tree,

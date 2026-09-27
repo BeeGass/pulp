@@ -7,6 +7,11 @@
 export function artifact(result_id: string): string;
 
 /**
+ * Directory map for `paths` in the dump format. Reads no file bytes.
+ */
+export function format_tree(input: any): string;
+
+/**
  * Pack selected files. Each file is `{ relative, bytes: Uint8Array, id? }`.
  */
 export function pack_files(input: any): any;
@@ -30,6 +35,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly artifact: (a: number, b: number) => [number, number, number, number];
+    readonly format_tree: (a: any) => [number, number, number, number];
     readonly pack_files: (a: any) => [number, number, number];
     readonly pulp_version: () => [number, number];
     readonly scan_files: (a: any) => [number, number, number];

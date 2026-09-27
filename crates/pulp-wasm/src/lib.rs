@@ -256,6 +256,46 @@ struct PackInput {
     max_entries: Option<usize>,
 }
 
+#[derive(serde::Deserialize)]
+struct TreeInput {
+    #[serde(default)]
+    paths: Vec<String>,
+    /// Explicit diagram root. Empty uses [`pulp::tree::split_grant_root`].
+    #[serde(default)]
+    root: String,
+    #[serde(default)]
+    format: String,
+}
+
+/// Directory map for `paths` in the dump format. Reads no file bytes.
+#[wasm_bindgen]
+pub fn format_tree(input: JsValue) -> Result<String, JsValue> {
+    let req: TreeInput = serde_wasm_bindgen::from_value(input)
+        .map_err(|e| JsValue::from_str(&format!("invalid tree input: {e}")))?;
+    let format = if req.format.trim().is_empty() {
+        OutputFormat::Xml
+    } else {
+        OutputFormat::from_ext(&req.format)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown format {}", req.format)))?
+    };
+    let (root, paths) = if req.root.trim().is_empty() {
+        pulp::tree::split_grant_root(&req.paths)
+    } else {
+        let paths = req
+            .paths
+            .iter()
+            .map(|path| normalize_rel(path))
+            .filter(|path| !path.is_empty())
+            .collect();
+        (req.root, paths)
+    };
+    if paths.is_empty() {
+        return Err(JsValue::from_str("tick at least one file"));
+    }
+    pulp::render::format_directory_map(&root, &paths, format)
+        .map_err(|e| JsValue::from_str(&format!("format tree failed: {e}")))
+}
+
 /// Pack selected files. Each file is `{ relative, bytes: Uint8Array, id? }`.
 #[wasm_bindgen]
 pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
