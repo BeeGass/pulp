@@ -171,14 +171,9 @@ pub fn scan_files(input: JsValue) -> Result<JsValue, JsValue> {
 
     let mut files = Vec::new();
     let mut bytes = 0u64;
-    let mut truncated = false;
-    let limit = 50_000usize;
+    let truncated = false;
 
     for f in req.files {
-        if files.len() >= limit {
-            truncated = true;
-            break;
-        }
         let relative = normalize_rel(&f.relative);
         if relative.is_empty() {
             continue;
@@ -307,7 +302,7 @@ pub fn pack_files(input: JsValue) -> Result<JsValue, JsValue> {
         },
         exclude: resolved_exclude(req.exclude),
         max_file_size: req.max_file_size.unwrap_or(8 * 1024 * 1024),
-        max_entries: req.max_entries.unwrap_or(5_000),
+        max_entries: req.max_entries.unwrap_or(0),
         selection: Selection::Only(req.selected.iter().map(|s| normalize_rel(s)).collect()),
         jobs: 1,
         ..Options::default()
@@ -402,7 +397,7 @@ pub fn smoke_pack() -> Result<JsValue, JsValue> {
         tree: TreeMode::None,
         jobs: 1,
         max_file_size: 8 * 1024 * 1024,
-        max_entries: 100,
+        max_entries: 0,
         selection: Selection::AllEligible,
         ..Options::default()
     };

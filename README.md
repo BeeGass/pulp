@@ -123,7 +123,7 @@ Noisy trees stay out even when they are tracked: `node_modules/`, `.next/`, `out
 | `--no-tree` | Same as `--tree none` |
 | `-j, --jobs N` | Parallelism (`0` = all available cores) |
 | `--max-file-size SIZE` | Cap per file (default `8MiB`) |
-| `--max-entries N` | Cap discovered files (default `100000`) |
+| `--max-entries N` | Optional cap on discovered files (`0`, the default, means no cap) |
 | `--max-total-bytes SIZE` | Cap summed input (default `1GiB`) |
 | `--include GLOB` | Repeatable allow-list |
 | `--exclude GLOB` | Repeatable extra deny-list |

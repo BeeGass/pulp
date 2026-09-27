@@ -1339,7 +1339,7 @@
         renderTree();
         setView("files");
         if (data.truncated) {
-          setErr("Scan stopped at the entry or size cap, so some files were left out of the list. Narrow the folder or raise the cap, then scan again.", true);
+          setErr("Scan stopped because the summed input reached the size cap, so some files were left out. Raise the cap or narrow the folder, then scan again.", true);
         }
       } catch (e) {
         setErr("Scan failed.\n" + (e && e.message ? e.message : e), true);

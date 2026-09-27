@@ -64,14 +64,17 @@ pub fn collect_detailed(opts: &Options) -> Result<WalkOutcome, Error> {
         if !root.exists() {
             return Err(Error::path(root, "does not exist"));
         }
-        let remaining_entries = opts.max_entries.saturating_sub(files.len());
         let remaining_bytes = opts
             .max_total_bytes
             .saturating_sub(files.iter().map(|f| f.size).sum::<u64>());
-        if remaining_entries == 0 || remaining_bytes == 0 {
+        if remaining_bytes == 0 {
             truncated = true;
             break;
         }
+        let Some(max_entries) = entry_budget(opts.max_entries, files.len()) else {
+            truncated = true;
+            break;
+        };
         let (chunk, hit) = collect_root(
             root,
             idx,
@@ -80,7 +83,7 @@ pub fn collect_detailed(opts: &Options) -> Result<WalkOutcome, Error> {
             include.as_ref(),
             &exclude,
             WalkLimits {
-                max_entries: remaining_entries,
+                max_entries,
                 max_total_bytes: remaining_bytes,
             },
         )?;
@@ -119,6 +122,19 @@ pub fn normalize_skip_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// `None` when a finite cap is already spent. `usize::MAX` when there is no cap.
+fn entry_budget(max_entries: usize, seen: usize) -> Option<usize> {
+    if max_entries == 0 {
+        return Some(usize::MAX);
+    }
+    let remaining = max_entries.saturating_sub(seen);
+    if remaining == 0 {
+        None
+    } else {
+        Some(remaining)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -567,6 +583,24 @@ mod tests {
         assert!(rels.contains(&"src/lib.rs"), "{rels:?}");
         assert!(rels.contains(&"bundle.zip"), "{rels:?}");
         assert!(!rels.contains(&"notes.txt"), "{rels:?}");
+    }
+
+    #[test]
+    fn test_collect_detailed_with_no_entry_cap_keeps_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.rs"), b"fn a() {}\n");
+        write(&dir.path().join("b.rs"), b"fn b() {}\n");
+        write(&dir.path().join("c.rs"), b"fn c() {}\n");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            max_entries: 0,
+            exclude: Vec::new(),
+            gitignore: false,
+            ..Options::default()
+        };
+        let outcome = collect_detailed(&opts).unwrap();
+        assert_eq!(outcome.files.len(), 3);
+        assert!(!outcome.truncated);
     }
 
     #[test]

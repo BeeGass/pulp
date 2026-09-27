@@ -1350,7 +1350,7 @@ async function scan() {
     state.files = data.files || [];
     state.selected = new Set(state.files.filter(f => f.default_on).map(fileId));
     renderTypes(); renderTree(); refreshStats(); setView('files');
-    if (data.truncated) setErr('Scan stopped at the entry cap, so some files were left out of the list. Narrow the folder, then scan again.', true);
+    if (data.truncated) setErr('Scan stopped because the summed input reached the size cap, so some files were left out. Raise the cap or narrow the folder, then scan again.', true);
   } catch (e) {
     setErr('Scan failed.\n' + String(e && e.message || e), true);
     $('stats').textContent = 'scan failed';

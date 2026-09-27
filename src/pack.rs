@@ -13,7 +13,6 @@ use crate::extract::{ExtractOpts, expand_archive, extract};
 use crate::manifest::ManifestEntry;
 
 const MAX_ARCHIVE_DEPTH: u8 = 3;
-const MAX_ARCHIVE_MEMBERS: usize = 10_000;
 const MAX_ARCHIVE_UNCOMPRESSED: u64 = 512 * 1024 * 1024;
 
 /// Outcome of packing one input (or archive member).
@@ -219,7 +218,8 @@ pub fn pack_manifest(
 
 /// Pack an in-memory file set (browser / virtual trees). No filesystem reads.
 ///
-/// Enforces [`Options::selection`], include/exclude, hidden, and byte/entry caps.
+/// Enforces [`Options::selection`], include/exclude, hidden, and the byte budget.
+/// A `max_entries` of `0` does not stop the pack.
 pub fn pack_entries(
     entries: &[MemoryFile<'_>],
     opts: &Options,
@@ -254,7 +254,7 @@ pub fn pack_entries(
             continue;
         }
         let size = entry.bytes.len() as u64;
-        if kept >= opts.max_entries {
+        if opts.max_entries != 0 && kept >= opts.max_entries {
             truncated = true;
             break;
         }
@@ -566,7 +566,6 @@ fn take_archive_members(
     };
     let mut out = Vec::new();
     let mut total = 0u64;
-    let mut kept = 0usize;
     for (name, mem_bytes) in members {
         if is_unsafe_entry(&name) {
             continue;
@@ -574,9 +573,6 @@ fn take_archive_members(
         let child = join_rel(relative, &name);
         if !opts.hidden && crate::filter::is_hidden_rel(&child) {
             continue;
-        }
-        if kept >= MAX_ARCHIVE_MEMBERS {
-            break;
         }
         let n = mem_bytes.len() as u64;
         if total.saturating_add(n) > MAX_ARCHIVE_UNCOMPRESSED {
@@ -590,7 +586,6 @@ fn take_archive_members(
         if !emit && glob_exclude_only(&child, &exclude) {
             continue;
         }
-        kept += 1;
         total = total.saturating_add(n);
         out.extend(process_item(
             WorkItem {
@@ -1071,6 +1066,32 @@ mod tests {
         };
         let packed = pack(&opts).unwrap();
         assert!(packed.files.is_empty());
+        assert!(!packed.stats.truncated);
+    }
+
+    #[test]
+    fn test_pack_entries_with_no_entry_cap_keeps_every_file() {
+        let a = b"fn a() {}\n";
+        let b = b"fn b() {}\n";
+        let files = [
+            MemoryFile {
+                id: "a.rs",
+                relative: "a.rs",
+                bytes: a,
+            },
+            MemoryFile {
+                id: "b.rs",
+                relative: "b.rs",
+                bytes: b,
+            },
+        ];
+        let opts = Options {
+            max_entries: 0,
+            exclude: Vec::new(),
+            ..Options::default()
+        };
+        let packed = pack_entries(&files, &opts, None).unwrap();
+        assert_eq!(packed.files.len(), 2);
         assert!(!packed.stats.truncated);
     }
 

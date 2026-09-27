@@ -9,8 +9,6 @@ use zip::ZipArchive;
 use crate::error::Error;
 use crate::extract::ExtractOpts;
 
-/// Hard cap on file members copied from one archive.
-pub(crate) const MAX_ARCHIVE_FILES: usize = 10_000;
 /// Hard cap on total uncompressed bytes copied from one archive.
 pub(crate) const MAX_ARCHIVE_UNCOMPRESSED: u64 = 512 * 1024 * 1024;
 
@@ -24,9 +22,6 @@ pub fn expand_zip(bytes: &[u8], opts: &ExtractOpts) -> Result<Vec<(String, Vec<u
     let mut out = Vec::new();
     let mut total = 0u64;
     for i in 0..archive.len() {
-        if out.len() >= MAX_ARCHIVE_FILES {
-            break;
-        }
         let mut file = match archive.by_index(i) {
             Ok(file) => file,
             Err(_) => continue,
@@ -72,9 +67,6 @@ fn collect_tar<R: Read>(
     let mut out = Vec::new();
     let mut total = 0u64;
     for entry in archive.entries()? {
-        if out.len() >= MAX_ARCHIVE_FILES {
-            break;
-        }
         let mut entry = entry?;
         if !entry.header().entry_type().is_file() {
             continue;

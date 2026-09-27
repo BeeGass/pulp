@@ -86,7 +86,7 @@ pub struct Options {
     pub skip_paths: Vec<PathBuf>,
     /// Preserve HTML/XML/JSON as source instead of converting to readable text.
     pub source_mode: bool,
-    /// Cap on discovered file entries (examined, not only emitted).
+    /// Cap on discovered file entries. `0` means no cap.
     pub max_entries: usize,
     /// Cap on summed input sizes processed in one operation.
     pub max_total_bytes: u64,
@@ -137,7 +137,7 @@ impl Default for Options {
             selection: Selection::AllEligible,
             skip_paths: Vec::new(),
             source_mode: false,
-            max_entries: 100_000,
+            max_entries: 0,
             max_total_bytes: 1 << 30,
         }
     }
