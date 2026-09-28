@@ -207,6 +207,7 @@
       color: var(--mist);
       line-height: 1.4;
     }
+    .hint[hidden] { display: none; }
     .out-views {
       display: inline-flex;
       gap: 4px;
@@ -229,14 +230,65 @@
     .result-strip {
       display: flex;
       justify-content: space-between;
+      align-items: center;
       gap: 12px;
       padding: 8px 12px;
       font-family: var(--mono);
       font-size: 12px;
       color: var(--mist);
       border-bottom: 1px solid #3a3228;
+      border-left: 3px solid var(--rule);
     }
-    .paper .result-strip { border-bottom-color: var(--rule); color: var(--rust-2); }
+    .paper .result-strip { border-bottom-color: var(--rule); }
+    .result-strip.is-idle {
+      color: #7a6a52;
+      border-left-color: var(--rule);
+    }
+    .result-strip.is-scan {
+      color: #6e4e12;
+      border-left-color: var(--brass);
+      background: color-mix(in srgb, var(--brass) 34%, var(--paper));
+    }
+    .result-strip.is-extract {
+      color: var(--paper);
+      border-left-color: var(--brass);
+      background: var(--ink-3);
+    }
+    .result-strip.is-ready {
+      color: var(--ink);
+      border-left-color: var(--brass);
+      background: color-mix(in srgb, var(--brass) 22%, var(--paper));
+    }
+    .result-strip.is-issues {
+      color: var(--ink);
+      border-left-color: var(--rust);
+      background: color-mix(in srgb, var(--brass) 16%, var(--paper));
+    }
+    .result-strip.is-issues #resultState { color: var(--rust-2); }
+    .result-strip.is-stale {
+      color: var(--rust-2);
+      border-left-color: var(--rust);
+      background: color-mix(in srgb, var(--rust) 12%, var(--paper));
+    }
+    .result-strip.is-fail {
+      color: var(--paper);
+      border-left-color: var(--ink);
+      background: var(--rust-2);
+    }
+    #resultState {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 500;
+    }
+    #resultState::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      flex: 0 0 auto;
+    }
     .file-preview { display: flex; flex-direction: column; min-height: 0; flex: 1; }
     .preview-head {
       padding: 10px 12px;
@@ -293,14 +345,19 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 0 12px;
+      padding: 8px 12px;
       cursor: pointer;
-      letter-spacing: 0.12em;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
       font-size: 12px;
       font-weight: 500;
       color: var(--mist);
       user-select: none;
+    }
+    .settings > summary span {
+      flex: 1 1 auto;
+      min-width: 0;
+      line-height: 1.35;
     }
     .settings > summary::-webkit-details-marker { display: none; }
     .settings > summary::before {
@@ -377,6 +434,8 @@
     }
     .seg {
       display: inline-flex;
+      flex-wrap: wrap;
+      max-width: 100%;
       border: 1px solid #3d342a;
       border-radius: 10px;
       overflow: hidden;
@@ -384,10 +443,11 @@
     }
     .seg button {
       min-height: 36px;
-      padding: 0 14px;
+      padding: 0 12px;
       border: 0;
       border-right: 1px solid #3d342a;
-      letter-spacing: 0.12em;
+      letter-spacing: 0.04em;
+      text-transform: none;
     }
     .seg button:last-child { border-right: 0; }
     .seg button.on {
@@ -415,8 +475,16 @@
     }
     button.primary:hover { background: var(--rust-2); }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
-    button:focus-visible, input:focus-visible, select:focus-visible, a.github:focus-visible {
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    summary:focus-visible,
+    a:focus-visible {
       outline: 2px solid var(--brass);
+      outline-offset: 2px;
+    }
+    .row:focus-visible {
+      outline: 2px solid var(--rust);
       outline-offset: 2px;
     }
     .header-meta {
@@ -565,6 +633,15 @@
       font-size: 14px;
     }
     .pane-h button { min-height: 36px; padding: 0 10px; }
+    #fileCount { letter-spacing: 0.06em; }
+    .filter-row {
+      padding: 8px 12px 10px;
+      border-bottom: 1px solid #3a3228;
+    }
+    .filter-row input[type="text"] {
+      width: 100%;
+      min-width: 0;
+    }
     .tree, .preview {
       overflow: auto;
       -webkit-overflow-scrolling: touch;
@@ -727,6 +804,7 @@
       main.view-dump .pane-files { display: none; }
       .pane-dump .pane-h .tools { display: none; }
       .dock { display: flex; }
+      .dock button { padding: 0 8px; letter-spacing: 0.04em; white-space: nowrap; }
       .app {
         grid-template-rows: auto auto auto auto auto 1fr auto auto;
       }
@@ -776,9 +854,9 @@
         <span class="ctl">
           <span class="ctl-l">Output format</span>
           <span class="seg" role="group" aria-label="format">
-            <button type="button" data-fmt="txt">txt</button>
-            <button type="button" data-fmt="md">md</button>
-            <button type="button" data-fmt="xml" class="on">xml</button>
+            <button type="button" data-fmt="txt">Plain text</button>
+            <button type="button" data-fmt="md">Markdown</button>
+            <button type="button" data-fmt="xml" class="on">XML</button>
           </span>
         </span>
         <select id="format" hidden>
@@ -786,9 +864,9 @@
           <option value="md">md</option>
           <option value="xml" selected>xml</option>
         </select>
-        <p class="hint" id="contentHint">PDFs and Office files are still converted to text. HTML, XML, and JSON stay as decoded source when Preserve source is on.</p>
+        <p class="hint" id="contentHint" hidden>HTML, XML, and JSON stay as decoded source; PDFs and Office files are still converted to text.</p>
         <details class="settings" id="settings">
-          <summary>Options</summary>
+          <summary><span id="optsSummary">Options · gitignore</span></summary>
           <div class="settings-list">
             <div class="setting">
               <label class="opt"><input type="checkbox" id="gitignore" checked> gitignore</label>
@@ -827,13 +905,15 @@
     <main id="stage" class="view-files">
       <section class="pane pane-files">
         <div class="pane-h">
-          <span>Files <small>proof</small></span>
+          <span>Files <small>proof</small> <small id="fileCount">0 visible · 0 ticked</small></span>
           <div class="tools">
-            <input id="filter" type="text" placeholder="filter" spellcheck="false">
             <button type="button" id="all">Select matches</button>
             <button type="button" id="none">Clear matches</button>
             <button type="button" id="copytree" disabled>Copy tree</button>
           </div>
+        </div>
+        <div class="filter-row">
+          <input id="filter" type="text" placeholder="filter" spellcheck="false" enterkeyhint="search" autocapitalize="off" autocorrect="off" aria-label="Filter files" aria-keyshortcuts="/" title="Filter files (/)">
         </div>
         <div class="types" id="types"></div>
         <div class="tree" id="tree"><div class="empty">Browse to a folder in the file manager, or type a path, then scan.</div></div>
@@ -847,14 +927,14 @@
               <button type="button" data-out="preview">File preview</button>
               <button type="button" data-out="issues" id="issuesTab">Issues</button>
             </span>
-            <button type="button" id="pulp" class="primary" disabled>Pulp</button>
+            <button type="button" id="pulp" class="primary" disabled title="Pulp (Ctrl-Enter or Cmd-Enter)">Pulp</button>
             <button type="button" id="cancel" hidden>Cancel</button>
             <button type="button" id="copytreeDump" disabled>Copy tree</button>
             <button type="button" id="copy" disabled>Copy</button>
             <button type="button" id="download" disabled>Download</button>
           </div>
         </div>
-        <div class="result-strip"><span id="resultState">Not generated</span><span id="resultMeta"></span></div>
+        <div class="result-strip is-idle"><span id="resultState">Not generated</span><span id="resultMeta"></span></div>
         <pre class="preview" id="preview"><div class="empty">The dump lands here — xml, md, or txt.</div></pre>
         <div class="file-preview" id="filePreview" hidden>
           <div class="preview-head" id="previewHead"></div>
@@ -866,7 +946,7 @@
     <div class="dock" id="dock">
       <button type="button" id="pulp2" class="primary" disabled>Pulp</button>
       <button type="button" id="cancel2" hidden>Cancel</button>
-      <button type="button" id="copytree2" disabled>Tree</button>
+      <button type="button" id="copytree2" disabled>Copy tree</button>
       <button type="button" id="copy2" disabled>Copy</button>
       <button type="button" id="download2" disabled>Download</button>
     </div>
@@ -914,14 +994,28 @@
         hidden: $("hidden").checked,
         archives: $("archives").checked,
         notebook: $("notebook").checked,
-        source: $("source").checked,
+        source: $("content").value === "source",
         notree: $("notree").checked,
       });
     }
 
+    function setResultState(label) {
+      const kind = {
+        "Not generated": "is-idle",
+        "Scanning": "is-scan",
+        "Extracting": "is-extract",
+        "Ready": "is-ready",
+        "Ready with issues": "is-issues",
+        "Out of date": "is-stale",
+        "Failed": "is-fail",
+      }[label] || "is-idle";
+      $("resultState").textContent = label;
+      $("resultState").parentElement.className = "result-strip " + kind;
+    }
+
     function markStaleIfDump() {
       if (!state.dump) {
-        $("resultState").textContent = "Not generated";
+        setResultState("Not generated");
         return;
       }
       const stale = settingsKey() !== state.dumpKey;
@@ -933,9 +1027,9 @@
       });
       setDumpActions(!stale);
       const issues = (state.outcomes || []).filter((o) => o.status && o.status !== "extracted");
-      $("resultState").textContent = stale
+      setResultState(stale
         ? "Out of date"
-        : (issues.length ? "Ready with issues" : "Ready");
+        : (issues.length ? "Ready with issues" : "Ready"));
     }
 
     function opts() {
@@ -1113,7 +1207,49 @@
       refreshTickStats();
     }
 
+    let statusGen = 0;
+
+    function holdStatus(text, asHtml) {
+      statusGen += 1;
+      if (asHtml) $("stats").innerHTML = text;
+      else $("stats").textContent = text;
+    }
+
+    function flashStatus(text) {
+      const gen = ++statusGen;
+      $("stats").textContent = text;
+      window.setTimeout(() => {
+        if (gen !== statusGen) return;
+        if ($("stats").textContent !== text) return;
+        refreshTickStats();
+      }, 2500);
+    }
+
+    function syncContentHint() {
+      const hint = $("contentHint");
+      hint.hidden = $("content").value !== "source";
+      hint.textContent = "HTML, XML, and JSON stay as decoded source; PDFs and Office files are still converted to text.";
+    }
+
+    function syncOptsSummary() {
+      const items = [];
+      if ($("gitignore").checked) items.push("gitignore");
+      if ($("hidden").checked) items.push("hidden");
+      if ($("archives").checked) items.push("archives");
+      if ($("notebook").checked) items.push("notebook outputs");
+      if ($("notree").checked) items.push("no tree");
+      if ($("wrap").checked) items.push("wrap");
+      $("optsSummary").textContent = items.length
+        ? "Options · " + items.join(" · ")
+        : "Options · none";
+    }
+
     function refreshTickStats() {
+      statusGen += 1;
+      const shown = state.files.filter(visible);
+      let shownTicked = 0;
+      for (const f of shown) if (state.selected.has(fileId(f))) shownTicked += 1;
+      $("fileCount").textContent = shown.length + " visible · " + shownTicked + " ticked";
       const n = state.selected.size;
       const t = state.files.length;
       if (!t) {
@@ -1323,8 +1459,8 @@
       const o = opts();
       if (!o.path) { setErr("Give the mill a path."); return; }
       $("scan").disabled = true;
-      $("stats").innerHTML = '<span class="spin">+</span> Scanning';
-      $("resultState").textContent = "Scanning";
+      holdStatus('<span class="spin">+</span> Scanning', true);
+      setResultState("Scanning");
       try {
         const data = await api("/api/scan", o);
         state.files = data.files;
@@ -1343,7 +1479,8 @@
         }
       } catch (e) {
         setErr("Scan failed.\n" + (e && e.message ? e.message : e), true);
-        $("stats").textContent = "scan failed";
+        holdStatus("scan failed");
+        setResultState("Failed");
       } finally {
         $("scan").disabled = false;
       }
@@ -1358,8 +1495,8 @@
       const key = extractKey();
       setPulpEnabled(false);
       setBusy(true);
-      $("stats").innerHTML = '<span class="spin">+</span> Extracting';
-      $("resultState").textContent = "Extracting";
+      holdStatus('<span class="spin">+</span> Extracting', true);
+      setResultState("Extracting");
       try {
         const data = await api("/api/pack", o);
         if (id !== state.reqId) return;
@@ -1367,7 +1504,8 @@
       } catch (e) {
         if (id !== state.reqId) return;
         setErr("Pack failed.\n" + (e && e.message ? e.message : e), true);
-        $("stats").textContent = "pulp failed";
+        holdStatus("pulp failed");
+        setResultState("Failed");
       } finally {
         setBusy(false);
         setPulpEnabled(state.selected.size > 0);
@@ -1377,7 +1515,7 @@
     function applyPack(data, key) {
       state.dump = data.dump;
       state.filename = data.filename;
-      state.dumpKey = key;
+      state.dumpKey = settingsKey();
       state.extractKey = key;
       state.outcomes = data.outcomes || [];
       state.dumpBytes = data.dump_bytes || (data.dump ? data.dump.length : 0);
@@ -1402,12 +1540,14 @@
         setErr(issueN + " file" + (issueN === 1 ? "" : "s") + " not extracted. Open Issues for the full record.\n\n" + sample, true);
       }
       $("resultMeta").textContent = human(state.dumpBytes) + " output · content-only ~" + data.tokens_est + " tokens";
-      $("stats").innerHTML =
+      holdStatus(
         "<strong>" + data.files_extracted + "</strong> pulped · ~<strong>" +
         data.tokens_est + "</strong> tokens (content-only) · " + data.elapsed_ms + "ms" +
         (data.files_skipped ? " · " + data.files_skipped + " skipped" : "") +
         (data.truncated ? " · truncated" : "") +
-        (data.cancelled ? " · cancelled" : "");
+        (data.cancelled ? " · cancelled" : ""),
+        true
+      );
     }
 
     function setBusy(on) {
@@ -1435,22 +1575,23 @@
     async function browse() {
       setErr("");
       $("browse").disabled = true;
-      $("stats").innerHTML = '<span class="spin">+</span> file manager';
+      holdStatus('<span class="spin">+</span> file manager', true);
       try {
         const data = await api("/api/browse", {});
         if (data.cancelled) {
-          $("stats").textContent = "browse cancelled";
+          flashStatus("browse cancelled");
           return;
         }
         if (!data.path) {
           setErr("No folder selected.");
+          refreshTickStats();
           return;
         }
         $("path").value = data.path;
         await scan();
       } catch (e) {
         setErr("Browse failed.\n" + (e && e.message ? e.message : e), true);
-        $("stats").textContent = "browse failed";
+        holdStatus("browse failed");
       } finally {
         $("browse").disabled = false;
       }
@@ -1461,14 +1602,14 @@
       const o = opts();
       o.selected = [...state.selected];
       if (!o.selected.length) { setErr("Tick at least one file."); return; }
-      $("stats").innerHTML = '<span class="spin">+</span> tree';
+      holdStatus('<span class="spin">+</span> tree', true);
       try {
         const data = await api("/api/tree", o);
         await navigator.clipboard.writeText(data.tree);
-        $("stats").textContent = "copied " + data.filename;
+        flashStatus("copied " + data.filename);
       } catch (e) {
         setErr("Could not copy the directory map.\n" + (e && e.message ? e.message : e), true);
-        $("stats").textContent = "copy tree failed";
+        holdStatus("copy tree failed");
       }
     }
 
@@ -1477,7 +1618,7 @@
       try {
         const text = await fullDump();
         await navigator.clipboard.writeText(text);
-        $("stats").textContent = "copied " + state.filename;
+        flashStatus("copied " + state.filename);
       } catch (e) { setErr("Clipboard copy failed.\n" + e.message, true); }
     }
 
@@ -1490,7 +1631,7 @@
       a.download = state.filename;
       a.click();
       URL.revokeObjectURL(a.href);
-      $("stats").textContent = "downloaded " + a.download;
+      flashStatus("downloaded " + a.download);
     }
 
     async function fullDump() {
@@ -1623,6 +1764,7 @@
       b.onclick = () => {
         $("content").value = b.dataset.content;
         document.querySelectorAll("[data-content]").forEach((x) => x.classList.toggle("on", x === b));
+        syncContentHint();
         markStaleIfDump();
       };
     });
@@ -1666,6 +1808,43 @@
       state.files.filter(visible).forEach((f) => state.selected.delete(fileId(f)));
       renderTree();
     };
+    ["gitignore", "hidden", "archives", "notebook", "notree", "wrap"].forEach((id) => {
+      $(id).addEventListener("change", syncOptsSummary);
+    });
+    syncContentHint();
+    syncOptsSummary();
+
+    document.addEventListener("keydown", (e) => {
+      const t = e.target;
+      const typing = !!t && (
+        t.tagName === "INPUT" ||
+        t.tagName === "TEXTAREA" ||
+        t.tagName === "SELECT" ||
+        t.isContentEditable
+      );
+      if (e.key === "Escape") {
+        const cancel = $("cancel");
+        if (cancel && !cancel.hidden) {
+          e.preventDefault();
+          cancelPulp();
+        }
+        return;
+      }
+      if (typing) return;
+      if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const filter = $("filter");
+        if (!filter) return;
+        e.preventDefault();
+        filter.focus();
+        return;
+      }
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        const pulp = $("pulp");
+        if (!pulp || pulp.disabled) return;
+        e.preventDefault();
+        pulp.click();
+      }
+    });
   </script>
 </body>
 </html>
