@@ -1636,14 +1636,26 @@ fn make_colorspace<'a>(doc: &'a Document, name: &[u8], resources: &'a Dictionary
     }
 }
 
+/// Deepest nesting of form XObjects drawn inside one another (pulp's patch).
+const MAX_FORM_DEPTH: usize = 32;
+/// Form XObjects one page may draw in all (pulp's patch). Forms that each draw
+/// the next several times would otherwise grow exponentially.
+const MAX_FORMS_PER_PAGE: usize = 10_000;
+
 struct Processor<'a> {
     font_table: HashMap<Vec<u8>, Rc<dyn PdfFont + 'a>>,
+    /// The form XObjects being drawn, innermost last. A form that draws
+    /// itself, directly or through others, is skipped instead of recursing
+    /// until the stack runs out.
+    forms: Vec<*const Stream>,
+    /// Form draws left on the current page.
+    forms_left: usize,
     _none: PhantomData<&'a ()>,
 }
 
 impl<'a> Processor<'a> {
     fn new() -> Processor<'a> {
-        Processor { font_table: HashMap::new(), _none: PhantomData }
+        Processor { font_table: HashMap::new(), forms: Vec::new(), forms_left: MAX_FORMS_PER_PAGE, _none: PhantomData }
     }
 
     fn process_stream(&mut self, doc: &'a Document, content: Vec<u8>, resources: &'a Dictionary, media_box: &MediaBox, output: &mut dyn OutputDev, page_num: u32) -> Result<(), OutputError> {
@@ -1951,9 +1963,23 @@ impl<'a> Processor<'a> {
                     let xobject: &Dictionary = get(&doc, resources, b"XObject");
                     let name = operation.operands[0].as_name().unwrap();
                     let xf: &Stream = get(&doc, xobject, name);
-                    let resources = maybe_get_obj(&doc, &xf.dict, b"Resources").and_then(|n| n.as_dict().ok()).unwrap_or(resources);
-                    let contents = get_contents(xf);
-                    self.process_stream(&doc, contents, resources, &media_box, output, page_num)?;
+                    // pulp's patch: an image or PostScript XObject holds no content
+                    // to draw (an image's pixels would be read as operators), and a
+                    // form already being drawn, a nesting past MAX_FORM_DEPTH, or a
+                    // page past its form budget is skipped.
+                    let not_form = matches!(xf.dict.get(b"Subtype"), Ok(Object::Name(ref subtype)) if subtype.as_slice() == b"Image" || subtype.as_slice() == b"PS");
+                    let key = xf as *const Stream;
+                    if not_form || self.forms.contains(&key) || self.forms.len() >= MAX_FORM_DEPTH || self.forms_left == 0 {
+                        dlog!("skipping xobject {:?}", name);
+                    } else {
+                        self.forms_left -= 1;
+                        self.forms.push(key);
+                        let resources = maybe_get_obj(&doc, &xf.dict, b"Resources").and_then(|n| n.as_dict().ok()).unwrap_or(resources);
+                        let contents = get_contents(xf);
+                        let drawn = self.process_stream(&doc, contents, resources, &media_box, output, page_num);
+                        self.forms.pop();
+                        drawn?;
+                    }
                 }
                 _ => { dlog!("unknown operation {:?}", operation); }
 
@@ -2494,6 +2520,8 @@ fn output_doc_inner<'a>(page_num: u32, object_id: ObjectId, doc: &'a Document, p
     // Reset the font cache per page so a stale entry from an earlier page isn't
     // reused, which would decode text with the wrong font's ToUnicode CMap.
     p.font_table.clear();
+    p.forms.clear();
+    p.forms_left = MAX_FORMS_PER_PAGE;
     // XXX: Some pdfs lack a Resources directory
     let resources = get_inherited(doc, page_dict, b"Resources").unwrap_or(empty_resources);
     dlog!("resources {:?}", resources);

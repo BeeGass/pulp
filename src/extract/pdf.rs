@@ -45,6 +45,33 @@ mod tests {
         ])
     }
 
+    /// A one-page PDF whose page draws `page`, with Helvetica as `/F1` and
+    /// one XObject per entry of `xobjects`: `/X1` is the first, `/X2` the
+    /// second, and so on. Each entry is its dictionary keys and its stream;
+    /// every XObject can draw every other.
+    fn pdf_with_xobjects(page: &str, xobjects: &[(&str, &str)]) -> Vec<u8> {
+        let names: String = (0..xobjects.len())
+            .map(|i| format!("/X{} {} 0 R ", i + 1, i + 6))
+            .collect();
+        let resources = format!("<< /Font << /F1 5 0 R >> /XObject << {names}>> >>");
+        let mut objs = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>\n".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n".to_string(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources {resources} >>\n"
+            ),
+            stream_object("", page),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n".to_string(),
+        ];
+        for (keys, stream) in xobjects {
+            objs.push(stream_object(
+                &format!("/Type /XObject {keys} /Resources {resources} "),
+                stream,
+            ));
+        }
+        pdf_from_objects(&objs)
+    }
+
     /// A stream object with the extra dictionary `keys`.
     fn stream_object(keys: &str, stream: &str) -> String {
         format!(
@@ -123,6 +150,47 @@ mod tests {
         let bytes = pdf_with_font(stream, &cid_font("UniJIS-UTF16-H"));
         let text = extract(&bytes).expect("pdf extract");
         assert_eq!(text, "\u{2000b}\u{65e5}");
+    }
+
+    const FORM: &str = "/Subtype /Form /BBox [0 0 612 792]";
+
+    #[test]
+    fn test_extract_with_self_drawing_form_returns_its_text_once() {
+        let bytes = pdf_with_xobjects(
+            "BT /F1 12 Tf 72 720 Td (page) Tj ET /X1 Do\n",
+            &[(FORM, "BT /F1 12 Tf 72 700 Td (inside) Tj ET /X1 Do\n")],
+        );
+        let text = extract(&bytes).expect("pdf extract");
+        assert!(text.contains("page"), "{text:?}");
+        assert_eq!(text.matches("inside").count(), 1, "{text:?}");
+    }
+
+    #[test]
+    fn test_extract_with_forms_drawing_each_other_twice_stays_bounded() {
+        // Each form draws the next one twice: 2^23 draws of the last form if
+        // nothing bounds them.
+        let chain: Vec<String> = (2..=24)
+            .map(|next| format!("/X{next} Do /X{next} Do\n"))
+            .chain(["BT /F1 12 Tf 72 700 Td (leaf) Tj ET\n".to_string()])
+            .collect();
+        let forms: Vec<(&str, &str)> = chain.iter().map(|s| (FORM, s.as_str())).collect();
+        let bytes = pdf_with_xobjects("/X1 Do\n", &forms);
+        let started = std::time::Instant::now();
+        let text = extract(&bytes).expect("pdf extract");
+        assert!(text.contains("leaf"), "{text:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_extract_with_image_xobject_returns_no_text_from_its_pixels() {
+        let image =
+            "/Subtype /Image /Width 26 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8";
+        let bytes = pdf_with_xobjects(
+            "BT /F1 12 Tf 72 720 Td (caption) Tj ET /X1 Do\n",
+            &[(image, "BT /F1 12 Tf (ghost) Tj ET\n")],
+        );
+        let text = extract(&bytes).expect("pdf extract");
+        assert_eq!(text, "caption");
     }
 
     #[test]
