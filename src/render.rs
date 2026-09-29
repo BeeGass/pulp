@@ -186,19 +186,44 @@ fn fence_lang(path: &str, kind: crate::classify::Kind, source_mode: bool) -> &'s
     }
 }
 
+/// Write `s` as XML 1.0 character data.
+///
+/// `&`, `<`, and `>` become entities. Characters XML 1.0 cannot carry at
+/// all, not even as a character reference (C0 controls other than tab, line
+/// feed, and carriage return, plus U+FFFE and U+FFFF), become U+FFFD, so the
+/// dump stays well-formed whatever bytes a file held.
 fn write_xml_escaped<W: Write>(w: &mut W, s: &str) -> io::Result<()> {
+    const REPLACEMENT: &[u8] = "\u{FFFD}".as_bytes();
     let bytes = s.as_bytes();
     let mut start = 0usize;
-    for (i, &b) in bytes.iter().enumerate() {
-        let esc: &[u8] = match b {
-            b'&' => b"&amp;",
-            b'<' => b"&lt;",
-            b'>' => b"&gt;",
-            _ => continue,
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let (esc, len): (&[u8], usize) = match b {
+            b'&' => (b"&amp;", 1),
+            b'<' => (b"&lt;", 1),
+            b'>' => (b"&gt;", 1),
+            b'\t' | b'\n' | b'\r' => {
+                i += 1;
+                continue;
+            }
+            0x00..=0x1F => (REPLACEMENT, 1),
+            // U+FFFE and U+FFFF encode as EF BF BE and EF BF BF. In valid
+            // UTF-8, 0xEF always starts a three-byte sequence.
+            0xEF if bytes.get(i + 1) == Some(&0xBF)
+                && matches!(bytes.get(i + 2), Some(0xBE | 0xBF)) =>
+            {
+                (REPLACEMENT, 3)
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
         };
         w.write_all(&bytes[start..i])?;
         w.write_all(esc)?;
-        start = i + 1;
+        i += len;
+        start = i;
     }
     w.write_all(&bytes[start..])?;
     Ok(())
@@ -343,6 +368,55 @@ mod tests {
         let mut buf = Vec::new();
         write_all(&mut buf, packed, &opts).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    fn is_xml_char(c: char) -> bool {
+        matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}')
+            || c >= '\u{10000}'
+    }
+
+    #[test]
+    fn test_write_all_with_xml_and_control_chars_returns_well_formed_xml() {
+        let path = "odd\u{1}dir/a\nb <&> \u{FFFE}.txt";
+        let text = "nul\u{0} bell\u{7} esc\u{1b} vt\u{b} ff\u{c} ]]> \u{FFFF} tab\tcr\r\n";
+        let packed = Packed {
+            tree: crate::tree::render_tree("root\u{2}", &[path.to_string()]),
+            files: vec![file(path, text, FileStatus::Extracted)],
+            stats: Stats::default(),
+        };
+        let xml = render(&packed, OutputFormat::Xml);
+        let bad: Vec<char> = xml.chars().filter(|c| !is_xml_char(*c)).collect();
+        assert!(bad.is_empty(), "forbidden XML chars {bad:?} in {xml:?}");
+
+        use quick_xml::events::Event;
+        let mut reader = quick_xml::Reader::from_str(&xml);
+        let mut source = String::new();
+        let mut sources = 0;
+        let mut in_source = false;
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(e)) => {
+                    in_source = e.name().as_ref() == "source";
+                    sources += usize::from(in_source);
+                }
+                Ok(Event::Text(t)) if in_source => source.push_str(&t),
+                Ok(Event::GeneralRef(r)) if in_source => source.push_str(match r.as_ref() {
+                    "lt" => "<",
+                    "gt" => ">",
+                    "amp" => "&",
+                    other => panic!("unexpected entity {other}"),
+                }),
+                Ok(Event::End(_)) => in_source = false,
+                Ok(Event::Eof) => break,
+                Ok(_) => {}
+                Err(err) => panic!("malformed XML: {err}\n{xml}"),
+            }
+        }
+        assert_eq!(sources, 1, "{xml}");
+        assert_eq!(source, "odd\\u{1}dir/a\\nb <&> \\u{fffe}.txt");
+        assert!(xml.contains("tab\tcr\r\n"), "{xml:?}");
+        assert!(xml.contains("]]&gt;"), "{xml:?}");
+        assert!(xml.contains("nul\u{FFFD} bell\u{FFFD}"), "{xml:?}");
     }
 
     #[test]
