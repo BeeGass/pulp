@@ -1269,7 +1269,7 @@ export function mountMill(root, adapter, options) {
     }
     const stale = isStale();
     el.dump.classList.toggle('is-stale', stale);
-    el.dump.style.opacity = S.busy === 'pack' ? '0.35' : stale ? '0.55' : '';
+    el.dump.style.opacity = S.busy === 'pack' ? '0.35' : stale ? '0.62' : '';
   }
 
   function watermarkHTML() {
@@ -1367,7 +1367,8 @@ export function mountMill(root, adapter, options) {
       statMeta.textContent = '~' + tokensText(r.tokens) + ' tokens · ' + human(r.dumpBytes);
     } else {
       el.stats.hidden = true;
-      statMeta.textContent = busyPack && S.progress && S.progress.total ? S.progress.done + ' of ' + S.progress.total + ' files' : '';
+      statMeta.textContent = busyPack && S.progress && S.progress.total ? S.progress.done + ' of ' + S.progress.total + ' files'
+        : tone === 'idle' && S.files.length ? plural(n, 'file') + ' ticked · ' + human(selectedBytes()) : '';
     }
   }
 

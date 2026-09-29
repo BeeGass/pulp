@@ -102,6 +102,9 @@
   padding: 0 16px 12px;
   flex: 0 0 auto;
 }
+.mill-alert .p-note {
+  background: color-mix(in srgb, var(--c) 10%, var(--panel));
+}
 
 /* panes */
 .mill-grid {
@@ -352,6 +355,9 @@ span.mill-twist {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+.mill-empty-keys .p-key {
+  flex: 1 1 auto;
 }
 .mill-fine {
   display: flex;
@@ -785,6 +791,9 @@ span.mill-twist {
   }
   .mill-run .p-key.is-block {
     width: auto;
+  }
+  .mill-run .p-key.is-lg {
+    min-height: var(--key);
   }
   .mill-stats,
   .mill-why {
