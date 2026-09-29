@@ -552,6 +552,26 @@ test('truncated: a clipped dump says so, and Copy and Download fetch the whole d
   equal(await saved.at(-1).text, 'THE WHOLE DUMP', 'the saved file is the whole dump');
 });
 
+test('truncated: a dump over the copy limit asks for a Download, and Copy fetches nothing', async () => {
+  const { a, m } = await pulped({ copyLimit: 256 * 1024 * 1024 }, { previewTruncated: true, dumpBytes: 300 * 1024 * 1024 });
+  const copies = clipboard.length;
+  copyKey(m).click();
+  await flush();
+  const alert = alertBox(m);
+  ok(!alert.hidden, 'the alert shows');
+  match(text(alert), /300\.0 MiB, too large to copy\. Download it instead\./);
+  equal(alert.querySelector('[data-tone]').dataset.tone, 'warn');
+  equal(alert.querySelector('[data-act="report-alert"]'), null, 'nothing to report');
+  equal(a.count('fullDump'), 0, 'Copy never asks for the whole dump');
+  equal(clipboard.length, copies, 'nothing reaches the clipboard');
+
+  const saves = saved.length;
+  m.$('.mill-outkeys [data-act="download"]').click();
+  (await a.next('fullDump')).resolve('THE WHOLE DUMP');
+  await waitFor(() => saved.length > saves, { what: 'the download' });
+  equal(await saved.at(-1).text, 'THE WHOLE DUMP', 'Download still saves the whole dump');
+});
+
 test('progress: files read show while the packer reports them', async () => {
   const { a, m } = await sampled({ progress: true });
   pulpKey(m).click();

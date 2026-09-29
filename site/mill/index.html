@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#ebe9e3" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#111214" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>pulp mill — in-browser LLM packer</title>
   <meta name="description" content="In-browser Pulp mill: pack a local folder into one LLM-ready dump with WebAssembly. Files stay in the tab — nothing is uploaded.">
@@ -28,6 +29,7 @@
   <link rel="stylesheet" href="/mill/mill.css">
   <link rel="modulepreload" href="/mill/mill.js">
   <link rel="modulepreload" href="/mill/pkg/pulp_wasm.js">
+  <link rel="modulepreload" href="/mill/worker.js">
 </head>
 <body>
   <div id="mill"></div>
@@ -35,12 +37,25 @@
   <input id="fileInput" type="file" multiple hidden>
   <noscript><p style="padding:24px">The browser mill needs JavaScript and WebAssembly. The CLI works without either: <code>cargo install --git https://github.com/BeeGass/pulp --locked</code></p></noscript>
   <script type="module">
-    import init, { scan_files, pack_files, render_result, artifact_as, drop_result, preview_file, pulp_version, smoke_pack, format_tree } from '/mill/pkg/pulp_wasm.js';
+    import { render_result, drop_result, preview_file, format_tree, scan_keep, pulp_version, smoke_pack, heavy_kind, extract_timeout_ms } from '/mill/pkg/pulp_wasm.js';
+    // The worker's code, for the build it shipped with and for this thread when workers cannot start.
+    import * as here from '/mill/worker.js';
     import { mountMill } from '/mill/mill.js';
 
+    const WORKER = '/mill/worker.js';
+    const RELOAD = 'The mill was updated while this page was open. Reload the page, then pulp again.';
+
     let version = 'unknown';
-    const grant = { files: new Map(), label: '' };
-    const ready = init().then(() => {
+    // `root` is the folder the scan found every granted path under ('.' for
+    // loose files or several folders). Ids keep the granted path; the scan
+    // and the dump name files from inside the root, as `pulp ui` does. `kinds`
+    // holds the kind the scan found for each id, by name or by leading bytes,
+    // and `truncated` whether the scan stopped at its budgets.
+    const grant = { files: new Map(), label: '', root: '', kinds: new Map(), truncated: false };
+    /** The packer, compiled once. Workers of this build instantiate it without fetching it again. */
+    let compiled = null;
+    const ready = here.ensure().then((module) => {
+      compiled = module;
       version = pulp_version();
       const smoke = smoke_pack();
       if (!smoke || !(smoke.files_extracted > 0)) throw new Error('the in-browser packer failed its self-check');
@@ -50,136 +65,179 @@
       return Object.assign(new Error('cancelled'), { cancelled: true });
     }
 
+    /** Let the page paint and take input between slices of work on this thread. */
+    function yieldToPage() {
+      if (globalThis.scheduler && typeof scheduler.yield === 'function') return scheduler.yield();
+      return new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
     /* ---------- workers ----------
-       Each pack runs in its own worker. The worker behind the dump on screen
-       keeps that result, so a format change redraws it there and cancelling a
-       newer pack never loses it. Previews share one more worker; they store
-       nothing, but a failed preview replaces that worker so the next one
-       starts clean. */
+       Scans, previews, and packs run in workers (site/mill/worker.js), so the
+       page stays responsive. Each pack gets its own worker, and the worker
+       behind the dump on screen keeps that result: a format change redraws it
+       there, and cancelling a newer pack never loses it. A worker whose
+       instance panicked, trapped, or ran out of stack is dropped, and the next
+       job starts a fresh one. Where workers cannot start at all, the same code
+       runs on this thread, except parsers that could hang. */
+    let noWorkers = false;
+    /** Set once a parser crashed on this thread; its instance is spent. */
+    let spentHere = '';
+
+    /** Run `fn` against the packer on this thread, which a crash leaves unusable. */
+    async function onPage(fn) {
+      if (spentHere) throw new Error(spentHere);
+      try {
+        return await fn();
+      } catch (err) {
+        if (here.isPoisoned(err)) spentHere = 'The packer on this page stopped after a parser crashed. Reload the page to pulp again.';
+        throw err;
+      }
+    }
+
+    function workerError(msg) {
+      let text = msg.error || 'the packer failed';
+      // A worker from another deploy of the mill than this page: it lacks a
+      // message, or cannot load or link a packer.
+      if (msg.stale || /^unknown message /.test(text)) text = RELOAD;
+      else if (text === 'unreachable') text = 'The packer ran out of memory or crashed. Tick fewer or smaller files, or use the CLI for a folder this large.';
+      return Object.assign(new Error(text), { poisoned: !!msg.poisoned, crash: msg.crash || '' });
+    }
+
     function lane() {
       let worker = null;
+      // Whether the worker ever answered: one that never did cannot start here.
+      let started = false;
       let seq = 0;
+      // Set once the lane is to stop when its last call is answered.
+      let retiring = false;
       const pending = new Map();
-      const fail = (err) => {
+      const drop = (err) => {
+        if (worker) worker.terminate();
+        worker = null;
         for (const job of pending.values()) job.reject(err);
         pending.clear();
       };
       function ensure() {
         if (worker) return worker;
-        worker = new Worker('/mill/worker.js', { type: 'module' });
-        worker.onmessage = (ev) => {
+        started = false;
+        const w = new Worker(WORKER, { type: 'module' });
+        w.onmessage = (ev) => {
+          if (worker !== w) return;
+          started = true;
           const msg = ev.data || {};
           const job = pending.get(msg.id);
           if (!job) return;
+          if (msg.progress) {
+            if (job.onProgress) job.onProgress(msg.progress[0], msg.progress[1]);
+            return;
+          }
           pending.delete(msg.id);
-          if (msg.ok) job.resolve(msg.result);
-          else job.reject(new Error(msg.error || 'the packer failed'));
+          if (msg.ok) {
+            job.resolve(msg.result);
+          } else {
+            const err = workerError(msg);
+            job.reject(err);
+            if (msg.poisoned) drop(err);
+          }
+          if (retiring && !pending.size) drop(cancelled());
         };
-        worker.onerror = (ev) => {
+        w.onerror = (ev) => {
           ev.preventDefault();
-          worker.terminate();
-          worker = null;
-          fail(Object.assign(new Error(ev.message || 'the packer worker crashed'), { crashed: true }));
+          if (worker !== w) return;
+          const text = started
+            ? 'The packer stopped before it finished; it may have run out of memory. Tick fewer or smaller files, or use the CLI for a folder this large.'
+            : (ev.message || 'the packer worker could not start');
+          drop(Object.assign(new Error(text), { crashed: true, started }));
         };
-        return worker;
+        worker = w;
+        return w;
       }
       return {
         idle: () => pending.size === 0,
-        call(type, payload, transfer) {
+        call(type, payload, onProgress) {
           return new Promise((resolve, reject) => {
             let w;
             try {
               w = ensure();
             } catch (err) {
-              reject(Object.assign(err, { crashed: true }));
+              reject(Object.assign(err, { crashed: true, started: false }));
               return;
             }
             const id = ++seq;
-            pending.set(id, { resolve, reject });
-            w.postMessage({ type, id, payload }, transfer || []);
+            pending.set(id, { resolve, reject, onProgress });
+            // The worker takes the compiled packer only if it is of the same build.
+            w.postMessage({ type, id, payload, module: compiled, build: here.BUILD });
           });
         },
         stop(err) {
-          if (worker) worker.terminate();
-          worker = null;
-          fail(err || cancelled());
+          drop(err || cancelled());
+        },
+        /** Stop once the calls still running, such as a Download fetching the whole dump, are answered. */
+        retire() {
+          retiring = true;
+          if (!pending.size) drop(cancelled());
         },
       };
+    }
+
+    /** Run a job in the worker `where()` gives, or with `local()` on this thread when workers cannot start. */
+    async function inWorker(where, type, payload, local, onProgress) {
+      if (!noWorkers) {
+        try {
+          return { via: 'worker', result: await where().call(type, payload, onProgress) };
+        } catch (err) {
+          if (!err || !err.crashed || err.started) throw err;
+          noWorkers = true;
+          console.warn('the mill cannot start workers here; working on the page thread', err);
+        }
+      }
+      return { via: 'main', result: await onPage(local) };
     }
 
     let jobLane = null;
     let resultLane = null;
     let mainResult = '';
+    let scanLane = null;
     let previewLane = null;
     let cancelGen = 0;
 
-    /** Pack in a worker; only a worker that cannot run falls back to this thread. */
-    async function packOn(where, input) {
-      try {
-        const transfer = input.files.map((f) => f.bytes.buffer);
-        return Object.assign(await where.call('pack', input, transfer), { via: 'worker' });
-      } catch (err) {
-        if (!err || !err.crashed) throw err;
-        console.warn('packer worker unavailable, packing on the main thread', err);
-        const files = await Promise.all(input.files.map(async (f) => {
-          const blob = grant.files.get(f.relative);
-          return Object.assign({}, f, { bytes: blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array(0) });
-        }));
-        return Object.assign(pack_files(Object.assign({}, input, { files })), { via: 'main' });
-      }
+    function scanWorker() {
+      if (!scanLane) scanLane = lane();
+      return scanLane;
     }
 
-    /** Preview in its worker; only a worker that cannot run falls back to this thread. */
-    async function previewOn(input, blob) {
-      if (!previewLane) previewLane = lane();
-      const where = previewLane;
-      try {
-        return await where.call('preview', input, [input.bytes.buffer]);
-      } catch (err) {
-        if (err && err.crashed) {
-          console.warn('preview worker unavailable, previewing on the main thread', err);
-          return preview_file(Object.assign({}, input, { bytes: new Uint8Array(await blob.arrayBuffer()) }));
-        }
-        // An extractor that failed mid-file can leave its WASM instance unusable.
-        if (previewLane === where && where.idle()) {
-          where.stop();
-          previewLane = null;
-        }
-        throw err;
-      }
-    }
-
-    /** Free the result on screen before a new one replaces it. */
+    /** Free the result on screen before a new one replaces it; a call still running on it finishes first. */
     function retire() {
-      if (resultLane) resultLane.stop();
+      if (resultLane) resultLane.retire();
       resultLane = null;
-      if (mainResult) drop_result(mainResult);
+      if (mainResult && !spentHere) drop_result(mainResult);
       mainResult = '';
     }
 
     /* ---------- granting files ---------- */
-    async function mapPool(items, limit, fn) {
-      const out = new Array(items.length);
-      let next = 0;
-      async function run() {
-        while (next < items.length) {
-          const i = next++;
-          out[i] = await fn(items[i], i);
-        }
-      }
-      await Promise.all(Array.from({ length: Math.min(limit, Math.max(1, items.length)) }, run));
-      return out;
+
+    /**
+     * A path as the packer names it, without a leading `./` or `/`. Browsers
+     * separate granted paths with `/`, so a `\` belongs to a file name.
+     */
+    function cleanPath(path) {
+      return String(path || '').replace(/^(?:\.\/)+/, '').replace(/^\/+/, '');
     }
 
     /** Replace the grant only when the new selection has files in it. */
     function take(entries, label) {
       const next = new Map();
       for (const e of entries) {
-        const rel = String(e.relative || '').replace(/^\.?\//, '');
+        const rel = cleanPath(e.relative);
         if (rel) next.set(rel, e.file);
       }
       if (!next.size) return { cancelled: true, empty: true };
+      // The dump of the old grant goes with it.
+      retire();
       grant.files = next;
+      grant.root = '';
+      grant.kinds = new Map();
+      grant.truncated = false;
       grant.label = label + ' · ' + next.size + (next.size === 1 ? ' file' : ' files') + ' in this tab';
       return { label: grant.label };
     }
@@ -211,6 +269,19 @@
       });
     }
 
+    /**
+     * A picked file's path in its folder. Chrome writes a `\` in a file name as
+     * `/` in webkitRelativePath, while the name keeps it; the name wins.
+     */
+    function pickedPath(file) {
+      const rel = file.webkitRelativePath || file.name;
+      const cuts = (file.name.match(/\\/g) || []).length;
+      if (!cuts) return rel;
+      const parts = rel.split('/');
+      if (parts.length <= cuts + 1 || parts.slice(-(cuts + 1)).join('/') !== file.name.replace(/\\/g, '/')) return rel;
+      return parts.slice(0, parts.length - (cuts + 1)).concat(file.name).join('/');
+    }
+
     function folderLabel(files) {
       const first = files.find((f) => f.webkitRelativePath);
       return first ? first.webkitRelativePath.split('/')[0] : 'chosen files';
@@ -220,18 +291,43 @@
       return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
     }
 
-    async function walkEntry(entry, out) {
+    /**
+     * Collect the files under a dropped entry, named from the entry names down
+     * from the drop (a name may hold a `\`). An entry that cannot be opened (a
+     * broken link, a folder without read permission) is left out and noted in
+     * `errors`, as the folder picker and `pulp ui` leave such entries out.
+     */
+    async function walkEntry(entry, out, errors, parent) {
+      const path = parent ? parent + '/' + entry.name : entry.name;
       if (entry.isFile) {
-        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
-        out.push({ relative: entry.fullPath.replace(/^\//, ''), file });
+        try {
+          const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+          out.push({ relative: path, file });
+        } catch (err) {
+          errors.push(err);
+        }
         return;
       }
       if (!entry.isDirectory) return;
-      const reader = entry.createReader();
+      let reader;
+      try {
+        reader = entry.createReader();
+      } catch (err) {
+        errors.push(err);
+        return;
+      }
       for (;;) {
-        const batch = await readEntries(reader);
+        let batch;
+        try {
+          batch = await readEntries(reader);
+        } catch (err) {
+          errors.push(err);
+          return;
+        }
         if (!batch.length) break;
-        for (const child of batch) await walkEntry(child, out);
+        // A folder's files open together; its subfolders one after another.
+        await Promise.all(batch.filter((e) => e.isFile).map((e) => walkEntry(e, out, errors, path)));
+        for (const child of batch) if (!child.isFile) await walkEntry(child, out, errors, path);
       }
     }
 
@@ -243,10 +339,9 @@
     }
 
     /* ---------- packing ---------- */
-    function packInput(r, files, selected) {
+    function packInput(r, files) {
       return {
         files,
-        selected,
         format: r.format,
         archives: r.archives,
         binaries: false,
@@ -255,21 +350,9 @@
         hidden: r.hidden,
         no_tree: !r.tree,
         exclude: [],
+        root: grant.root,
+        truncated: grant.truncated,
       };
-    }
-
-    async function readSelected(r, onProgress, gen) {
-      const jobs = [];
-      for (const id of r.selected) if (grant.files.has(id)) jobs.push([id, grant.files.get(id)]);
-      if (!jobs.length) throw new Error('none of the ticked files can be read in this tab any more; choose the folder again');
-      let done = 0;
-      return mapPool(jobs, 8, async ([relative, file]) => {
-        if (gen !== cancelGen) throw cancelled();
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        done++;
-        if (onProgress && gen === cancelGen) onProgress(done, jobs.length);
-        return { relative, id: relative, bytes };
-      });
     }
 
     function normalize(d, via) {
@@ -280,7 +363,7 @@
         filesExtracted: d.files_extracted || 0,
         filesSkipped: d.files_skipped || 0,
         tokens: d.tokens_est || 0,
-        elapsedMs: d.elapsed_ms || 0,
+        elapsedMs: Number(d.elapsed_ms) || 0,
         truncated: !!d.truncated,
         cancelled: !!d.cancelled,
         previewTruncated: !!d.preview_truncated,
@@ -295,6 +378,23 @@
       return { result_id: resultId, format: r.format, no_tree: !r.tree };
     }
 
+    /** A dump too long for one string. Download saves it as it is; copying it fails with a reason. */
+    class LargeDump extends Blob {
+      toString() {
+        throw new Error('This dump is ' + Math.round(this.size / 1048576) + ' MiB, too large to copy. Download it instead.');
+      }
+    }
+
+    function asDump(out) {
+      return typeof out === 'string' ? out : new LargeDump([out], { type: out.type || 'text/plain;charset=utf-8' });
+    }
+
+    /** A preview for a file whose parser was lost, worded as a pack would word it. */
+    async function lostPreview(file, failure) {
+      const out = await onPage(() => preview_file({ relative: file.id || file.relative, kind: file.kind, size: file.size || 0, failure }));
+      return { text: '', truncated: false, status: out.status, message: out.message };
+    }
+
     const mill = mountMill(document.getElementById('mill'), {
       surface: 'browser',
       surfaceName: 'browser mill',
@@ -303,12 +403,12 @@
       privacy: 'files stay in this tab',
       privacyLong: 'Files stay in this tab. Nothing is uploaded; packing runs in WebAssembly on this device.',
       footer: 'wasm · runs in this tab',
-      caps: { source: 'grant', pickFiles: true, drop: true, gitignore: false, rerender: true, sample: true, progress: true },
+      caps: { source: 'grant', pickFiles: true, drop: true, gitignore: false, rerender: true, sample: true, progress: true, copyLimit: here.STRING_BYTES },
       async browse() {
         const files = await pick(document.getElementById('dirInput'));
         if (files === undefined) return undefined;
         if (!files) return { cancelled: true };
-        return take(files.map((file) => ({ relative: file.webkitRelativePath || file.name, file })), folderLabel(files));
+        return take(files.map((file) => ({ relative: pickedPath(file), file })), folderLabel(files));
       },
       async pickFiles() {
         const files = await pick(document.getElementById('fileInput'));
@@ -317,6 +417,7 @@
         return take(files.map((file) => ({ relative: file.name, file })), 'chosen files');
       },
       drop(dataTransfer) {
+        // Entries are only available while the drop event runs.
         const entries = [...(dataTransfer.items || [])]
           .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
           .filter(Boolean);
@@ -326,15 +427,14 @@
           if (!entries.length) return takeLoose();
           const dirs = entries.filter((e) => e.isDirectory).map((e) => e.name);
           const out = [];
-          try {
-            for (const entry of entries) await walkEntry(entry, out);
-          } catch (err) {
-            // WebKit cannot open entries for files that have no path on disk, but
-            // it still lists them in dataTransfer.files. A folder has no such fallback.
-            if (dirs.length || !loose.length) throw err;
-            return takeLoose();
+          const errors = [];
+          for (const entry of entries) await walkEntry(entry, out, errors, '');
+          if (!out.length) {
+            // WebKit cannot open entries for files that have no path on disk, but it
+            // still lists them in dataTransfer.files. A folder has no such fallback.
+            if (!dirs.length && loose.length) return takeLoose();
+            if (errors.length) throw errors[0];
           }
-          if (!out.length && !dirs.length && loose.length) return takeLoose();
           return take(out, dirs.length === 1 && entries.length === 1 ? dirs[0] : 'dropped files');
         })();
       },
@@ -350,35 +450,47 @@
       },
       async scan(o) {
         await ready;
-        const metas = [...grant.files.entries()].map(([relative, file]) => ({ relative, size: file.size }));
-        const opts = { hidden: o.hidden, archives: o.archives, exclude: [] };
-        let data = scan_files(Object.assign({ files: metas }, opts));
-        const unknown = (data.files || []).filter((f) => f.kind === 'unknown');
-        if (unknown.length) {
-          const heads = await mapPool(unknown, 24, async (f) => {
-            const file = grant.files.get(f.relative);
-            const buf = file ? await file.slice(0, 8192).arrayBuffer() : new ArrayBuffer(0);
-            return { relative: f.relative, size: f.size || 0, head: new Uint8Array(buf) };
-          });
-          const byRel = new Map(heads.map((h) => [h.relative, h]));
-          data = scan_files(Object.assign({ files: metas.map((m) => byRel.get(m.relative) || m) }, opts));
+        const opts = { hidden: o.hidden, archives: o.archives };
+        // The filters need only the paths. Keep what they keep before touching any file.
+        const relatives = [...grant.files.keys()];
+        const request = Object.assign({ relatives }, opts);
+        const { result: kept } = await inWorker(scanWorker, 'scan_keep', request, async () => scan_keep(request));
+        const files = [...grant.files.values()];
+        const entries = [];
+        for (let k = 0; k < kept.keep.length; k++) {
+          const i = kept.keep[k];
+          // The first look at a picked file's size waits on the browser, about
+          // a tenth of a millisecond each, so sizes are taken a slice at a time.
+          void files[i].size;
+          entries.push([relatives[i], files[i]]);
+          if (k % 1000 === 999) await yieldToPage();
         }
+        const payload = Object.assign({ entries, root: kept.root }, opts);
+        const { result: data } = await inWorker(scanWorker, 'scan', payload, async () => here.scanGrant(payload));
+        grant.root = data.root || '';
+        grant.kinds = new Map((data.files || []).map((f) => [f.id, f.kind]));
+        grant.truncated = !!data.truncated;
         return { files: data.files || [], bytes: data.bytes || 0, truncated: !!data.truncated, label: grant.label };
       },
       async pack(r, hooks) {
         const gen = cancelGen;
         await ready;
         if (gen !== cancelGen) throw cancelled();
-        const files = await readSelected(r, hooks && hooks.onProgress, gen);
-        if (gen !== cancelGen) throw cancelled();
-        // The files are read; the worker extracts them in one call, so the bar
-        // turns indeterminate rather than sitting full.
-        if (hooks && hooks.onProgress) hooks.onProgress(0, 0);
+        const files = [];
+        for (const id of r.selected) {
+          const file = grant.files.get(id);
+          if (file) files.push({ id, relative: id, kind: grant.kinds.get(id), file });
+        }
+        if (!files.length) throw new Error('none of the ticked files can be read in this tab any more; choose the folder again');
+        // The worker reports files extracted, as `pulp ui` does.
+        const onProgress = hooks && hooks.onProgress ? hooks.onProgress : null;
+        const input = packInput(r, files);
         const job = lane();
         jobLane = job;
         let out;
         try {
-          out = await packOn(job, packInput(r, files, files.map((f) => f.id)));
+          out = await inWorker(() => job, 'pack_grant', input,
+            async () => here.packGrant(input, onProgress || (() => {}), false, () => gen !== cancelGen), onProgress);
         } catch (err) {
           job.stop();
           throw err;
@@ -394,42 +506,72 @@
           resultLane = job;
         } else {
           job.stop();
-          mainResult = out.result_id;
+          mainResult = out.result.result_id;
         }
-        return normalize(out, out.via);
+        return normalize(out.result, out.via);
       },
       async render(r) {
         await ready;
         const input = renderInput(r.resultId, r);
-        if (mainResult && mainResult === r.resultId) return normalize(render_result(input), 'main');
+        if (mainResult && mainResult === r.resultId) return normalize(await onPage(() => render_result(input)), 'main');
         if (!resultLane) throw new Error('the dump is no longer in memory; pulp again');
         return normalize(await resultLane.call('render', input), 'worker');
       },
       async preview(file, r) {
         await ready;
-        const blob = grant.files.get(file.relative);
+        const id = file.id || file.relative;
+        const blob = grant.files.get(id);
         if (!blob) throw new Error('this file is no longer available in the tab');
-        const out = await previewOn({
-          relative: file.relative,
-          bytes: new Uint8Array(await blob.arrayBuffer()),
-          source: r.source,
-          notebook_outputs: r.notebook,
-          archives: r.archives,
-          hidden: r.hidden,
-        }, blob);
+        const kind = file.kind || grant.kinds.get(id) || '';
+        const payload = { relative: id, kind, file: blob, root: grant.root, source: r.source, notebook_outputs: r.notebook, archives: r.archives, hidden: r.hidden };
+        // A preview still running is for a file no longer on screen: start this one at once.
+        if (previewLane && !previewLane.idle()) {
+          previewLane.stop();
+          previewLane = null;
+        }
+        if (!previewLane) previewLane = lane();
+        const where = previewLane;
+        let timer = 0;
+        // A parser `pulp ui` would run in a child process gets its time limit.
+        const limit = new Promise((resolve, reject) => {
+          if (!heavy_kind(kind)) return;
+          timer = setTimeout(() => reject(Object.assign(new Error('the preview timed out'), { timedOut: true })), extract_timeout_ms());
+        });
+        let out;
+        try {
+          ({ result: out } = await Promise.race([
+            inWorker(() => where, 'preview_grant', payload, async () => here.previewGrant(payload)),
+            limit,
+          ]));
+        } catch (err) {
+          if (err && err.timedOut) {
+            where.stop();
+            if (previewLane === where) previewLane = null;
+            return lostPreview(file, { reason: 'timeout', message: '' });
+          }
+          if (err && err.poisoned && err.crash) return lostPreview(file, { reason: 'error', message: err.crash });
+          throw err;
+        } finally {
+          clearTimeout(timer);
+        }
         return { text: out.text || '', truncated: !!out.truncated, status: out.status, message: out.message };
       },
       async tree(r) {
         await ready;
-        const paths = r.selected.filter((id) => grant.files.has(id));
-        const text = format_tree({ paths, format: r.format });
+        // The map names files from inside the root, under its name, as the dump does.
+        const inner = grant.root && grant.root !== '.' ? grant.root + '/' : '';
+        const paths = r.selected
+          .filter((id) => grant.files.has(id))
+          .map((id) => (inner && id.startsWith(inner) ? id.slice(inner.length) : id));
+        const input = { paths, root: grant.root, format: r.format };
+        const { result: text } = await inWorker(scanWorker, 'tree', input, async () => format_tree(input));
         return { text, filename: 'pulp-tree.' + r.format };
       },
       async fullDump(res, r) {
         const input = renderInput(res.resultId, r);
-        if (mainResult && mainResult === res.resultId) return artifact_as(input);
+        if (mainResult && mainResult === res.resultId) return asDump(await onPage(() => here.dumpOf(input)));
         if (!resultLane) throw new Error('the full dump is no longer in memory; pulp again');
-        return resultLane.call('artifact_as', input);
+        return asDump(await resultLane.call('dump', input));
       },
       async cancel() {
         cancelGen++;

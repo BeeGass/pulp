@@ -914,7 +914,8 @@ fn render_pack_tree(opts: &Options, files: &[PackedFile]) -> String {
 /// One root is labelled with its directory's name. A file named as the root
 /// is drawn inside its directory (`src/` then `└── main.rs`), not as a
 /// directory of its own. `..` and `/` name the directory they resolve to.
-pub(crate) fn tree_label(roots: &[PathBuf]) -> String {
+#[must_use]
+pub fn tree_label(roots: &[PathBuf]) -> String {
     match roots {
         [root] => {
             let dir = if root.is_file() {

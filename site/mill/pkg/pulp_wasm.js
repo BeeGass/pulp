@@ -51,6 +51,21 @@ export function artifact_as(input) {
 }
 
 /**
+ * Full dump for a stored result, `{ result_id, format, no_tree }`, passed to
+ * `sink` as `Uint8Array` chunks of UTF-8. Returns the dump's length in bytes.
+ * @param {any} input
+ * @param {Function} sink
+ * @returns {number}
+ */
+export function artifact_chunks(input, sink) {
+    const ret = wasm.artifact_chunks(input, sink);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0];
+}
+
+/**
  * Forget a stored result. Returns whether it was still held.
  * @param {string} result_id
  * @returns {boolean}
@@ -60,6 +75,36 @@ export function drop_result(result_id) {
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.drop_result(ptr0, len0);
     return ret !== 0;
+}
+
+/**
+ * Extract a batch of a stepped pack: `{ root, files: [{ relative, id?, size,
+ * kind?, bytes | failure }], ...settings }`. Returns the batch as JSON bytes
+ * (a `Uint8Array`) for [`pack_add`]: an archive can expand to more text than
+ * one JS string holds. A file with a `failure` ({ reason, message }) gets the
+ * note its failure calls for. Stores nothing, so it can run in a spare
+ * instance.
+ * @param {any} input
+ * @returns {Uint8Array}
+ */
+export function extract_files(input) {
+    const ret = wasm.extract_files(input);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v1;
+}
+
+/**
+ * How long the mill gives one [`heavy_kind`] file before it stops its
+ * extractor, in milliseconds: `pulp ui`'s limit for a child process.
+ * @returns {number}
+ */
+export function extract_timeout_ms() {
+    const ret = wasm.extract_timeout_ms();
+    return ret >>> 0;
 }
 
 /**
@@ -87,6 +132,69 @@ export function format_tree(input) {
 }
 
 /**
+ * Whether files of `kind` (a label such as `pdf` or `docx`, as a scan
+ * reports it) have the parsers `pulp ui` runs in a child process with a time
+ * limit. The mill runs them on their own, under [`extract_timeout_ms`].
+ * @param {string} kind
+ * @returns {boolean}
+ */
+export function heavy_kind(kind) {
+    const ptr0 = passStringToWasm0(kind, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.heavy_kind(ptr0, len0);
+    return ret !== 0;
+}
+
+/**
+ * Whether extracting a file of `kind` can run a parser [`heavy_kind`]
+ * covers: the file is of a heavy kind, or it is an archive a pack with
+ * `archives` on expands, whose members may be. The page never runs such a
+ * parser on its own thread, where nothing could stop one that hangs.
+ * @param {string} kind
+ * @param {boolean} archives
+ * @returns {boolean}
+ */
+export function needs_worker(kind, archives) {
+    const ptr0 = passStringToWasm0(kind, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.needs_worker(ptr0, len0, archives);
+    return ret !== 0;
+}
+
+/**
+ * Add a batch from [`extract_files`], its JSON bytes, to the pack
+ * [`pack_begin`] started. A batch that fails to add leaves the pack as it
+ * was, so its files can be noted instead.
+ * @param {Uint8Array} json
+ */
+export function pack_add(json) {
+    const ptr0 = passArray8ToWasm0(json, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.pack_add(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Start a stepped pack of `{ files: [{ relative, id?, size, kind? }],
+ * truncated?, ...settings }`, where `kind` is the scan's kind for the file
+ * and `truncated` says the scan was cut at its budgets. Returns the grant root
+ * and the files to extract, in order, with their names inside the root, their
+ * kinds, and whether each goes alone. The files are ticked already; nothing
+ * else is selected.
+ * @param {any} input
+ * @returns {any}
+ */
+export function pack_begin(input) {
+    const ret = wasm.pack_begin(input);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * Pack selected files. Each file is `{ relative, bytes: Uint8Array, id? }`.
  *
  * The extracted files stay in this instance under `result_id`, so
@@ -103,9 +211,24 @@ export function pack_files(input) {
 }
 
 /**
+ * End the pack [`pack_begin`] started: store it as a result and return what
+ * [`pack_files`] returns.
+ * @returns {any}
+ */
+export function pack_finish() {
+    const ret = wasm.pack_finish();
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * Text pulp extracts from one file, `{ relative, bytes: Uint8Array }` plus the
  * pack settings that change it (`source`, `notebook_outputs`, `archives`,
- * `hidden`, ...), capped at 32 KiB. Stores nothing.
+ * `hidden`, ...), capped at 32 KiB. A file the browser could not read comes
+ * as `{ relative, size, failure: { reason, message } }` and gets the status
+ * and message a pack would give it. Stores nothing.
  * @param {any} input
  * @returns {any}
  */
@@ -149,6 +272,7 @@ export function render_result(input) {
 
 /**
  * Classify a file list without reading contents (extension / name based).
+ * A file with a `head` is also classified by its leading bytes.
  * @param {any} input
  * @returns {any}
  */
@@ -158,6 +282,37 @@ export function scan_files(input) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Which of a grant's paths the scan's filters keep: `{ relatives, hidden,
+ * archives }` to `{ root, keep }`. Reads no file, so a page can learn which
+ * picked files it needs the size of before it asks the browser for any.
+ * @param {any} input
+ * @returns {any}
+ */
+export function scan_keep(input) {
+    const ret = wasm.scan_keep(input);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Indices of the files in a scan input that [`scan_files`] would list but
+ * cannot classify by name. Read their leading bytes into `head` and scan again.
+ * @param {any} input
+ * @returns {Uint32Array}
+ */
+export function scan_unknown(input) {
+    const ret = wasm.scan_unknown(input);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v1;
 }
 
 /**
@@ -246,6 +401,9 @@ function __wbg_get_imports() {
             getDataViewMemory0().setFloat64(arg0 + 8 * 1, isLikeNone(ret) ? 0 : ret, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
         },
+        __wbg___wbindgen_rethrow_dba7bb2caa14ba21: function(arg0) {
+            throw arg0;
+        },
         __wbg___wbindgen_string_get_92ab86bb19cbc12f: function(arg0, arg1) {
             const obj = arg1;
             const ret = typeof(obj) === 'string' ? obj : undefined;
@@ -259,6 +417,10 @@ function __wbg_get_imports() {
         },
         __wbg_call_269c5566fbede3eb: function() { return handleError(function (arg0, arg1) {
             const ret = arg0.call(arg1);
+            return ret;
+        }, arguments); },
+        __wbg_call_6bcf8d3e20937e46: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = arg0.call(arg1, arg2);
             return ret;
         }, arguments); },
         __wbg_done_cffed884d87aa22e: function(arg0) {
@@ -342,12 +504,20 @@ function __wbg_get_imports() {
             const ret = new Error();
             return ret;
         },
+        __wbg_new_a32a1ab6c6655abe: function(arg0, arg1) {
+            const ret = new Error(getStringFromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg_new_bebc3f4757acf305: function() {
             const ret = new Object();
             return ret;
         },
         __wbg_new_ffa92086ea89f79c: function() {
             const ret = new Array();
+            return ret;
+        },
+        __wbg_new_from_slice_4ee02165f9de919e: function(arg0, arg1) {
+            const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
         },
         __wbg_next_95053e306b1c3aed: function(arg0) {
@@ -371,6 +541,13 @@ function __wbg_get_imports() {
         __wbg_set_6be42768c690e380: function(arg0, arg1, arg2) {
             arg0[arg1] = arg2;
         },
+        __wbg_set_a377297433dfea63: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = Reflect.set(arg0, arg1, arg2);
+            return ret;
+        }, arguments); },
+        __wbg_set_name_6e2a5da46a9ae1e7: function(arg0, arg1, arg2) {
+            arg0.name = getStringFromWasm0(arg1, arg2);
+        },
         __wbg_stack_3b0d974bbf31e44f: function(arg0, arg1) {
             const ret = arg1.stack;
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -392,12 +569,7 @@ function __wbg_get_imports() {
             const ret = getStringFromWasm0(arg0, arg1);
             return ret;
         },
-        __wbindgen_generic_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `U128 -> Externref`.
-            const ret = (BigInt.asUintN(64, arg0) | (BigInt.asUintN(64, arg1) << BigInt(64)));
-            return ret;
-        },
-        __wbindgen_generic_0000000000000004: function(arg0) {
+        __wbindgen_generic_0000000000000003: function(arg0) {
             // Cast intrinsic for `U64 -> Externref`.
             const ret = BigInt.asUintN(64, arg0);
             return ret;
@@ -489,6 +661,11 @@ function debugString(val) {
     return className;
 }
 
+function getArrayU32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
@@ -504,6 +681,14 @@ function getDataViewMemory0() {
 
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
+}
+
+let cachedUint32ArrayMemory0 = null;
+function getUint32ArrayMemory0() {
+    if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
+        cachedUint32ArrayMemory0 = new Uint32Array(wasm.memory.buffer);
+    }
+    return cachedUint32ArrayMemory0;
 }
 
 let cachedUint8ArrayMemory0 = null;
@@ -525,6 +710,13 @@ function handleError(f, args) {
 
 function isLikeNone(x) {
     return x === undefined || x === null;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {
@@ -605,6 +797,7 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedDataViewMemory0 = null;
+    cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

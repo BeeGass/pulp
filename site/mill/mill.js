@@ -225,6 +225,8 @@ export function mountMill(root, adapter, options) {
     rerender: false,
     sample: false,
     progress: false,
+    // Longest dump, in bytes, that Copy asks the adapter for; 0 for no limit.
+    copyLimit: 0,
   }, adapter.caps || {});
 
   const canDrop = caps.drop && !(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
@@ -1961,6 +1963,12 @@ export function mountMill(root, adapter, options) {
   async function doCopy() {
     const r = S.result;
     if (!r || isStale()) return;
+    // A dump longer than the adapter can hand over as one string cannot be
+    // copied. Say so before any clipboard call, which could take it as a Blob.
+    if (caps.copyLimit && r.dumpBytes > caps.copyLimit) {
+      showAlert('Copy failed.', 'This dump is ' + human(r.dumpBytes) + ', too large to copy. Download it instead.', false, 'warn');
+      return;
+    }
     try {
       // No await before the write: the text, or its promise, goes over inside the click.
       await writeClipboard(r.previewTruncated ? adapter.fullDump(r, packRequest()) : r.dump);

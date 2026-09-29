@@ -132,9 +132,10 @@ pub fn split_grant_root(paths: &[String]) -> (String, Vec<String>) {
     (label, stripped)
 }
 
+/// A granted path's parts. Browsers separate a granted path with `/`, so a
+/// `\` is part of a name, as the walk and the directory map keep it.
 fn path_parts(path: &str) -> Vec<String> {
-    path.replace('\\', "/")
-        .split('/')
+    path.split('/')
         .filter(|part| !part.is_empty() && *part != "." && *part != "..")
         .map(str::to_string)
         .collect()
@@ -288,9 +289,19 @@ pulp/
 
     #[test]
     fn test_split_grant_root_with_loose_files_keeps_dot_label() {
-        let (label, paths) = split_grant_root(&["a.rs".to_string(), "notes\\b.md".to_string()]);
+        let (label, paths) = split_grant_root(&["a.rs".to_string(), "notes/b.md".to_string()]);
         assert_eq!(label, ".");
         assert_eq!(paths, ["a.rs", "notes/b.md"]);
+    }
+
+    #[test]
+    fn test_split_grant_root_with_backslash_in_a_name_keeps_it_in_the_name() {
+        let (label, paths) = split_grant_root(&[
+            "tides/notes\\draft.md".to_string(),
+            "tides/src/lib.rs".to_string(),
+        ]);
+        assert_eq!(label, "tides");
+        assert_eq!(paths, ["notes\\draft.md", "src/lib.rs"]);
     }
 
     #[test]
