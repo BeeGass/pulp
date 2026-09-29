@@ -10,7 +10,11 @@ mod tests {
     use super::*;
 
     fn hello_pdf(text: &str) -> Vec<u8> {
-        let stream = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET\n");
+        pdf_with_page(&format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET\n"))
+    }
+
+    /// A one-page PDF whose page draws `stream`, with Helvetica as `/F1`.
+    fn pdf_with_page(stream: &str) -> Vec<u8> {
         let content = format!(
             "<< /Length {} >>\nstream\n{stream}endstream\n",
             stream.len()
@@ -53,6 +57,26 @@ mod tests {
             "expected extracted text to contain 'Hello PDF', got {text:?}"
         );
         assert_eq!(text, text.trim());
+    }
+
+    #[test]
+    fn test_extract_with_quote_operators_returns_every_line() {
+        // `'` moves to the next line and shows a string; `"` also sets the
+        // word and character spacing first. Ghostscript writes both.
+        let bytes = pdf_with_page(
+            "BT /F1 12 Tf 14 TL 72 720 Td (first line) Tj (second line) ' 1 0.5 (third line) \" ET\n",
+        );
+        let text = extract(&bytes).expect("pdf extract");
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            lines,
+            ["first line", "second line", "third line"],
+            "{text:?}"
+        );
     }
 
     #[test]

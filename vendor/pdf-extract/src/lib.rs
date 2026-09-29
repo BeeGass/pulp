@@ -1251,6 +1251,15 @@ fn as_num(o: &Object) -> f64 {
     }
 }
 
+/// `as_num` for operands that may be malformed: `None` instead of a panic.
+fn number(o: &Object) -> Option<f64> {
+    match o {
+        &Object::Integer(i) => Some(i as f64),
+        &Object::Real(f) => Some(f.into()),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 struct TextState<'a>
 {
@@ -1792,6 +1801,26 @@ impl<'a> Processor<'a> {
                     gs.ts.tm = tlm;
                     dlog!("T* matrix {:?}", gs.ts.tm);
                     output.end_line()?;
+                }
+                // `string '` is `T* string Tj`, and `aw ac string "` also sets
+                // the word and character spacing first. Upstream skipped both,
+                // so text that Ghostscript writes kept only its first line.
+                "'" | "\"" => {
+                    if let [aw, ac, _] = &operation.operands[..] {
+                        if let (Some(aw), Some(ac)) = (number(aw), number(ac)) {
+                            gs.ts.word_spacing = aw;
+                            gs.ts.character_spacing = ac;
+                        }
+                    }
+                    tlm = tlm.pre_transform(&Transform2D::create_translation(0., -gs.ts.leading));
+                    gs.ts.tm = tlm;
+                    output.end_line()?;
+                    match operation.operands.last() {
+                        Some(Object::String(s, _)) => {
+                            show_text(&mut gs, s, &tlm, &flip_ctm, output)?;
+                        }
+                        _ => { dlog!("unexpected {} operands {:?}", operation.operator, operation); }
+                    }
                 }
                 "q" => { gs_stack.push(gs.clone()); }
                 "Q" => {
