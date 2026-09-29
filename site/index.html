@@ -190,7 +190,7 @@
       <h2>Same core, two places to run it.</h2>
       <div class="lp-table-wrap">
         <table class="lp-table">
-          <thead><tr><th scope="col"><span class="sr-only">Capability</span></th><th scope="col">Browser mill · <a href="/mill">/mill</a></th><th scope="col">Local mill · <code>pulp ui</code></th></tr></thead>
+          <thead><tr><th scope="col"><span class="sr-only">Capability</span></th><th scope="col">Browser mill&nbsp;· <a href="/mill">/mill</a></th><th scope="col">Local mill&nbsp;· <code>pulp ui</code></th></tr></thead>
           <tbody>
             <tr><td>Files leave the device</td><td class="lp-yes">Never</td><td class="lp-yes">Never</td></tr>
             <tr><td>Choosing files</td><td>Folder or file picker, or drop</td><td>Your OS file manager, or any typed path</td></tr>
@@ -259,6 +259,7 @@
     // shot shows the three-column layout; phones render the phone layout as is.
     const fitShot = () => {
       const width = stage.clientWidth;
+      shot.classList.toggle('is-scaled', width >= 720);
       if (width >= 720) {
         const k = width / 1280;
         shot.style.width = '1280px';
