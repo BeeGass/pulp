@@ -1051,7 +1051,7 @@ export function mountMill(root, adapter, options) {
       '<span class="mill-twist" aria-hidden="true"></span>' +
       '<label class="mill-check"><input type="checkbox" class="p-check" data-act="check" tabindex="' + (tab && !f.oversized ? 0 : -1) + '" aria-label="Include ' + esc(f.relative) + '"' +
       (on ? ' checked' : '') + (f.oversized ? ' disabled title="Over the size cap"' : '') + '></label>' + icon('file') +
-      '<button type="button" class="mill-name" data-act="preview" tabindex="' + (tab && f.oversized ? 0 : -1) + '" title="Preview ' + esc(f.relative) + '" aria-label="Preview ' + esc(f.relative) +
+      '<button type="button" class="mill-name" data-act="preview" tabindex="' + (tab && f.oversized ? 0 : -1) + '" aria-label="Preview ' + esc(f.relative) +
       (issue ? ', flagged: ' + esc(issue.status.replace(/_/g, ' ')) : '') + '">' + esc(name) + '</button>' +
       (issue ? '<span title="' + esc(issue.status) + ': select the file to see why">' + icon('alert', 'mill-flag') + '</span>' : '') +
       (f.oversized ? '<span class="p-tag">over cap</span>' : '') +
@@ -2176,6 +2176,18 @@ export function mountMill(root, adapter, options) {
     window.setTimeout(() => {
       pointerRow = null;
     }, 0);
+  });
+
+  // A name its column cuts short shows in full on hover. A title on every name
+  // would also repeat each button's accessible name as its description.
+  el.rows.addEventListener('mouseover', (e) => {
+    const name = e.target instanceof Element ? e.target.closest('.mill-name') : null;
+    const row = name && name.closest('.mill-row');
+    if (!row) return;
+    const file = row.dataset.id ? S.byId.get(row.dataset.id) : null;
+    const full = file ? file.relative : row.dataset.dir ? row.dataset.dir + '/' : '';
+    if (full && name.scrollWidth > name.clientWidth) name.title = full;
+    else name.removeAttribute('title');
   });
 
   el.tree.addEventListener('scroll', () => {

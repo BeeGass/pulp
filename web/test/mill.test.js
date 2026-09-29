@@ -980,6 +980,18 @@ test('folders: a folder box ticks everything under it and shows a mixed state', 
   ok(dirBox('data').checked && !dirBox('data').indeterminate, 'data is full');
 });
 
+test('names: a name cut short shows in full on hover, and no name repeats its label as a title', async () => {
+  const long = 'src/' + 'a_module_name_far_too_long_for_the_files_column_'.repeat(3) + 'end.rs';
+  const { m } = await scanned([file('src/lib.rs', 'rust', 10), file(long, 'rust', 20)]);
+  const nameOf = (id) => row(m, id).querySelector('.mill-name');
+  const hover = (target) => target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+  equal(nameOf('src/lib.rs').getAttribute('title'), null, 'no title before a hover');
+  hover(nameOf('src/lib.rs'));
+  equal(nameOf('src/lib.rs').getAttribute('title'), null, 'a name that fits gets no title');
+  hover(nameOf(long));
+  equal(nameOf(long).getAttribute('title'), long, 'a name cut short shows its whole path');
+});
+
 test('tree: a large tree draws a window of rows and keeps one tab stop', async () => {
   const { m, total } = await expanded(5, 400);
   equal(m.api.state.collapsed.size, 0, 'every folder is open');
