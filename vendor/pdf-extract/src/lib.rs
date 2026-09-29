@@ -1,3 +1,15 @@
+// Vendored from pdf-extract 0.12.1 with pulp's fixes. The upstream code keeps
+// helpers, fields, and bindings it does not use; allow them rather than
+// diverge from upstream. (The lifetime lint is newer than the 1.85 MSRV.)
+#![allow(unknown_lints)]
+#![allow(
+    dead_code,
+    unused_variables,
+    non_upper_case_globals,
+    hidden_glob_reexports,
+    mismatched_lifetime_syntaxes
+)]
+
 extern crate lopdf;
 
 use adobe_cmap_parser::{ByteMapping, CodeRange, CIDRange};
