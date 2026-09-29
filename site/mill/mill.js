@@ -1451,11 +1451,11 @@ export function mountMill(root, adapter, options) {
       el.prevNote.innerHTML = '';
     }
     if (p.loading) {
-      el.prevBody.innerHTML = '<span class="ln mill-muted">extracting…</span>';
+      el.prevBody.innerHTML = '<span class="ln mill-muted" data-n="1">extracting…</span>';
     } else if (p.error) {
-      el.prevBody.innerHTML = '<span class="ln mill-muted">' + esc('Preview failed: ' + p.error) + '</span>';
+      el.prevBody.innerHTML = '<span class="ln mill-muted" data-n="1">' + esc('Preview failed: ' + p.error) + '</span>';
     } else if (!p.text) {
-      el.prevBody.innerHTML = '<span class="ln mill-muted">' + esc(p.message || '(nothing extracted from this file)') + '</span>';
+      el.prevBody.innerHTML = '<span class="ln mill-muted" data-n="1">' + esc(issue || !p.message ? '(nothing extracted from this file)' : p.message) + '</span>';
     } else {
       el.prevBody.innerHTML = ledgerHTML(p.text);
     }

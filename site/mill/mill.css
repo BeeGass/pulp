@@ -490,6 +490,7 @@ span.mill-twist {
 .mill-muted {
   color: var(--paper-muted);
   font-style: italic;
+  white-space: pre-wrap;
 }
 .mill-issues {
   flex: 1 1 auto;
