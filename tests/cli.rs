@@ -520,9 +520,11 @@ fn test_pulp_with_any_job_count_returns_identical_dump() {
 #[test]
 fn test_pulp_with_control_bytes_in_names_and_content_writes_well_formed_xml() {
     let dir = tempfile::tempdir().unwrap();
+    // Enough plain text that the one BEL stays under the binary sniff's
+    // 1 in 32, so the file is dumped as text.
     write(
         &dir.path().join("ctrl.txt"),
-        b"bell\x07 esc\x1b vt\x0b ok\n",
+        b"bell\x07 esc\x1b vt\x0b ok\nand a line of plain words after it\n",
     );
     write(&dir.path().join("line\nbreak.md"), b"# t\n");
     let out = run(pulp().args(["-q", "-f", "xml"]).arg(dir.path()));
@@ -534,5 +536,6 @@ fn test_pulp_with_control_bytes_in_names_and_content_writes_well_formed_xml() {
         .filter(|c| (*c as u32) < 0x20)
         .collect();
     assert!(forbidden.is_empty(), "{forbidden:?} in {xml:?}");
+    assert!(xml.contains("<source>ctrl.txt</source>"), "{xml}");
     assert!(xml.contains("<source>line\\nbreak.md</source>"), "{xml}");
 }
