@@ -1202,7 +1202,6 @@ dependencies = [
  "pretty_assertions",
  "quick-xml 0.42.0",
  "rayon",
- "rtf-parser",
  "serde",
  "serde_json",
  "tar",
@@ -1335,15 +1334,6 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
-
-[[package]]
-name = "rtf-parser"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c3147b4eb521eae5e29b781bdc30ab98bbaed784bfcb8376cda60ba4b2e0e3d"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "rustix"
