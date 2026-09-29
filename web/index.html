@@ -25,7 +25,7 @@
 
     /** A page left open while the mill restarted holds a stale session token. */
     function staleSession() {
-      return Object.assign(new Error('This page belongs to a mill session that has ended. Reload the page to reconnect.'), { reload: true });
+      return Object.assign(new Error('This page belongs to a mill session that has ended. Open the new link that pulp ui printed to reconnect.'), { reload: true });
     }
 
     async function api(url, body) {

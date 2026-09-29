@@ -24,7 +24,7 @@ Requires [Rust](https://rustup.rs/) 1.85 or newer.
 pulp ui
 ```
 
-Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is busy). Browse picks a folder in the OS file manager, or paste a path. Tick files, choose **Readable** or **Source** content and XML / Markdown / plain text, then Pulp. **Try a sample** loads a small built-in project.
+Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is busy) in your browser, and prints its link, `open http://127.0.0.1:8747/?token=…`. The bare address shows a locked page, so other programs and other users on the machine cannot use the mill. Browse picks a folder in the OS file manager, or paste a path. Tick files, choose **Readable** or **Source** content and XML / Markdown / plain text, then Pulp. **Try a sample** loads a small built-in project.
 
 - A checkbox includes a file or a whole folder; the file name previews what pulp extracts; language chips tick every file of a kind; `/` filters.
 - Changing format or the directory map redraws the last extraction. Other changes mark the dump out of date, and Copy and Download stay off until you pulp again.
@@ -32,10 +32,10 @@ Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is
 - One pack job at a time. Cancel (or Esc) asks it to stop between files. File previews run beside a pack and read only the chosen file from the last scan.
 - Lockfiles, images, and virtualenv trees (`.venv/`, `venv/`) start unticked.
 - The mill follows your OS light or dark setting and works on a phone.
-- Nothing is uploaded. POSTs carry a per-process session token.
+- Nothing is uploaded. The page opens only from the printed link, and every API call carries its per-process session token.
 
 ```
-pulp ui --port 9000 --no-open    # headless or remote; then open the URL yourself
+pulp ui --port 9000 --no-open    # headless or remote; then open the printed link yourself
 ```
 
 The in-browser mill at [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill) packs files you choose or drop in this tab (no gitignore walk, no OS folder dialog). It shares its interface with `pulp ui`; `pulp ui` still wins for `.gitignore` discovery and hang isolation.
@@ -51,7 +51,7 @@ Pulp is meant to feel the same on a laptop, a workstation, a Pi-class ARM board,
 | **macOS** (Apple Silicon or Intel) | `pulp ui` Browse opens Finder. Building from source uses the Command Line Tools compiler when that SDK is present, so an unsigned Xcode license does not block the link. |
 | **Linux** (x86_64 or aarch64) | Browse uses `zenity`, then `kdialog`. Install one of those for a graphical picker; otherwise type a path. Works on desktops, servers, and ARM boards (Raspberry Pi and similar). |
 | **Windows** (x86_64 or ARM) | Browse opens the Explorer folder dialog. Paths can be typed if the dialog cannot open. |
-| **Headless / SSH** | Skip the browser with `pulp ui --no-open` and open `http://127.0.0.1:…` from a local forward, or stay on the CLI (`pulp -o dump.xml .`). |
+| **Headless / SSH** | Skip the browser with `pulp ui --no-open` and open the printed `…/?token=…` link through a local forward on the same port (`ssh -L 8747:127.0.0.1:8747 host`), or stay on the CLI (`pulp -o dump.xml .`). |
 | **Any other OS** | The CLI still packs if the crate builds. The graphical folder picker is macOS, Linux, or Windows only. |
 
 **Hardware.** Walk and extract use as many threads as the OS reports, unless you pass `-j N`. A phone-class ARM board, a 4-core laptop, and a 32-thread desktop all work; more cores mainly shorten large trees. Release builds on macOS and Linux can use the host CPU (`cargo xtask build --release`). PDF, Office, EPUB, and RTF extractors run in a child `pulp` process with a timeout so a stuck parser does not take down the mill.

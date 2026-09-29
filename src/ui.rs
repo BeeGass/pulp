@@ -1,33 +1,53 @@
 //! Local mill: a localhost-only web UI over [`crate::pack`].
+//!
+//! Who can use the mill:
+//!
+//! - It listens on `127.0.0.1` only, and every request must name
+//!   `127.0.0.1:<port>` as its host, so a site that points its own domain at
+//!   127.0.0.1 (DNS rebinding) is turned away before any route runs.
+//! - The page opens only from the link `pulp ui` prints, which carries the
+//!   session token, or from the one-time link it opens in the browser. Other
+//!   users and programs that can reach the port get a locked page instead.
+//! - Every API call must send the token in `x-pulp-token`. Calls from another
+//!   origin or site are refused, and a CORS preflight gets no CORS headers.
 
 use std::collections::HashSet;
 use std::io::{Cursor, ErrorKind};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 use crate::config::{
     Options, OutputFormat, Selection, TreeMode, default_exclude_globs, parse_size,
 };
-use crate::manifest::{self, ManifestEntry};
+use crate::manifest::{self, ManifestEntry, ScanManifest};
 use crate::pack;
 use crate::pick;
-use crate::store::{self, JobGuard, Mill, PackJob, StoredResult};
+use crate::store::{self, JobGuard, Mill, PackJob, StoredManifest, StoredResult};
 
 const INDEX: &str = include_str!("../web/index.html");
 const PULP_CSS: &str = include_str!("../web/pulp.css");
 const MILL_CSS: &str = include_str!("../web/mill.css");
 const MILL_JS: &str = include_str!("../web/mill.js");
+
+/// Scans, directory maps, redraws, and full downloads that may run at once.
+/// Later ones wait for a slot rather than failing.
+const WORK_SLOTS: usize = 4;
+
+/// How long the one-time link that `pulp ui` opens in the browser stays valid.
+const LAUNCH_TTL: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 struct AppState {
@@ -36,30 +56,49 @@ struct AppState {
     origin: Arc<str>,
     mill: Arc<Mill>,
     sample: Arc<crate::sample::Scratch>,
+    /// The one-time code in the link opened in the browser, until it is used.
+    launch: Arc<Mutex<Option<Launch>>>,
+    /// Set while the native folder dialog is open.
+    picking: Arc<AtomicBool>,
+    work: Arc<Semaphore>,
 }
 
+impl AppState {
+    fn new(token: &str, origin: &str) -> Self {
+        Self {
+            pick: pick::pick_folder,
+            token: Arc::from(token),
+            origin: Arc::from(origin),
+            mill: Arc::new(Mill::new()),
+            sample: Arc::default(),
+            launch: Arc::default(),
+            picking: Arc::default(),
+            work: Arc::new(Semaphore::new(WORK_SLOTS)),
+        }
+    }
+}
+
+/// A one-time page code and when it stops working.
+struct Launch {
+    code: String,
+    until: Instant,
+}
+
+#[cfg(test)]
 const TEST_TOKEN: &str = "test-token";
+#[cfg(test)]
 const TEST_ORIGIN: &str = "http://127.0.0.1:8747";
 
-/// Axum router used by `pulp ui` and the HTTP tests.
-pub fn router() -> Router {
-    router_with(AppState {
-        pick: pick::pick_folder,
-        token: Arc::from(TEST_TOKEN),
-        origin: Arc::from(TEST_ORIGIN),
-        mill: Arc::new(Mill::new()),
-        sample: Arc::default(),
-    })
+/// The mill's router with a fixed test session, for the HTTP tests.
+#[cfg(test)]
+fn router() -> Router {
+    router_with(AppState::new(TEST_TOKEN, TEST_ORIGIN))
 }
 
 fn router_with(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(index))
-        .route("/pulp.css", get(pulp_css))
-        .route("/mill.css", get(mill_css))
-        .route("/mill.js", get(mill_js))
-        .route("/fonts/{name}", get(font_file))
-        .route("/api/health", get(health))
+    // Every API route checks the session before its handler runs, before a
+    // request body is even read.
+    let api = Router::new()
         .route("/api/scan", post(scan))
         .route("/api/pack", post(pack_dump))
         .route("/api/tree", post(tree_dump))
@@ -70,6 +109,20 @@ fn router_with(state: AppState) -> Router {
         .route("/api/artifact/{id}", get(artifact))
         .route("/api/browse", post(browse))
         .route("/api/sample", post(sample))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_session,
+        ));
+    Router::new()
+        .route("/", get(index))
+        .route("/pulp.css", get(pulp_css))
+        .route("/mill.css", get(mill_css))
+        .route("/mill.js", get(mill_js))
+        .route("/fonts/{name}", get(font_file))
+        .route("/api/health", get(health))
+        .merge(api)
+        .fallback(not_found)
+        .layer(axum::middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }
 
@@ -79,24 +132,29 @@ fn router_with(state: AppState) -> Router {
 /// instead of failing with "Address already in use".
 pub async fn serve(preferred: u16, try_next: bool, open_browser: bool) -> anyhow::Result<()> {
     let (listener, port) = bind_localhost(preferred, try_next).await?;
-    let url = format!("http://127.0.0.1:{port}");
-    if port != preferred {
-        eprintln!("127.0.0.1:{preferred} is busy; mill on {url}");
+    let origin = format!("http://127.0.0.1:{port}");
+    let token = new_secret()?;
+    if preferred != 0 && port != preferred {
+        eprintln!("127.0.0.1:{preferred} is busy; mill on {origin}");
     } else {
-        eprintln!("pulp mill on {url}");
+        eprintln!("pulp mill on {origin}");
     }
+    // The link carries the session token: only someone who can read this
+    // terminal can open the page.
+    eprintln!("open {origin}/?token={token}");
     eprintln!("localhost only. nothing is uploaded.");
-    let sample: Arc<crate::sample::Scratch> = Arc::default();
-    let mill = Arc::new(Mill::new());
-    let state = AppState {
-        pick: pick::pick_folder,
-        token: Arc::from(new_session_token()?),
-        origin: Arc::from(url.as_str()),
-        mill: Arc::clone(&mill),
-        sample: Arc::clone(&sample),
-    };
+    let state = AppState::new(&token, &origin);
+    let sample = Arc::clone(&state.sample);
+    let mill = Arc::clone(&state.mill);
     if open_browser {
-        let _ = opener::open(&url);
+        // The browser gets a one-time code, not the token: a command line can
+        // be visible to other users, and the code is spent on first use.
+        let code = new_secret()?;
+        *state.launch.lock().unwrap_or_else(PoisonError::into_inner) = Some(Launch {
+            code: code.clone(),
+            until: Instant::now() + LAUNCH_TTL,
+        });
+        let _ = opener::open(format!("{origin}/?launch={code}"));
     }
     let stopping = Arc::new(tokio::sync::Notify::new());
     let graceful = {
@@ -155,13 +213,24 @@ async fn shutdown_signal() {
     }
 }
 
-fn new_session_token() -> anyhow::Result<String> {
+/// 128 random bits as hex: the session token, one-time codes, and nonces.
+fn new_secret() -> anyhow::Result<String> {
     let mut buf = [0u8; 16];
     getrandom::fill(&mut buf).map_err(|err| anyhow::anyhow!("secure random unavailable: {err}"))?;
     Ok(buf.iter().fold(String::with_capacity(32), |mut s, b| {
         s.push_str(&format!("{b:02x}"));
         s
     }))
+}
+
+/// Compare a presented secret with the real one without stopping at the
+/// first differing byte, so response timing does not reveal a matching prefix.
+fn same_secret(got: &[u8], want: &[u8]) -> bool {
+    if got.len() != want.len() {
+        return false;
+    }
+    let diff = got.iter().zip(want).fold(0u8, |acc, (a, b)| acc | (a ^ b));
+    std::hint::black_box(diff) == 0
 }
 
 fn origin_matches(got: &str, allowed: &str) -> bool {
@@ -191,40 +260,159 @@ fn header_host_ok(host: &str) -> bool {
     host_name_ok(name)
 }
 
+/// What a request's `Host` says about who sent it.
+#[derive(Debug, PartialEq, Eq)]
+enum HostVerdict {
+    /// `127.0.0.1:<port>`, the mill's own address.
+    Ours,
+    /// Another name for this machine on the mill's port, such as `localhost`.
+    Loopback,
+    /// Anything else: another name (DNS rebinding), a missing or unreadable
+    /// host, or a request line that names a different host.
+    Foreign,
+}
+
+fn host_verdict(origin: &str, headers: &HeaderMap, uri: &axum::http::Uri) -> HostVerdict {
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return HostVerdict::Foreign;
+    };
+    if uri
+        .authority()
+        .is_some_and(|authority| !authority.as_str().eq_ignore_ascii_case(host))
+    {
+        return HostVerdict::Foreign;
+    }
+    let ours = origin.strip_prefix("http://").unwrap_or(origin);
+    if host.eq_ignore_ascii_case(ours) {
+        return HostVerdict::Ours;
+    }
+    let port = ours.rsplit_once(':').map_or("", |(_, port)| port);
+    let same_port = host
+        .rsplit_once(':')
+        .is_some_and(|(_, got)| !port.is_empty() && got == port);
+    if same_port && header_host_ok(host) {
+        HostVerdict::Loopback
+    } else {
+        HostVerdict::Foreign
+    }
+}
+
+/// Runs around every route. Turns away requests for any host but the mill's
+/// own, sends the page opened under `localhost` to `127.0.0.1` (where its
+/// origin check passes), and adds the headers every response carries.
+async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let verdict = host_verdict(&state.origin, request.headers(), request.uri());
+    let is_page =
+        matches!(*request.method(), Method::GET | Method::HEAD) && request.uri().path() == "/";
+    let mut response = match verdict {
+        HostVerdict::Ours => next.run(request).await,
+        HostVerdict::Loopback if is_page => {
+            let query = request
+                .uri()
+                .query()
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default();
+            let target = format!("{}/{query}", state.origin);
+            match HeaderValue::from_str(&target) {
+                Ok(location) => (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(header::LOCATION, location)],
+                )
+                    .into_response(),
+                Err(_) => bad_host(),
+            }
+        }
+        HostVerdict::Loopback | HostVerdict::Foreign => bad_host(),
+    };
+    harden(response.headers_mut());
+    response
+}
+
+fn bad_host() -> Response {
+    ApiError {
+        status: StatusCode::FORBIDDEN,
+        message: "bad host".into(),
+    }
+    .into_response()
+}
+
+/// A policy for responses that are never meant to run as a page.
+const INERT_CSP: &str =
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+/// Headers on every response: no MIME sniffing, no framing by other origins,
+/// no referrer, no cross-origin embedding or window handles, and nothing kept
+/// in the browser cache unless the route chose a cache policy itself.
+fn harden(headers: &mut HeaderMap) {
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    // Only the mill's own origin may frame it; no other site can overlay it.
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("SAMEORIGIN"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    headers
+        .entry(header::CACHE_CONTROL)
+        .or_insert(HeaderValue::from_static("no-store"));
+    headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static(INERT_CSP));
+}
+
+/// Runs before every API handler: refuses a request that [`authorize`] does
+/// not accept.
+async fn require_session(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    match authorize(&state, request.headers()) {
+        Ok(()) => next.run(request).await,
+        Err(err) => err.into_response(),
+    }
+}
+
+/// API calls must come from the mill's own page: same origin, same-origin
+/// fetch, and this session's token.
 fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        if !origin_matches(origin, state.origin.as_ref()) {
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        // An origin that is not even text is not ours either.
+        let ours = origin
+            .to_str()
+            .is_ok_and(|origin| origin_matches(origin, state.origin.as_ref()));
+        if !ours {
             return Err(ApiError {
                 status: StatusCode::FORBIDDEN,
                 message: "bad origin".into(),
             });
         }
     }
-    if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
-        if !header_host_ok(host) {
+    // Browsers name where a request came from. Only the page's own fetches
+    // (same-origin) may reach the API; other sites on this machine, even other
+    // ports of 127.0.0.1, are same-site at best.
+    if let Some(site) = headers.get("sec-fetch-site") {
+        if site.as_bytes() != b"same-origin" {
             return Err(ApiError {
                 status: StatusCode::FORBIDDEN,
-                message: "bad host".into(),
+                message: "cross-site request".into(),
             });
-        }
-        if let Ok(uri) = state.origin.parse::<axum::http::Uri>() {
-            let expected = match uri.port_u16() {
-                Some(port) => format!("{}:{port}", uri.host().unwrap_or("127.0.0.1")),
-                None => uri.host().unwrap_or("127.0.0.1").to_string(),
-            };
-            if host != expected && host != uri.host().unwrap_or("") {
-                return Err(ApiError {
-                    status: StatusCode::FORBIDDEN,
-                    message: "bad host".into(),
-                });
-            }
         }
     }
     let got = headers
         .get("x-pulp-token")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if got != state.token.as_ref() {
+        .map(HeaderValue::as_bytes)
+        .unwrap_or_default();
+    if !same_secret(got, state.token.as_bytes()) {
         return Err(ApiError {
             status: StatusCode::UNAUTHORIZED,
             message: "bad session".into(),
@@ -233,6 +421,9 @@ fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Bind the first free port on `127.0.0.1` from `preferred` (up to 20 more
+/// when `try_next` is set) and return the listener with the port it got. Port
+/// 0 asks the system for any free port.
 async fn bind_localhost(
     preferred: u16,
     try_next: bool,
@@ -245,7 +436,10 @@ async fn bind_localhost(
     for port in preferred..=last {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         match tokio::net::TcpListener::bind(addr).await {
-            Ok(listener) => return Ok((listener, port)),
+            Ok(listener) => {
+                let bound = listener.local_addr()?.port();
+                return Ok((listener, bound));
+            }
             Err(err) if err.kind() == ErrorKind::AddrInUse => continue,
             Err(err) => return Err(err.into()),
         }
@@ -277,14 +471,118 @@ fn port_holder(port: u16) -> Option<String> {
     Some(format!("pid {pid}"))
 }
 
-async fn index(State(state): State<AppState>) -> impl IntoResponse {
+#[derive(Debug, Default, Deserialize)]
+struct PageQuery {
+    token: Option<String>,
+    launch: Option<String>,
+}
+
+/// The mill page, for a request that proves it came from `pulp ui`: the
+/// printed link's `?token=`, or the one-time `?launch=` code, which redirects
+/// to the token link. Anything else gets the locked page, so a local program
+/// that can reach the port cannot read the token out of the page.
+async fn index(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<PageQuery>,
+) -> Response {
+    if let Some(code) = query.launch.as_deref() {
+        if !take_launch(&state, code) {
+            return locked_page();
+        }
+        let target = format!("/?token={}", state.token);
+        return match HeaderValue::from_str(&target) {
+            Ok(location) => (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response(),
+            Err(_) => locked_page(),
+        };
+    }
+    match query.token.as_deref() {
+        Some(token) if same_secret(token.as_bytes(), state.token.as_bytes()) => mill_page(&state),
+        _ => locked_page(),
+    }
+}
+
+/// Spend the one-time code if `code` is it and it has not expired.
+fn take_launch(state: &AppState, code: &str) -> bool {
+    let mut slot = state.launch.lock().unwrap_or_else(PoisonError::into_inner);
+    let valid = slot.as_ref().is_some_and(|launch| {
+        Instant::now() <= launch.until && same_secret(code.as_bytes(), launch.code.as_bytes())
+    });
+    if valid {
+        *slot = None;
+    }
+    valid
+}
+
+/// The mill shell with this session's token, and a policy that runs only the
+/// page's own scripts: `/mill.js` and the inline module, which gets a fresh
+/// nonce on every load.
+fn mill_page(state: &AppState) -> Response {
+    let Ok(nonce) = new_secret() else {
+        return ApiError::internal("secure random unavailable for a page nonce").into_response();
+    };
     let html = INDEX
         .replace("__PULP_TOKEN__", state.token.as_ref())
-        .replace("__PULP_VERSION__", env!("CARGO_PKG_VERSION"));
+        .replace("__PULP_VERSION__", env!("CARGO_PKG_VERSION"))
+        .replace("<script", &format!("<script nonce=\"{nonce}\""));
+    let csp = format!(
+        "default-src 'none'; script-src 'self' 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; \
+         form-action 'none'; frame-ancestors 'self'"
+    );
+    let Ok(csp) = HeaderValue::from_str(&csp) else {
+        return ApiError::internal("page policy is not a header value").into_response();
+    };
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (header::CONTENT_SECURITY_POLICY, csp),
+        ],
         Html(html),
     )
+        .into_response()
+}
+
+/// Shown instead of the mill when a request cannot show it came from `pulp ui`.
+const LOCKED_PAGE: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>pulp mill</title>
+</head>
+<body style="font: 15px/1.5 system-ui, sans-serif; max-width: 36rem; margin: 12vh auto; padding: 0 20px">
+  <h1 style="font-size: 18px">Open the mill from its link</h1>
+  <p>This address needs the link that <code>pulp ui</code> printed in its terminal. The link carries this session's key, so other programs on this machine cannot use the mill.</p>
+  <p>If <code>pulp ui</code> has restarted, the old link no longer works: use the new one it printed.</p>
+</body>
+</html>
+"#;
+
+const LOCKED_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; \
+     form-action 'none'; frame-ancestors 'self'";
+
+fn locked_page() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static(LOCKED_CSP),
+            ),
+        ],
+        Html(LOCKED_PAGE),
+    )
+        .into_response()
 }
 
 async fn font_file(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
@@ -332,6 +630,10 @@ fn asset(body: &'static str, content_type: &'static str) -> Response {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn not_found() -> ApiError {
+    ApiError::not_found("not found")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -503,6 +805,23 @@ impl ApiError {
             message: "mill is busy".into(),
         }
     }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
+    /// A failure inside the mill (a worker that panicked, say). The details go
+    /// to the terminal running `pulp ui`, not to the page.
+    fn internal(err: impl std::fmt::Display) -> Self {
+        eprintln!("pulp ui: internal error: {err}");
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "internal error; see the terminal running pulp ui".into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -514,29 +833,74 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Run blocking work off the async threads.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(ApiError::internal)
+}
+
+/// Run blocking work once one of the [`WORK_SLOTS`] is free. The slot stays
+/// taken until the work ends, even if the client has gone.
+async fn heavy<T: Send + 'static>(
+    state: &AppState,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
+    let slot = Arc::clone(&state.work)
+        .acquire_owned()
+        .await
+        .map_err(ApiError::internal)?;
+    blocking(move || {
+        let _slot = slot;
+        work()
+    })
+    .await
+}
+
 async fn scan(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(req): Json<ScanRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
-    authorize(&state, &headers)?;
     let mill = Arc::clone(&state.mill);
-    tokio::task::spawn_blocking(move || scan_sync(req, &mill))
-        .await
-        .map_err(|err| ApiError::bad(err.to_string()))?
+    heavy(&state, move || scan_sync(req, &mill))
+        .await?
         .map(Json)
 }
 
-async fn browse(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<BrowseResponse>, ApiError> {
-    authorize(&state, &headers)?;
+/// Holds the folder picker. Frees it when the dialog returns, even if the
+/// HTTP request has gone or the picker panicked.
+struct PickerSlot(Arc<AtomicBool>);
+
+impl PickerSlot {
+    fn take(flag: &Arc<AtomicBool>) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()?;
+        Some(Self(Arc::clone(flag)))
+    }
+}
+
+impl Drop for PickerSlot {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+async fn browse(State(state): State<AppState>) -> Result<Json<BrowseResponse>, ApiError> {
+    // One dialog at a time: a second Browse (another tab, a double click)
+    // would stack dialogs and hold a blocking thread for each.
+    let slot = PickerSlot::take(&state.picking).ok_or_else(|| ApiError {
+        status: StatusCode::CONFLICT,
+        message: "A folder picker is already open. Choose a folder in it or close it.".into(),
+    })?;
     let pick = state.pick;
-    let chosen = tokio::task::spawn_blocking(pick)
-        .await
-        .map_err(|err| ApiError::bad(err.to_string()))?
-        .map_err(ApiError::bad)?;
+    let chosen = blocking(move || {
+        let _slot = slot;
+        pick()
+    })
+    .await?
+    .map_err(ApiError::bad)?;
     match chosen {
         Some(path) => Ok(Json(BrowseResponse {
             path: Some(shorten_home(&path, home_dir().as_deref())),
@@ -550,15 +914,10 @@ async fn browse(
 }
 
 /// Write the built-in sample project to a temp folder and return its path.
-async fn sample(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<SampleResponse>, ApiError> {
-    authorize(&state, &headers)?;
+async fn sample(State(state): State<AppState>) -> Result<Json<SampleResponse>, ApiError> {
     let scratch = Arc::clone(&state.sample);
-    let root = tokio::task::spawn_blocking(move || scratch.materialize())
-        .await
-        .map_err(|err| ApiError::bad(err.to_string()))?
+    let root = blocking(move || scratch.materialize())
+        .await?
         .map_err(ApiError::bad)?;
     Ok(Json(SampleResponse {
         path: root.display().to_string(),
@@ -567,28 +926,23 @@ async fn sample(
 
 async fn pack_dump(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(req): Json<PackRequest>,
 ) -> Result<Json<PackResponse>, ApiError> {
-    authorize(&state, &headers)?;
     let job = state.mill.try_begin_pack().ok_or_else(ApiError::busy)?;
+    // The guard moves into the worker, so the slot frees when the work ends,
+    // or when the worker is dropped without running.
+    let guard = JobGuard {
+        mill: Arc::clone(&state.mill),
+        job,
+    };
     let mill = Arc::clone(&state.mill);
-    let job_worker = Arc::clone(&job);
-    let result = tokio::task::spawn_blocking(move || {
-        let guard = JobGuard {
-            mill: Arc::clone(&mill),
-            job: job_worker,
-        };
-        pack_sync(req, &mill, &guard.job)
-    })
-    .await
-    .map_err(|err| ApiError::bad(err.to_string()))?;
-    result.map(Json)
+    blocking(move || pack_sync(req, &mill, &guard.job))
+        .await?
+        .map(Json)
 }
 
 /// Entries the running pack has finished, for a determinate progress rule.
-async fn progress(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
-    authorize(&state, &headers)?;
+async fn progress(State(state): State<AppState>) -> Response {
     let body = match state.mill.pack_progress() {
         Some((done, total)) => ProgressResponse {
             running: true,
@@ -601,42 +955,31 @@ async fn progress(State(state): State<AppState>, headers: HeaderMap) -> Result<R
             total: 0,
         },
     };
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response())
+    ([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
 }
 
 async fn render_dump(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(req): Json<PackRequest>,
 ) -> Result<Json<PackResponse>, ApiError> {
-    authorize(&state, &headers)?;
     let mill = Arc::clone(&state.mill);
-    tokio::task::spawn_blocking(move || render_sync(req, &mill))
-        .await
-        .map_err(|err| ApiError::bad(err.to_string()))?
+    heavy(&state, move || render_sync(req, &mill))
+        .await?
         .map(Json)
 }
 
-async fn cancel_pack(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<StatusCode, ApiError> {
-    authorize(&state, &headers)?;
+async fn cancel_pack(State(state): State<AppState>) -> StatusCode {
     state.mill.request_cancel();
-    Ok(StatusCode::NO_CONTENT)
+    StatusCode::NO_CONTENT
 }
 
 async fn artifact(
     State(state): State<AppState>,
-    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<ArtifactQuery>,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &headers)?;
     let mill = Arc::clone(&state.mill);
-    tokio::task::spawn_blocking(move || artifact_sync(&id, &query, &mill))
-        .await
-        .map_err(|err| ApiError::bad(err.to_string()))?
+    heavy(&state, move || artifact_sync(&id, &query, &mill)).await?
 }
 
 #[derive(Debug, Deserialize)]
@@ -649,14 +992,11 @@ struct ArtifactQuery {
 
 async fn tree_dump(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(req): Json<PackRequest>,
 ) -> Result<Json<TreeResponse>, ApiError> {
-    authorize(&state, &headers)?;
     let mill = Arc::clone(&state.mill);
-    tokio::task::spawn_blocking(move || tree_sync(req, &mill))
-        .await
-        .map_err(|err| ApiError::bad(err.to_string()))?
+    heavy(&state, move || tree_sync(req, &mill))
+        .await?
         .map(Json)
 }
 
@@ -688,14 +1028,14 @@ fn scan_sync(req: ScanRequest, mill: &Mill) -> Result<ScanResponse, ApiError> {
         .collect();
     let truncated = manifest.truncated;
     let bytes = manifest.bytes;
-    let manifest_id = mill.put_manifest(key, manifest);
+    let stored = mill.put_manifest(key, manifest);
     Ok(ScanResponse {
         root: root.display().to_string(),
         file_count: files.len(),
         bytes,
         files,
         truncated,
-        manifest_id,
+        manifest_id: stored.id.clone(),
     })
 }
 
@@ -705,11 +1045,11 @@ fn pack_sync(req: PackRequest, mill: &Mill, job: &PackJob) -> Result<PackRespons
     }
     let extract_key = extract_key(&req);
     let opts = options_from_pack(req.clone(), false, false)?;
-    let (manifest_id, mut snapshot) = load_or_scan_manifest(&req, mill)?;
-    if let Some(hit) = mill.find_result(&manifest_id, &extract_key) {
+    let scan = load_or_scan_manifest(&req, mill)?;
+    if let Some(hit) = mill.find_result(&scan.id, &extract_key) {
         return finish_pack(hit, &opts, true);
     }
-    retain_selected(&mut snapshot.entries, &req.selected);
+    let snapshot = selected_manifest(&scan.manifest, &req.selected);
     job.total.store(snapshot.entries.len(), Ordering::SeqCst);
     let packed = pack::pack_manifest(
         &snapshot,
@@ -721,7 +1061,7 @@ fn pack_sync(req: PackRequest, mill: &Mill, job: &PackJob) -> Result<PackRespons
     .map_err(|err| ApiError::bad(err.to_string()))?;
     let stored = mill.put_result(StoredResult {
         id: store::new_id(),
-        manifest_id,
+        manifest_id: scan.id.clone(),
         extract_key,
         files: packed.files,
         stats: packed.stats,
@@ -737,7 +1077,7 @@ fn render_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> 
     }
     let stored = mill
         .get_result(&req.result_id)
-        .ok_or_else(|| ApiError::bad("unknown result"))?;
+        .ok_or_else(|| ApiError::not_found("unknown result"))?;
     let opts = options_from_pack(req, false, false)?;
     finish_pack(stored, &opts, true)
 }
@@ -745,7 +1085,7 @@ fn render_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> 
 fn artifact_sync(id: &str, query: &ArtifactQuery, mill: &Mill) -> Result<Response, ApiError> {
     let stored = mill
         .get_result(id)
-        .ok_or_else(|| ApiError::bad("unknown result"))?;
+        .ok_or_else(|| ApiError::not_found("unknown result"))?;
     let format = if query.format.trim().is_empty() {
         OutputFormat::Xml
     } else {
@@ -768,45 +1108,61 @@ fn artifact_sync(id: &str, query: &ArtifactQuery, mill: &Mill) -> Result<Respons
     crate::render::write_all(&mut dump, &packed, &opts)
         .map_err(|err| ApiError::bad(err.to_string()))?;
     let body = dump.into_inner();
-    let ext = format.extension();
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "text/plain; charset=utf-8".parse().expect("content-type"),
-    );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"pulp.{ext}\"")
-            .parse()
-            .expect("content-disposition"),
-    );
-    Ok((headers, body).into_response())
+    let disposition = match format {
+        OutputFormat::Plain => "attachment; filename=\"pulp.txt\"",
+        OutputFormat::Markdown => "attachment; filename=\"pulp.md\"",
+        OutputFormat::Xml => "attachment; filename=\"pulp.xml\"",
+    };
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static(disposition),
+            ),
+        ],
+        body,
+    )
+        .into_response())
 }
 
-fn load_or_scan_manifest(
-    req: &PackRequest,
-    mill: &Mill,
-) -> Result<(String, crate::manifest::ScanManifest), ApiError> {
+/// The request's stored manifest when it was scanned with the same discovery
+/// settings; otherwise a fresh scan, stored for the requests that follow.
+fn load_or_scan_manifest(req: &PackRequest, mill: &Mill) -> Result<Arc<StoredManifest>, ApiError> {
     let want = discovery_key_pack(req);
     if !req.manifest_id.is_empty() {
         if let Some(stored) = mill.get_manifest(&req.manifest_id) {
             if stored.discovery_key == want {
-                return Ok((stored.id.clone(), stored.manifest.clone()));
+                return Ok(stored);
             }
             return Err(ApiError::bad("manifest settings changed; rescan"));
         }
     }
     let opts = options_from_pack(req.clone(), true, false)?;
     let manifest = manifest::scan_manifest(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
-    let id = mill.put_manifest(discovery_key_pack(req), manifest.clone());
-    Ok((id, manifest))
+    Ok(mill.put_manifest(want, manifest))
 }
 
-/// Keep the entries whose id or relative path the request ticked.
-fn retain_selected(entries: &mut Vec<ManifestEntry>, selected: &[String]) {
+/// A copy of `manifest` with only the entries whose id or relative path the
+/// request ticked. Copies those entries alone, not the whole scan.
+fn selected_manifest(manifest: &ScanManifest, selected: &[String]) -> ScanManifest {
     let want: HashSet<&str> = selected.iter().map(String::as_str).collect();
-    entries
-        .retain(|entry| want.contains(entry.id.as_str()) || want.contains(entry.relative.as_str()));
+    ScanManifest {
+        root: manifest.root.clone(),
+        entries: manifest
+            .entries
+            .iter()
+            .filter(|entry| {
+                want.contains(entry.id.as_str()) || want.contains(entry.relative.as_str())
+            })
+            .cloned()
+            .collect(),
+        bytes: manifest.bytes,
+        truncated: manifest.truncated,
+    }
 }
 
 fn finish_pack(
@@ -890,17 +1246,19 @@ fn packed_from_stored(stored: &StoredResult, opts: &Options) -> pack::Packed {
     }
 }
 
+/// Everything that decides which files a scan finds. A stored manifest is
+/// reused only by a request with the same key.
 fn discovery_key(req: &ScanRequest) -> String {
     format!(
-        "{}|{}|{}|{}|{:?}",
-        req.path, req.hidden, req.gitignore, req.archives, req.exclude
+        "{}|{}|{}|{}|{}|{:?}",
+        req.path, req.hidden, req.gitignore, req.archives, req.no_default_excludes, req.exclude
     )
 }
 
 fn discovery_key_pack(req: &PackRequest) -> String {
     format!(
-        "{}|{}|{}|{}|{:?}",
-        req.path, req.hidden, req.gitignore, req.archives, req.exclude
+        "{}|{}|{}|{}|{}|{:?}",
+        req.path, req.hidden, req.gitignore, req.archives, req.no_default_excludes, req.exclude
     )
 }
 
@@ -920,19 +1278,16 @@ fn extract_key(req: &PackRequest) -> String {
 
 async fn preview(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(req): Json<PackRequest>,
 ) -> Result<Json<PreviewResponse>, ApiError> {
-    authorize(&state, &headers)?;
     let slot = state.mill.try_begin_preview().ok_or_else(ApiError::busy)?;
     let mill = Arc::clone(&state.mill);
-    let result = tokio::task::spawn_blocking(move || {
+    blocking(move || {
         let _slot = slot;
         preview_sync(req, &mill)
     })
-    .await
-    .map_err(|err| ApiError::bad(err.to_string()))?;
-    result.map(Json)
+    .await?
+    .map(Json)
 }
 
 /// Extract the one selected file. With a usable manifest only that entry is
@@ -1065,12 +1420,11 @@ fn tree_sync(req: PackRequest, mill: &Mill) -> Result<TreeResponse, ApiError> {
         return Err(ApiError::bad("tick at least one file"));
     }
     let opts = options_from_pack(req.clone(), true, true)?;
-    let (_, mut manifest) = load_or_scan_manifest(&req, mill)?;
-    retain_selected(&mut manifest.entries, &req.selected);
-    let paths: Vec<String> = manifest
+    let scan = load_or_scan_manifest(&req, mill)?;
+    let paths: Vec<String> = selected_manifest(&scan.manifest, &req.selected)
         .entries
-        .iter()
-        .map(|entry| entry.relative.clone())
+        .into_iter()
+        .map(|entry| entry.relative)
         .collect();
     let tree =
         crate::render::format_directory_map(&pack::tree_label(&opts.roots), &paths, opts.format)
@@ -1232,19 +1586,28 @@ mod tests {
 
     fn router_with_mill(mill: Arc<Mill>) -> Router {
         router_with(AppState {
-            pick: pick::pick_folder,
-            token: Arc::from(TEST_TOKEN),
-            origin: Arc::from(TEST_ORIGIN),
             mill,
-            sample: Arc::default(),
+            ..AppState::new(TEST_TOKEN, TEST_ORIGIN)
         })
     }
 
+    /// GET as a browser on the mill's own address sends it, with no token.
     async fn get(uri: &str) -> Response {
         router()
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::HOST, "127.0.0.1:8747")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap()
+    }
+
+    /// The mill page, opened from the link `pulp ui` prints.
+    async fn get_page() -> Response {
+        get(&format!("/?token={TEST_TOKEN}")).await
     }
 
     async fn body_text(response: Response) -> String {
@@ -1327,6 +1690,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/health")
+                    .header(header::HOST, "127.0.0.1:8747")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1337,7 +1701,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_index_returns_mill_shell_with_token_and_version() {
-        let response = get("/").await;
+        let response = get_page().await;
         assert_eq!(response.status(), StatusCode::OK);
         let html = body_text(response).await;
         assert!(html.contains("<title>pulp mill</title>"));
@@ -1432,11 +1796,8 @@ mod tests {
         let mill = Arc::new(Mill::new());
         assert!(mill.try_begin_pack().is_some());
         let app = router_with(AppState {
-            pick: pick::pick_folder,
-            token: Arc::from(TEST_TOKEN),
-            origin: Arc::from(TEST_ORIGIN),
             mill,
-            sample: Arc::default(),
+            ..AppState::new(TEST_TOKEN, TEST_ORIGIN)
         });
         let path = testdata().display().to_string();
         let body = serde_json::json!({
@@ -1933,10 +2294,7 @@ mod tests {
     async fn test_browse_with_stub_picker_returns_testdata_path() {
         let app = router_with(AppState {
             pick: stub_pick_testdata,
-            token: Arc::from(TEST_TOKEN),
-            origin: Arc::from(TEST_ORIGIN),
-            mill: Arc::new(Mill::new()),
-            sample: Arc::default(),
+            ..AppState::new(TEST_TOKEN, TEST_ORIGIN)
         });
         let response = app
             .oneshot(
@@ -1963,10 +2321,7 @@ mod tests {
     async fn test_browse_with_cancel_returns_cancelled() {
         let app = router_with(AppState {
             pick: stub_pick_cancel,
-            token: Arc::from(TEST_TOKEN),
-            origin: Arc::from(TEST_ORIGIN),
-            mill: Arc::new(Mill::new()),
-            sample: Arc::default(),
+            ..AppState::new(TEST_TOKEN, TEST_ORIGIN)
         });
         let response = app
             .oneshot(
@@ -2002,10 +2357,7 @@ mod tests {
         }
         let app = router_with(AppState {
             pick: stub_pick_in_home,
-            token: Arc::from(TEST_TOKEN),
-            origin: Arc::from(TEST_ORIGIN),
-            mill: Arc::new(Mill::new()),
-            sample: Arc::default(),
+            ..AppState::new(TEST_TOKEN, TEST_ORIGIN)
         });
         let (status, json) = post_to(&app, "/api/browse", serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "{json}");
@@ -2216,7 +2568,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_index_wires_every_mill_endpoint() {
-        let html = body_text(get("/").await).await;
+        let html = body_text(get_page().await).await;
         assert!(html.contains("x-pulp-token"));
         for endpoint in [
             "/api/browse",
@@ -2272,6 +2624,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/sample")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
                     .body(Body::from("{}"))
                     .unwrap(),
             )
@@ -2317,6 +2670,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/scan")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
                     .body(Body::from(r#"{"path":"."}"#))
                     .unwrap(),
             )
@@ -2333,6 +2687,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/scan")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
                     .header("x-pulp-token", "nope")
                     .body(Body::from(r#"{"path":"."}"#))
                     .unwrap(),
@@ -2350,6 +2705,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/scan")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
                     .header(header::ORIGIN, "http://127.0.0.1.evil.test")
                     .header("x-pulp-token", TEST_TOKEN)
                     .body(Body::from(r#"{"path":"."}"#))
@@ -2433,5 +2789,581 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(json["error"].as_str().unwrap().contains("does not exist"));
+    }
+
+    /// Send one request to `app` as given.
+    async fn send(app: &Router, request: Request<Body>) -> Response {
+        app.clone().oneshot(request).await.unwrap()
+    }
+
+    fn header_of<'a>(response: &'a Response, name: &str) -> &'a str {
+        response
+            .headers()
+            .get(name)
+            .unwrap_or_else(|| panic!("no {name} header"))
+            .to_str()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_index_with_foreign_host_returns_forbidden_without_token() {
+        // A page on a domain rebound to 127.0.0.1 sends its own name as Host.
+        for host in [
+            "evil.example:8747",
+            "127.0.0.1.evil.example:8747",
+            "127.0.0.1:9999",
+        ] {
+            let response = send(
+                &router(),
+                Request::builder()
+                    .uri(format!("/?token={TEST_TOKEN}"))
+                    .header(header::HOST, host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{host}");
+            assert_eq!(header_of(&response, "x-frame-options"), "SAMEORIGIN");
+            let body = body_text(response).await;
+            assert!(!body.contains(TEST_TOKEN), "{host} got the token");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_guard_with_missing_or_mismatched_host_returns_forbidden() {
+        let app = router();
+        let no_host = send(
+            &app,
+            Request::builder()
+                .uri("/api/progress")
+                .header("x-pulp-token", TEST_TOKEN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(no_host.status(), StatusCode::FORBIDDEN);
+        // An absolute request line names the host the request is really for.
+        let other_authority = send(
+            &app,
+            Request::builder()
+                .uri("http://evil.example:8747/api/progress")
+                .header(header::HOST, "127.0.0.1:8747")
+                .header("x-pulp-token", TEST_TOKEN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(other_authority.status(), StatusCode::FORBIDDEN);
+        let undecodable = send(
+            &app,
+            Request::builder()
+                .uri("/api/progress")
+                .header(
+                    header::HOST,
+                    HeaderValue::from_bytes(b"127.0.0.1:8747\xff").unwrap(),
+                )
+                .header("x-pulp-token", TEST_TOKEN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(undecodable.status(), StatusCode::FORBIDDEN);
+        let unknown_path = send(
+            &app,
+            Request::builder()
+                .uri("/nope")
+                .header(header::HOST, "evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unknown_path.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_index_with_localhost_host_redirects_to_loopback_address() {
+        let app = router();
+        let page = send(
+            &app,
+            Request::builder()
+                .uri(format!("/?token={TEST_TOKEN}"))
+                .header(header::HOST, "localhost:8747")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(page.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            header_of(&page, "location"),
+            format!("http://127.0.0.1:8747/?token={TEST_TOKEN}")
+        );
+        // Only the page moves; the API answers on its own address only.
+        let api = send(
+            &app,
+            Request::builder()
+                .uri("/api/progress")
+                .header(header::HOST, "localhost:8747")
+                .header("x-pulp-token", TEST_TOKEN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(api.status(), StatusCode::FORBIDDEN);
+        let other_port = send(
+            &app,
+            Request::builder()
+                .uri("/")
+                .header(header::HOST, "localhost:9999")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(other_port.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_index_without_token_returns_locked_page() {
+        for uri in ["/", "/?token=", "/?token=wrong-token", "/?launch=guess"] {
+            let response = get(uri).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+            assert_eq!(header_of(&response, "cache-control"), "no-store");
+            assert!(header_of(&response, "content-security-policy").contains("default-src 'none'"));
+            let html = body_text(response).await;
+            assert!(html.contains("pulp ui"), "{uri}: {html}");
+            assert!(!html.contains(TEST_TOKEN), "{uri} leaked the token");
+            assert!(!html.contains("pulp-token"), "{uri} served the mill shell");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_index_with_launch_code_redirects_once_to_token_link() {
+        let state = AppState::new(TEST_TOKEN, TEST_ORIGIN);
+        *state.launch.lock().unwrap() = Some(Launch {
+            code: "0123456789abcdef".into(),
+            until: Instant::now() + LAUNCH_TTL,
+        });
+        let app = router_with(state);
+        let open = |uri: &'static str| {
+            let app = app.clone();
+            async move {
+                send(
+                    &app,
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::HOST, "127.0.0.1:8747")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+            }
+        };
+        let wrong = open("/?launch=fedcba9876543210").await;
+        assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
+        let first = open("/?launch=0123456789abcdef").await;
+        assert_eq!(first.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            header_of(&first, "location"),
+            format!("/?token={TEST_TOKEN}")
+        );
+        let again = open("/?launch=0123456789abcdef").await;
+        assert_eq!(
+            again.status(),
+            StatusCode::FORBIDDEN,
+            "the code works twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_with_expired_launch_code_returns_locked_page() {
+        let state = AppState::new(TEST_TOKEN, TEST_ORIGIN);
+        *state.launch.lock().unwrap() = Some(Launch {
+            code: "0123456789abcdef".into(),
+            until: Instant::now() - Duration::from_millis(1),
+        });
+        let response = send(
+            &router_with(state),
+            Request::builder()
+                .uri("/?launch=0123456789abcdef")
+                .header(header::HOST, "127.0.0.1:8747")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_index_with_token_sends_script_nonce_policy_and_no_store() {
+        let first = get_page().await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(header_of(&first, "cache-control"), "no-store");
+        assert_eq!(header_of(&first, "x-frame-options"), "SAMEORIGIN");
+        assert_eq!(header_of(&first, "x-content-type-options"), "nosniff");
+        assert_eq!(header_of(&first, "referrer-policy"), "no-referrer");
+        assert_eq!(
+            header_of(&first, "cross-origin-opener-policy"),
+            "same-origin"
+        );
+        let csp = header_of(&first, "content-security-policy").to_string();
+        for directive in [
+            "default-src 'none'",
+            "frame-ancestors 'self'",
+            "connect-src 'self'",
+            "base-uri 'none'",
+            "form-action 'none'",
+        ] {
+            assert!(csp.contains(directive), "{csp} lacks {directive}");
+        }
+        let nonce = csp
+            .split("'nonce-")
+            .nth(1)
+            .and_then(|rest| rest.split('\'').next())
+            .unwrap()
+            .to_string();
+        assert_eq!(nonce.len(), 32);
+        let html = body_text(first).await;
+        let scripts = html.matches("<script").count();
+        assert!(scripts >= 1);
+        assert_eq!(
+            html.matches(&format!("<script nonce=\"{nonce}\"")).count(),
+            scripts,
+            "every script tag must carry the page nonce"
+        );
+        let second = get_page().await;
+        let again = header_of(&second, "content-security-policy").to_string();
+        assert!(!again.contains(&nonce), "the nonce repeated across loads");
+    }
+
+    #[tokio::test]
+    async fn test_api_responses_send_no_store_and_hardening_headers() {
+        let app = router();
+        let path = testdata().display().to_string();
+        let pack = send(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/pack")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::HOST, "127.0.0.1:8747")
+                .header(header::ORIGIN, TEST_ORIGIN)
+                .header("x-pulp-token", TEST_TOKEN)
+                .body(Body::from(
+                    serde_json::json!({
+                        "path": path,
+                        "gitignore": false,
+                        "selected": ["hello.rs"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(pack.status(), StatusCode::OK);
+        assert_eq!(header_of(&pack, "cache-control"), "no-store");
+        assert_eq!(header_of(&pack, "x-content-type-options"), "nosniff");
+        assert_eq!(
+            header_of(&pack, "cross-origin-resource-policy"),
+            "same-origin"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body_text(pack).await).unwrap();
+        let result_id = json["result_id"].as_str().unwrap();
+        let artifact = get_authorized(&app, &format!("/api/artifact/{result_id}")).await;
+        assert_eq!(artifact.status(), StatusCode::OK);
+        assert_eq!(header_of(&artifact, "cache-control"), "no-store");
+        assert_eq!(header_of(&artifact, "x-content-type-options"), "nosniff");
+        assert_eq!(
+            header_of(&artifact, "content-disposition"),
+            "attachment; filename=\"pulp.xml\""
+        );
+        let denied = get("/api/progress").await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(header_of(&denied, "cache-control"), "no-store");
+        // Assets keep their own cache policy and still refuse sniffing.
+        let font = get("/fonts/plex-sans.woff2").await;
+        assert_eq!(
+            header_of(&font, "cache-control"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(header_of(&font, "x-content-type-options"), "nosniff");
+    }
+
+    #[tokio::test]
+    async fn test_preflight_returns_refusal_without_cors_headers() {
+        // A browser sends a preflight before a cross-origin call with the
+        // token header; without CORS headers in the answer it never sends the call.
+        for (uri, method) in [("/api/scan", "POST"), ("/api/artifact/x", "GET")] {
+            let response = send(
+                &router(),
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri(uri)
+                    .header(header::HOST, "127.0.0.1:8747")
+                    .header(header::ORIGIN, "http://evil.example")
+                    .header("access-control-request-method", method)
+                    .header("access-control-request-headers", "x-pulp-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+            assert!(
+                response
+                    .headers()
+                    .keys()
+                    .all(|name| !name.as_str().starts_with("access-control-")),
+                "{uri}: {:?}",
+                response.headers()
+            );
+        }
+    }
+
+    /// A scan of testdata with the mill's host, the token, and `headers`.
+    async fn scan_with(headers: &[(&str, HeaderValue)]) -> StatusCode {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/scan")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::HOST, "127.0.0.1:8747")
+            .header("x-pulp-token", TEST_TOKEN);
+        for (name, value) in headers {
+            request = request.header(*name, value.clone());
+        }
+        let body = serde_json::json!({ "path": testdata().display().to_string() }).to_string();
+        send(&router(), request.body(Body::from(body)).unwrap())
+            .await
+            .status()
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_undecodable_origin_returns_forbidden() {
+        let origin = HeaderValue::from_bytes(b"http://127.0.0.1:8747\xff").unwrap();
+        assert_eq!(
+            scan_with(&[("origin", origin)]).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_cross_site_fetch_returns_forbidden() {
+        for site in ["cross-site", "same-site", "none"] {
+            assert_eq!(
+                scan_with(&[("sec-fetch-site", HeaderValue::from_static(site))]).await,
+                StatusCode::FORBIDDEN,
+                "{site}"
+            );
+        }
+        assert_eq!(
+            scan_with(&[
+                ("sec-fetch-site", HeaderValue::from_static("same-origin")),
+                ("origin", HeaderValue::from_static(TEST_ORIGIN)),
+            ])
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[test]
+    fn test_same_secret_with_equal_and_different_secrets_returns_match() {
+        assert!(same_secret(b"0123abcd", b"0123abcd"));
+        assert!(!same_secret(b"0123abcd", b"0123abce"));
+        assert!(!same_secret(b"x123abcd", b"0123abcd"));
+        assert!(!same_secret(b"0123abc", b"0123abcd"));
+        assert!(!same_secret(b"", b"0123abcd"));
+    }
+
+    #[tokio::test]
+    async fn test_bind_localhost_with_port_zero_returns_bound_port() {
+        let (listener, port) = bind_localhost(0, false).await.unwrap();
+        assert_ne!(port, 0);
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+    }
+
+    #[tokio::test]
+    async fn test_browse_with_picker_open_returns_conflict() {
+        let state = AppState {
+            pick: stub_pick_testdata,
+            ..AppState::new(TEST_TOKEN, TEST_ORIGIN)
+        };
+        let open = PickerSlot::take(&state.picking).unwrap();
+        let app = router_with(state);
+        let (status, json) = post_to(&app, "/api/browse", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert!(json["error"].as_str().unwrap().contains("already open"));
+        drop(open);
+        let (status, json) = post_to(&app, "/api/browse", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+
+    fn stub_pick_panic() -> Result<Option<PathBuf>, String> {
+        panic!("picker crashed at /Users/someone/secret");
+    }
+
+    #[tokio::test]
+    async fn test_browse_with_panicking_picker_returns_internal_error_and_frees_picker() {
+        let state = AppState {
+            pick: stub_pick_panic,
+            ..AppState::new(TEST_TOKEN, TEST_ORIGIN)
+        };
+        let picking = Arc::clone(&state.picking);
+        let app = router_with(state);
+        let (status, json) = post_to(&app, "/api/browse", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{json}");
+        let message = json["error"].as_str().unwrap();
+        assert!(!message.contains("secret"), "{message}");
+        assert!(!picking.load(Ordering::SeqCst), "the picker stayed taken");
+    }
+
+    #[tokio::test]
+    async fn test_artifact_and_render_with_unknown_result_return_not_found() {
+        let app = router();
+        let artifact = get_authorized(&app, "/api/artifact/0123456789abcdef").await;
+        assert_eq!(artifact.status(), StatusCode::NOT_FOUND);
+        let (status, json) = post_to(
+            &app,
+            "/api/render",
+            serde_json::json!({
+                "path": testdata().display().to_string(),
+                "result_id": "0123456789abcdef"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    }
+
+    #[tokio::test]
+    async fn test_pack_with_manifest_from_other_default_excludes_returns_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "API_KEY=secret\n").unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        let app = router();
+        let path = dir.path().display().to_string();
+        let (status, scan) = post_to(
+            &app,
+            "/api/scan",
+            serde_json::json!({ "path": path, "hidden": true, "no_default_excludes": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        assert!(
+            scan["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["relative"] == ".env")
+        );
+        // A pack with the default excludes back on must not reuse that scan.
+        let (status, json) = post_to(
+            &app,
+            "/api/pack",
+            serde_json::json!({
+                "path": path,
+                "hidden": true,
+                "manifest_id": scan["manifest_id"],
+                "selected": [".env", "a.rs"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(json["error"], "manifest settings changed; rescan");
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_work_slots_taken_waits_for_one() {
+        let state = AppState::new(TEST_TOKEN, TEST_ORIGIN);
+        let held = Arc::clone(&state.work)
+            .acquire_many_owned(WORK_SLOTS as u32)
+            .await
+            .unwrap();
+        let app = router_with(state);
+        let path = testdata().display().to_string();
+        let pending = tokio::spawn({
+            let app = app.clone();
+            async move { post_to(&app, "/api/scan", serde_json::json!({ "path": path })).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!pending.is_finished(), "the scan ran without a free slot");
+        // Progress and cancel never wait on the work slots.
+        assert_eq!(
+            get_authorized(&app, "/api/progress").await.status(),
+            StatusCode::OK
+        );
+        drop(held);
+        let (status, json) = pending.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+
+    /// Every API route, with the method the shell uses.
+    const API_ROUTES: [(&str, &str); 10] = [
+        ("POST", "/api/scan"),
+        ("POST", "/api/pack"),
+        ("POST", "/api/tree"),
+        ("POST", "/api/preview"),
+        ("POST", "/api/render"),
+        ("POST", "/api/cancel"),
+        ("GET", "/api/progress"),
+        ("GET", "/api/artifact/0123456789abcdef"),
+        ("POST", "/api/browse"),
+        ("POST", "/api/sample"),
+    ];
+
+    #[tokio::test]
+    async fn test_every_api_route_without_session_returns_refusal() {
+        let state = AppState {
+            pick: stub_pick_testdata,
+            ..AppState::new(TEST_TOKEN, TEST_ORIGIN)
+        };
+        let app = router_with(state);
+        for (method, uri) in API_ROUTES {
+            let request = |token: Option<&str>, origin: &str| {
+                let mut builder = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::HOST, "127.0.0.1:8747")
+                    .header(header::ORIGIN, origin);
+                if let Some(token) = token {
+                    builder = builder.header("x-pulp-token", token);
+                }
+                builder.body(Body::from("{}")).unwrap()
+            };
+            let missing = send(&app, request(None, TEST_ORIGIN)).await;
+            assert_eq!(missing.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+            let wrong = send(&app, request(Some("test-tokem"), TEST_ORIGIN)).await;
+            assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+            let foreign = send(&app, request(Some(TEST_TOKEN), "http://evil.example")).await;
+            assert_eq!(foreign.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+        }
+    }
+
+    /// A free port with at least 20 ports above it, held until the listener drops.
+    fn held_port() -> std::net::TcpListener {
+        loop {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            if listener.local_addr().unwrap().port() <= 65_000 {
+                return listener;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bind_localhost_with_busy_port_walks_to_next_free_port() {
+        let held = held_port();
+        let busy = held.local_addr().unwrap().port();
+        let (listener, port) = bind_localhost(busy, true).await.unwrap();
+        assert!(port > busy && port <= busy + 20, "{busy} -> {port}");
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+    }
+
+    #[tokio::test]
+    async fn test_bind_localhost_with_busy_explicit_port_returns_error() {
+        let held = held_port();
+        let busy = held.local_addr().unwrap().port();
+        let err = bind_localhost(busy, false).await.unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("127.0.0.1:{busy} is already in use")),
+            "{err}"
+        );
     }
 }
