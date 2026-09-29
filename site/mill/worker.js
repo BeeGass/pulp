@@ -1,4 +1,7 @@
-import init, { pack_files, scan_files } from './pkg/pulp_wasm.js';
+// Packs off the main thread so the mill stays responsive. The page cancels a
+// pack by terminating this worker; the extracted files stay here, so the page
+// can redraw the dump in another format or ask for the full dump.
+import init, { pack_files, render_result, artifact, artifact_as, drop_result, preview_file } from './pkg/pulp_wasm.js';
 
 let ready;
 function ensure() {
@@ -11,25 +14,25 @@ function ensure() {
   return ready;
 }
 
+function run(type, payload) {
+  switch (type) {
+    case 'pack': return pack_files(payload);
+    case 'render': return render_result(payload);
+    case 'artifact': return artifact(payload.id);
+    case 'artifact_as': return artifact_as(payload);
+    case 'preview': return preview_file(payload);
+    case 'drop': return drop_result(payload.id);
+    default: throw new Error('unknown message ' + type);
+  }
+}
+
 self.onmessage = async (ev) => {
   const msg = ev.data || {};
   const id = msg.id;
   try {
-    if (msg.type === 'cancel') {
-      self.postMessage({ ok: false, id, error: 'cancelled' });
-      return;
-    }
     await ensure();
-    if (msg.type === 'pack') {
-      const result = pack_files(msg.payload);
-      self.postMessage({ ok: true, id, result });
-    } else if (msg.type === 'scan') {
-      const result = scan_files(msg.payload);
-      self.postMessage({ ok: true, id, result });
-    } else {
-      self.postMessage({ ok: false, id, error: 'unknown message' });
-    }
+    self.postMessage({ ok: true, id, result: run(msg.type, msg.payload || {}) });
   } catch (e) {
-    self.postMessage({ ok: false, id, error: String(e && e.message || e) });
+    self.postMessage({ ok: false, id, error: String((e && e.message) || e) });
   }
 };

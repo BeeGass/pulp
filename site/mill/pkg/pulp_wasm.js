@@ -1,7 +1,7 @@
 /* @ts-self-types="./pulp_wasm.d.ts" */
 
 /**
- * Full dump for a previous [`pack_files`] result.
+ * Full dump for a previous [`pack_files`] result, in the format it was packed in.
  * @param {string} result_id
  * @returns {string}
  */
@@ -24,6 +24,42 @@ export function artifact(result_id) {
     } finally {
         wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
     }
+}
+
+/**
+ * Full dump for a stored result, `{ result_id, format, no_tree }`.
+ * @param {any} input
+ * @returns {string}
+ */
+export function artifact_as(input) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.artifact_as(input);
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Forget a stored result. Returns whether it was still held.
+ * @param {string} result_id
+ * @returns {boolean}
+ */
+export function drop_result(result_id) {
+    const ptr0 = passStringToWasm0(result_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.drop_result(ptr0, len0);
+    return ret !== 0;
 }
 
 /**
@@ -52,11 +88,29 @@ export function format_tree(input) {
 
 /**
  * Pack selected files. Each file is `{ relative, bytes: Uint8Array, id? }`.
+ *
+ * The extracted files stay in this instance under `result_id`, so
+ * [`render_result`] and [`artifact_as`] can draw them again.
  * @param {any} input
  * @returns {any}
  */
 export function pack_files(input) {
     const ret = wasm.pack_files(input);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Text pulp extracts from one file, `{ relative, bytes: Uint8Array }` plus the
+ * pack settings that change it (`source`, `notebook_outputs`, `archives`,
+ * `hidden`, ...), capped at 32 KiB. Stores nothing.
+ * @param {any} input
+ * @returns {any}
+ */
+export function preview_file(input) {
+    const ret = wasm.preview_file(input);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -77,6 +131,20 @@ export function pulp_version() {
     } finally {
         wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
+}
+
+/**
+ * Redraw a stored result, `{ result_id, format, no_tree }`, without extracting
+ * again. Returns what [`pack_files`] returns, under the same `result_id`.
+ * @param {any} input
+ * @returns {any}
+ */
+export function render_result(input) {
+    const ret = wasm.render_result(input);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
 }
 
 /**

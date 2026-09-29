@@ -38,7 +38,7 @@ Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is
 pulp ui --port 9000 --no-open    # headless or remote; then open the URL yourself
 ```
 
-The in-browser mill at [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill) packs files you grant in this tab (no gitignore walk, no OS folder dialog). `pulp ui` still wins for `.gitignore` discovery and hang isolation.
+The in-browser mill at [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill) packs files you choose or drop in this tab (no gitignore walk, no OS folder dialog). It shares its interface with `pulp ui`; `pulp ui` still wins for `.gitignore` discovery and hang isolation.
 
 ---
 
