@@ -1059,36 +1059,43 @@ fn scan_warning(message: &str, root: &Path) -> String {
     message.replace(&prefix, "")
 }
 
+/// Pack the ticked files as they are now.
+///
+/// Every pack reads the files again rather than handing back an earlier
+/// result, so an edit since the last pack is in the dump. What the last
+/// pack extracted from a file that has not changed since is reused, through
+/// the mill's extraction cache; a pack of another folder, or with other
+/// extraction settings, reuses nothing.
 fn pack_sync(req: PackRequest, mill: &Mill, job: &PackJob) -> Result<PackResponse, ApiError> {
     if req.selected.is_empty() {
         return Err(ApiError::bad("tick at least one file"));
     }
-    let extract_key = extract_key(&req);
     let opts = options_from_pack(req.clone(), false, false)?;
     let scan = load_or_scan_manifest(&req, mill)?;
-    if let Some(hit) = mill.find_result(&scan.id, &extract_key) {
-        return finish_pack(hit, &opts, true);
-    }
     let snapshot = selected_manifest(&scan.manifest, &req.selected);
-    job.total.store(snapshot.entries.len(), Ordering::SeqCst);
-    let packed = pack::pack_manifest(
+    let total = snapshot.entries.len();
+    job.total.store(total, Ordering::SeqCst);
+    let cache = pack::pack_manifest_cached(
         &snapshot,
         &opts,
         Some(&job.cancel),
         Some(&job.done),
         Some(Instant::now()),
+        mill.extract_cache().as_deref(),
     )
     .map_err(|err| ApiError::bad(err.to_string()))?;
+    // Nothing was read or extracted: every outcome came from the cache.
+    let cache_hit = total > 0 && cache.reused() == total;
+    let packed = Arc::clone(cache.packed());
+    mill.keep_extract_cache(cache);
     let stored = mill.put_result(StoredResult {
         id: store::new_id(),
         manifest_id: scan.id.clone(),
-        extract_key,
-        files: packed.files,
-        stats: packed.stats,
+        packed,
         roots: opts.roots.clone(),
         source_mode: opts.source_mode,
     });
-    finish_pack(stored, &opts, false)
+    finish_pack(stored, &opts, cache_hit)
 }
 
 fn render_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> {
@@ -1215,7 +1222,7 @@ fn finish_pack(
             message: file.status.message(file.size),
         })
         .collect();
-    let extract_ms = stored.stats.elapsed.as_millis();
+    let extract_ms = stored.packed.stats.elapsed.as_millis();
     let render_ms = render_start.elapsed().as_millis();
     Ok(PackResponse {
         dump,
@@ -1240,11 +1247,11 @@ fn finish_pack(
 }
 
 fn packed_from_stored(stored: &StoredResult, opts: &Options) -> pack::Packed {
+    let files = &stored.packed.files;
     let tree = if opts.tree == TreeMode::None {
         String::new()
     } else {
-        let paths: Vec<String> = stored
-            .files
+        let paths: Vec<String> = files
             .iter()
             .filter(|f| f.status == pack::FileStatus::Extracted)
             .map(|f| f.relative.clone())
@@ -1253,16 +1260,15 @@ fn packed_from_stored(stored: &StoredResult, opts: &Options) -> pack::Packed {
     };
     // Count what this drawing holds, the map included or not, the way a fresh
     // pack with these settings would.
-    let mut stats = stored.stats.clone();
-    let extracted = stored
-        .files
+    let mut stats = stored.packed.stats.clone();
+    let extracted = files
         .iter()
         .filter(|f| f.status == pack::FileStatus::Extracted)
         .map(|f| f.text.as_str());
     (stats.chars_emitted, stats.tokens_est) =
         crate::tokens::summarize_chunks(std::iter::once(tree.as_str()).chain(extracted));
     pack::Packed {
-        files: stored.files.clone(),
+        files: files.clone(),
         tree,
         stats,
     }
@@ -1282,20 +1288,6 @@ fn discovery_key_pack(req: &PackRequest) -> String {
         "{}|{}|{}|{}|{}|{:?}",
         req.path, req.hidden, req.gitignore, req.archives, req.no_default_excludes, req.exclude
     )
-}
-
-fn extract_key(req: &PackRequest) -> String {
-    let mut selected = req.selected.clone();
-    selected.sort();
-    serde_json::json!({
-        "selected": selected,
-        "source": req.source,
-        "notebook_outputs": req.notebook_outputs,
-        "archives": req.archives,
-        "binaries": req.binaries,
-        "max_file_size": req.max_file_size,
-    })
-    .to_string()
 }
 
 async fn preview(
@@ -1908,8 +1900,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{redrawn}");
-        // `binaries` changes the extraction key, so this is a real pack to compare
-        // with, not another redraw of the stored result.
+        // `binaries` changes the extraction settings, so this pack extracts
+        // afresh rather than reusing what the first one extracted.
         let (status, fresh) = post_to(
             &app,
             "/api/pack",
@@ -2623,6 +2615,113 @@ mod tests {
         assert!(json["dump"].as_str().unwrap().contains(&note), "{json}");
         assert_eq!(json["files_extracted"], 1);
         assert_eq!(json["files_skipped"], 1);
+    }
+
+    /// Write `body` to `path`, dated an hour ago so a cache trusts its time.
+    fn write_old(path: &Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        set_mtime(
+            path,
+            std::time::SystemTime::now() - Duration::from_secs(3600),
+        );
+    }
+
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    /// The outcome the pack answer `json` gives the file `relative`.
+    fn outcome<'a>(json: &'a serde_json::Value, relative: &str) -> &'a serde_json::Value {
+        json["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["relative"] == relative)
+            .unwrap_or_else(|| panic!("no {relative} outcome in {json}"))
+    }
+
+    #[tokio::test]
+    async fn test_pack_with_file_edited_after_the_scan_returns_its_new_text() {
+        let dir = tempfile::tempdir().unwrap();
+        write_old(&dir.path().join("a.txt"), "as scanned\n");
+        let app = router();
+        let path = dir.path().display().to_string();
+        let (status, scan) = post_to(&app, "/api/scan", serde_json::json!({ "path": path })).await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        std::fs::write(
+            dir.path().join("a.txt"),
+            "edited between the scan and the pulp\n",
+        )
+        .unwrap();
+        let (status, json) = post_to(
+            &app,
+            "/api/pack",
+            serde_json::json!({
+                "path": path,
+                "format": "txt",
+                "manifest_id": scan["manifest_id"],
+                "selected": ["a.txt"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(outcome(&json, "a.txt")["status"], "extracted", "{json}");
+        let dump = json["dump"].as_str().unwrap();
+        assert!(
+            dump.contains("edited between the scan and the pulp"),
+            "{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pack_again_with_one_file_edited_returns_its_new_text_and_reuses_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
+        write_old(&a, "alpha as written\n");
+        write_old(&b, "bravo as written\n");
+        let app = router();
+        let path = dir.path().display().to_string();
+        let (status, scan) = post_to(&app, "/api/scan", serde_json::json!({ "path": path })).await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        let body = serde_json::json!({
+            "path": path,
+            "format": "txt",
+            "manifest_id": scan["manifest_id"],
+            "selected": ["a.txt", "b.txt"]
+        });
+        let (status, first) = post_to(&app, "/api/pack", body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["cache_hit"], false);
+
+        // An edit, dated in the past so the next pack may cache it too.
+        std::fs::write(&a, "alpha, edited after the first pulp\n").unwrap();
+        set_mtime(&a, std::time::SystemTime::now() - Duration::from_secs(60));
+        // New bytes at the same size and time: only a read would see them.
+        let when = std::fs::metadata(&b).unwrap().modified().unwrap();
+        std::fs::write(&b, "BRAVO AS WRITTEN\n").unwrap();
+        set_mtime(&b, when);
+
+        let (status, second) = post_to(&app, "/api/pack", body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        let dump = second["dump"].as_str().unwrap();
+        assert!(
+            dump.contains("alpha, edited after the first pulp"),
+            "{dump}"
+        );
+        assert!(dump.contains("bravo as written"), "b.txt was read: {dump}");
+        assert_eq!(outcome(&second, "a.txt")["status"], "extracted");
+        assert_eq!(second["cache_hit"], false, "a.txt was read");
+        assert_ne!(second["result_id"], first["result_id"]);
+
+        let (status, third) = post_to(&app, "/api/pack", body).await;
+        assert_eq!(status, StatusCode::OK, "{third}");
+        assert_eq!(third["cache_hit"], true, "{third}");
+        assert_eq!(third["dump"], second["dump"]);
     }
 
     #[tokio::test]

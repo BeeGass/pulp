@@ -369,6 +369,49 @@ fn test_pack_with_corrupt_pdf_and_docx_returns_unreadable_notes() {
     assert!(dump.contains("[docx unreadable: "), "{dump}");
 }
 
+const DOWNLOAD_PAGE: &[u8] = b"<html><head><meta charset=\"utf-8\">\
+    <title>Preparing to download ...</title></head>\
+    <body><p>Your download will start in a moment.</p></body></html>\n";
+
+#[test]
+fn test_pack_with_files_not_matching_their_names_returns_notes_saying_what_they_hold() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("report.pdf"), DOWNLOAD_PAGE).unwrap();
+    fs::write(
+        tmp.path().join("minutes.docx"),
+        "Minutes of the tide board\n",
+    )
+    .unwrap();
+    fs::write(tmp.path().join("novel.epub"), b"").unwrap();
+
+    let opts = options_for(tmp.path());
+    let packed = pack(&opts).unwrap_or_else(|e| panic!("{e}"));
+    for (name, kind, reason) in [
+        (
+            "report.pdf",
+            "pdf",
+            "not a PDF: it holds an HTML page (\"Preparing to download ...\")",
+        ),
+        (
+            "minutes.docx",
+            "docx",
+            "not a Word document: it holds plain text",
+        ),
+        ("novel.epub", "epub", "not an EPUB: the file is empty"),
+    ] {
+        let file = find_file(&packed, name);
+        assert_unreadable(file, kind);
+        assert_eq!(file.status, FileStatus::Unreadable(reason.into()), "{name}");
+    }
+    let dump = dump_with(&opts);
+    assert!(
+        dump.contains(
+            "[pdf unreadable: not a PDF: it holds an HTML page (\"Preparing to download ...\")]"
+        ),
+        "{dump}"
+    );
+}
+
 #[test]
 fn test_pack_entries_with_corrupt_pdf_and_docx_returns_unreadable_notes() {
     let files = [
@@ -393,6 +436,67 @@ fn test_pack_entries_with_corrupt_pdf_and_docx_returns_unreadable_notes() {
     assert_unreadable(find_file(&packed, "memo.docx"), "docx");
     assert_eq!(packed.stats.files_extracted, 1);
     assert_eq!(packed.stats.files_skipped, 2);
+}
+
+/// 26,702 bytes of UTF-8 prose with 3 NULs and 70 other control bytes (SOH,
+/// STX, ETX, DLE, DC1 to DC4) spread through it: about 0.3% of the file, as
+/// in text pulled out of a PDF.
+fn prose_with_stray_controls() -> Vec<u8> {
+    const LEN: usize = 26_702;
+    const STRAYS: usize = 73;
+    const STRAY: [u8; 8] = [0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13, 0x14];
+    let sentence = "The gauge at the north pier logged the tide every ten minutes \u{2014} \
+                    see the caf\u{e9} notes for the storm surge.\n";
+    let mut prose = sentence.repeat(LEN / sentence.len() + 1);
+    let mut cut = LEN - STRAYS;
+    while !prose.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    prose.truncate(cut);
+    while prose.len() < LEN - STRAYS {
+        prose.push('.');
+    }
+    // Evenly spaced, each between two characters; the 13th, 38th, and 63rd
+    // are NULs.
+    let step = prose.len() / (STRAYS + 1);
+    let mut out = Vec::with_capacity(LEN);
+    let mut from = 0;
+    for i in 0..STRAYS {
+        let mut at = (i + 1) * step;
+        while !prose.is_char_boundary(at) {
+            at += 1;
+        }
+        out.extend_from_slice(&prose.as_bytes()[from..at]);
+        out.push(if i % 25 == 12 {
+            0
+        } else {
+            STRAY[i % STRAY.len()]
+        });
+        from = at;
+    }
+    out.extend_from_slice(&prose.as_bytes()[from..]);
+    assert_eq!(out.len(), LEN);
+    assert_eq!(out.iter().filter(|b| **b == 0).count(), 3);
+    assert_eq!(out.iter().filter(|b| STRAY.contains(b)).count(), 70);
+    out
+}
+
+#[test]
+fn test_pack_with_prose_holding_nuls_and_stray_controls_returns_extracted_text() {
+    let prose = prose_with_stray_controls();
+    assert!(!pulp::looks_binary(&prose));
+    assert_eq!(
+        pulp::classify(Path::new("extracted"), Some(&prose)),
+        Kind::Text
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("extracted.txt"), &prose).unwrap();
+    let packed = pack(&options_for(tmp.path())).unwrap_or_else(|e| panic!("{e}"));
+    let file = find_file(&packed, "extracted.txt");
+    assert_eq!(file.status, FileStatus::Extracted, "{:?}", file.status);
+    assert_eq!(file.kind, Kind::Text);
+    assert_eq!(file.text.as_bytes(), prose.as_slice());
 }
 
 #[test]

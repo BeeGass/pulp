@@ -1,13 +1,14 @@
-//! Bounded mill session: manifests, extraction results, one pack job, and one
-//! preview.
+//! Bounded mill session: manifests, extraction results, the extraction cache
+//! of the last pack, one pack job, and one preview.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::cache::ExtractCache;
 use crate::manifest::{ManifestEntry, ScanManifest};
-use crate::pack::{PackedFile, Stats};
+use crate::pack::Packed;
 
 const MAX_ITEMS: usize = 8;
 /// Extracted text kept for redraws and full downloads. The newest result stays
@@ -27,6 +28,10 @@ pub struct Mill {
     current: Mutex<Option<Arc<PackJob>>>,
     manifests: Mutex<Lru<Arc<StoredManifest>>>,
     results: Mutex<Lru<Arc<StoredResult>>>,
+    /// What the most recent pack extracted, for the next pack to reuse. It
+    /// shares that pack's files with its stored result, so it costs no
+    /// second copy of their text.
+    extract_cache: Mutex<Option<Arc<ExtractCache>>>,
 }
 
 /// One admitted pack job with its own cancel flag and progress.
@@ -50,9 +55,9 @@ pub struct StoredManifest {
 pub struct StoredResult {
     pub id: String,
     pub manifest_id: String,
-    pub extract_key: String,
-    pub files: Vec<PackedFile>,
-    pub stats: Stats,
+    /// The pack's files and totals, shared with the extraction cache made
+    /// from the same pack.
+    pub packed: Arc<Packed>,
     pub roots: Vec<PathBuf>,
     pub source_mode: bool,
 }
@@ -88,6 +93,7 @@ impl Default for Mill {
             current: Mutex::new(None),
             manifests: Mutex::new(Lru::new(MAX_MANIFEST_BYTES)),
             results: Mutex::new(Lru::new(MAX_RESULT_BYTES)),
+            extract_cache: Mutex::new(None),
         }
     }
 }
@@ -210,9 +216,14 @@ impl Mill {
     }
 
     pub fn put_result(&self, result: StoredResult) -> Arc<StoredResult> {
-        let bytes = result.files.iter().map(|f| f.text.len()).sum::<usize>();
+        let bytes = result
+            .packed
+            .files
+            .iter()
+            .map(|f| f.text.len())
+            .sum::<usize>();
         let id = result.id.clone();
-        let cancelled = result.stats.cancelled;
+        let cancelled = result.packed.stats.cancelled;
         let arc = Arc::new(result);
         if !cancelled {
             self.results.lock().unwrap_or_else(|e| e.into_inner()).push(
@@ -232,16 +243,28 @@ impl Mill {
             .cloned()
     }
 
-    pub fn find_result(&self, manifest_id: &str, extract_key: &str) -> Option<Arc<StoredResult>> {
-        let mut guard = self.results.lock().unwrap_or_else(|e| e.into_inner());
-        let id = guard.items.iter().find_map(|(id, (r, _))| {
-            if r.manifest_id == manifest_id && r.extract_key == extract_key && !r.stats.cancelled {
-                Some(id.clone())
-            } else {
-                None
-            }
-        })?;
-        guard.get(&id).cloned()
+    /// The extraction cache of the most recent pack.
+    pub fn extract_cache(&self) -> Option<Arc<ExtractCache>> {
+        self.extract_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Keep `cache` for the next pack, in place of the one before.
+    ///
+    /// Only one is kept, and it holds the files of the newest pack, which
+    /// the result store keeps whatever its size, so the cache adds nothing
+    /// to the text the mill holds. A cancelled pack's result is not stored,
+    /// so its cache alone holds what that pack read before it stopped.
+    pub fn keep_extract_cache(&self, cache: ExtractCache) {
+        let previous = self
+            .extract_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(Arc::new(cache));
+        // Freed outside the lock.
+        drop(previous);
     }
 }
 
@@ -437,16 +460,18 @@ mod tests {
         StoredResult {
             id: new_id(),
             manifest_id: "m".into(),
-            extract_key: "k".into(),
-            files: vec![PackedFile {
-                id: "a.txt".into(),
-                relative: "a.txt".into(),
-                kind: crate::classify::Kind::Text,
-                size: text_bytes as u64,
-                text: "x".repeat(text_bytes),
-                status: crate::pack::FileStatus::Extracted,
-            }],
-            stats: Stats::default(),
+            packed: Arc::new(Packed {
+                files: vec![crate::pack::PackedFile {
+                    id: "a.txt".into(),
+                    relative: "a.txt".into(),
+                    kind: crate::classify::Kind::Text,
+                    size: text_bytes as u64,
+                    text: "x".repeat(text_bytes),
+                    status: crate::pack::FileStatus::Extracted,
+                }],
+                tree: String::new(),
+                stats: crate::pack::Stats::default(),
+            }),
             roots: Vec::new(),
             source_mode: false,
         }

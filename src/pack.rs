@@ -3,14 +3,20 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 #[cfg(feature = "native")]
+use std::sync::Arc;
+#[cfg(feature = "native")]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "native")]
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 use globset::GlobSet;
 #[cfg(feature = "native")]
 use rayon::prelude::*;
 
+#[cfg(feature = "native")]
+use crate::cache::{CacheEntry, ExtractCache, ExtractFingerprint};
 use crate::classify::{Kind, classify, kind_from_name, looks_binary};
 use crate::config::{Options, TreeMode, apply_budgets, cmp_path_order, default_exclude_globs};
 use crate::error::Error;
@@ -116,9 +122,10 @@ impl FileStatus {
     pub fn message(&self, size: u64) -> String {
         match self {
             Self::Extracted => String::new(),
-            Self::SkippedBinary => format!(
-                "Skipped a binary file ({size} bytes). The bytes are not written into the dump. Enable binaries to keep a one-line placeholder instead."
-            ),
+            // Only the CLI can keep binaries, so this names no option.
+            Self::SkippedBinary => {
+                format!("Skipped a binary file ({size} bytes): the dump holds no text for it.")
+            }
             Self::TooLarge(limit) => format!(
                 "File is {size} bytes, over the {limit}-byte cap. Raise the cap or leave this file unchecked."
             ),
@@ -236,6 +243,10 @@ pub fn pack_with_cancel(opts: &Options, cancel: Option<&AtomicBool>) -> Result<P
 
 /// Extract already-discovered entries. Used by the mill to avoid a second walk.
 ///
+/// Each file is read as it is now, so one edited since the scan is read in
+/// its new form. One that is gone, is no longer a regular file, or whose
+/// path now passes through a symlink is flagged [`FileStatus::Changed`].
+///
 /// `progress` counts entries as they finish, so another thread can report how
 /// far the pack has got.
 #[cfg(feature = "native")]
@@ -246,37 +257,180 @@ pub fn pack_manifest(
     progress: Option<&AtomicUsize>,
     start: Option<Instant>,
 ) -> Result<Packed, Error> {
-    let extract_opts = ExtractOpts::from_options(opts);
-    let bytes_read = AtomicU64::new(0);
-    let archive_cut = AtomicBool::new(false);
+    let entries = pack_each_entry(manifest, opts, cancel, progress, None)?;
+    let (mut read, mut cut) = (0u64, false);
+    let mut files = Vec::new();
+    for entry in entries.into_iter().flatten() {
+        read += entry.read;
+        cut |= entry.cut;
+        files.extend(entry.files);
+    }
+    files.sort_by(|a, b| a.relative.cmp(&b.relative));
+    let cancelled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+    let truncated = manifest.truncated || cancelled || cut;
+    Ok(finish_packed(
+        opts, files, read, truncated, cancelled, start,
+    ))
+}
 
-    let mut files = run_parallel(opts.jobs, || {
+/// How long a file must have gone unmodified, when a pack begins, before
+/// the cache made from that pack trusts the file's modification time.
+///
+/// Some file systems keep modification times as coarse as 2 s (FAT), so a
+/// file written again within one tick, at the same size, would look
+/// unchanged. A file modified this recently is read again the next time.
+#[cfg(feature = "native")]
+const SETTLE: Duration = Duration::from_secs(2);
+
+/// [`pack_manifest`] that reuses `cache` for files unchanged since it was
+/// made, and returns this pack inside the cache for the next one: see
+/// [`ExtractCache::packed`].
+///
+/// Every file is opened as a read opens it, with the same checks. When
+/// `cache` was made with the same extraction settings
+/// ([`ExtractFingerprint`]) and holds the file with the path, size, and
+/// modification time it has now, the file's outcome is reused: it is
+/// neither read nor extracted. Every other file is read and extracted as
+/// [`pack_manifest`] does it. The dump, the stats but for the time taken,
+/// and the outcomes are what [`pack_manifest`] gives, and `progress` counts
+/// a reused file as done.
+///
+/// The new cache holds every file of this pack but those that failed to
+/// extract, that changed since the scan, or that were modified within two
+/// seconds of the pack's start, so the next pack reads those again.
+#[cfg(feature = "native")]
+pub fn pack_manifest_cached(
+    manifest: &crate::manifest::ScanManifest,
+    opts: &Options,
+    cancel: Option<&AtomicBool>,
+    progress: Option<&AtomicUsize>,
+    start: Option<Instant>,
+    cache: Option<&ExtractCache>,
+) -> Result<ExtractCache, Error> {
+    let fingerprint = ExtractFingerprint::of(opts);
+    let cache = cache.filter(|cache| *cache.fingerprint() == fingerprint);
+    let began = SystemTime::now();
+    let entries = pack_each_entry(manifest, opts, cancel, progress, cache)?;
+
+    let (mut read, mut cut, mut reused) = (0u64, false, 0usize);
+    // Each entry's file as read, when the next pack may trust it.
+    let mut keep: Vec<Option<(FileStat, u64, bool)>> = Vec::with_capacity(entries.len());
+    let mut tagged: Vec<(usize, PackedFile)> = Vec::new();
+    for (index, entry) in entries.into_iter().enumerate() {
+        let Some(entry) = entry else {
+            keep.push(None);
+            continue;
+        };
+        read += entry.read;
+        cut |= entry.cut;
+        reused += usize::from(entry.reused);
+        let lasting = entry.files.iter().all(outlasts_the_read);
+        keep.push(
+            entry
+                .stat
+                .filter(|stat| lasting && is_settled(stat, began))
+                .map(|stat| (stat, entry.read, entry.cut)),
+        );
+        tagged.extend(entry.files.into_iter().map(|file| (index, file)));
+    }
+    // The order `pack_manifest` gives: a stable sort by path of the files in
+    // entry order.
+    tagged.sort_by(|a, b| a.1.relative.cmp(&b.1.relative));
+    let mut positions = vec![Vec::new(); keep.len()];
+    let files = tagged
+        .into_iter()
+        .enumerate()
+        .map(|(at, (index, file))| {
+            positions[index].push(at);
+            file
+        })
+        .collect();
+    let cancelled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+    let truncated = manifest.truncated || cancelled || cut;
+    let packed = Arc::new(finish_packed(
+        opts, files, read, truncated, cancelled, start,
+    ));
+
+    let index = manifest
+        .entries
+        .iter()
+        .zip(keep)
+        .zip(positions)
+        .filter_map(|((entry, kept), positions)| {
+            let (stat, read, cut) = kept?;
+            let cached = CacheEntry::new(
+                stat.size,
+                stat.modified,
+                entry.absolute.clone(),
+                read,
+                cut,
+                positions,
+            );
+            Some((entry.id.clone(), cached))
+        })
+        .collect();
+    Ok(ExtractCache::new(fingerprint, packed, index, reused))
+}
+
+/// Whether a file's modification time is at least [`SETTLE`] older than
+/// `began`, so a later edit is sure to change it.
+#[cfg(feature = "native")]
+fn is_settled(stat: &FileStat, began: SystemTime) -> bool {
+    stat.modified
+        .and_then(|modified| modified.checked_add(SETTLE))
+        .is_some_and(|settled| settled <= began)
+}
+
+/// Whether reading the same bytes again is sure to give this outcome. An
+/// extraction that failed may not fail again: its child may have timed out
+/// on a busy machine.
+#[cfg(feature = "native")]
+fn outlasts_the_read(file: &PackedFile) -> bool {
+    !matches!(file.status, FileStatus::Error(_) | FileStatus::Changed)
+}
+
+/// Pack every manifest entry, in parallel, into a list in manifest order.
+/// An entry that the cancel flag stopped before it began is `None`.
+#[cfg(feature = "native")]
+fn pack_each_entry(
+    manifest: &crate::manifest::ScanManifest,
+    opts: &Options,
+    cancel: Option<&AtomicBool>,
+    progress: Option<&AtomicUsize>,
+    cache: Option<&ExtractCache>,
+) -> Result<Vec<Option<EntryPack>>, Error> {
+    let extract_opts = ExtractOpts::from_options(opts);
+    run_parallel(opts.jobs, || {
         manifest
             .entries
             .par_iter()
-            .flat_map(|entry| {
-                let (files, cut) = process_entry(entry, opts, &extract_opts, &bytes_read, cancel);
-                if cut {
-                    archive_cut.store(true, Ordering::Relaxed);
-                }
+            .map(|entry| {
+                let packed = process_entry(entry, opts, &extract_opts, cancel, cache);
                 if let Some(done) = progress {
                     done.fetch_add(1, Ordering::SeqCst);
                 }
-                files
+                packed
             })
-            .collect::<Vec<PackedFile>>()
-    })?;
-    files.sort_by(|a, b| a.relative.cmp(&b.relative));
-    let cancelled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
-    let archive_cut = archive_cut.load(Ordering::Relaxed);
+            .collect()
+    })
+}
 
+/// A pack of `files`, already in dump order, with its directory map and
+/// totals.
+fn finish_packed(
+    opts: &Options,
+    files: Vec<PackedFile>,
+    bytes_read: u64,
+    truncated: bool,
+    cancelled: bool,
+    start: Option<Instant>,
+) -> Packed {
     let tree = render_pack_tree(opts, &files);
     let files_extracted = files
         .iter()
         .filter(|f| f.status == FileStatus::Extracted)
         .count();
     let files_skipped = files.len().saturating_sub(files_extracted);
-
     let chunks = std::iter::once(tree.as_str()).chain(
         files
             .iter()
@@ -284,21 +438,20 @@ pub fn pack_manifest(
             .map(|file| file.text.as_str()),
     );
     let (chars_emitted, tokens_est) = crate::tokens::summarize_chunks(chunks);
-
-    Ok(Packed {
+    Packed {
         files,
         tree,
         stats: Stats {
             files_extracted,
             files_skipped,
-            bytes_read: bytes_read.load(Ordering::Relaxed),
+            bytes_read,
             chars_emitted,
             tokens_est,
             elapsed: pack_clock_elapsed(start),
-            truncated: manifest.truncated || cancelled || archive_cut,
+            truncated,
             cancelled,
         },
-    })
+    }
 }
 
 /// Extract one manifest entry on the calling thread, as [`pack_manifest`]
@@ -309,7 +462,9 @@ pub fn pack_manifest(
 #[cfg(feature = "native")]
 pub(crate) fn pack_manifest_entry(entry: &ManifestEntry, opts: &Options) -> Vec<PackedFile> {
     let extract_opts = ExtractOpts::from_options(opts);
-    let (mut files, _) = process_entry(entry, opts, &extract_opts, &AtomicU64::new(0), None);
+    let mut files = process_entry(entry, opts, &extract_opts, None, None)
+        .map(|packed| packed.files)
+        .unwrap_or_default();
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
     files
 }
@@ -338,7 +493,7 @@ pub fn pack_entries(
     }
     let policy = crate::filter::PathPolicy::from_options(opts)?;
     let extract_opts = ExtractOpts::from_options(opts);
-    let bytes_read = AtomicU64::new(0);
+    let mut bytes_read = 0u64;
     let selection = opts.selection.resolve(entries.iter().map(|entry| entry.id));
     let mut chosen: Vec<&MemoryFile<'_>> = entries
         .iter()
@@ -364,7 +519,7 @@ pub fn pack_entries(
             ));
             continue;
         }
-        bytes_read.fetch_add(size, Ordering::Relaxed);
+        bytes_read += size;
         let mut budget = ArchiveBudget::default();
         files.extend(process_item(
             WorkItem {
@@ -383,33 +538,14 @@ pub fn pack_entries(
     }
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
     let cancelled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
-    let tree = render_pack_tree(opts, &files);
-    let files_extracted = files
-        .iter()
-        .filter(|f| f.status == FileStatus::Extracted)
-        .count();
-    let files_skipped = files.len().saturating_sub(files_extracted);
-    let chunks = std::iter::once(tree.as_str()).chain(
-        files
-            .iter()
-            .filter(|file| file.status == FileStatus::Extracted)
-            .map(|file| file.text.as_str()),
-    );
-    let (chars_emitted, tokens_est) = crate::tokens::summarize_chunks(chunks);
-    Ok(Packed {
+    Ok(finish_packed(
+        opts,
         files,
-        tree,
-        stats: Stats {
-            files_extracted,
-            files_skipped,
-            bytes_read: bytes_read.load(Ordering::Relaxed),
-            chars_emitted,
-            tokens_est,
-            elapsed: pack_clock_elapsed(start),
-            truncated: truncated || cancelled,
-            cancelled,
-        },
-    })
+        bytes_read,
+        truncated || cancelled,
+        cancelled,
+        start,
+    ))
 }
 
 #[cfg(feature = "native")]
@@ -438,60 +574,115 @@ where
     }
 }
 
+/// What packing one manifest entry gave.
+#[cfg(feature = "native")]
+struct EntryPack {
+    files: Vec<PackedFile>,
+    /// Bytes read from the file.
+    read: u64,
+    /// Whether the archive budget cut the entry's members short.
+    cut: bool,
+    /// The file's size and modification time as it was opened; `None` when
+    /// it was never opened or could not be read.
+    stat: Option<FileStat>,
+    /// Whether the files came from a cache rather than a read.
+    reused: bool,
+}
+
+#[cfg(feature = "native")]
+impl EntryPack {
+    /// A note for an entry that was not read.
+    fn note(file: PackedFile) -> Self {
+        Self {
+            files: vec![file],
+            read: 0,
+            cut: false,
+            stat: None,
+            reused: false,
+        }
+    }
+}
+
+/// A file's size and modification time, as its open handle reports them.
+#[cfg(feature = "native")]
+#[derive(Debug, Clone, Copy)]
+struct FileStat {
+    size: u64,
+    modified: Option<SystemTime>,
+}
+
+/// Pack one manifest entry, reusing what `cache` holds for it when the
+/// file is unchanged since the cache read it. `None` when the pack was
+/// cancelled before this entry began.
 #[cfg(feature = "native")]
 fn process_entry(
     entry: &ManifestEntry,
     opts: &Options,
     extract_opts: &ExtractOpts,
-    bytes_read: &AtomicU64,
     cancel: Option<&AtomicBool>,
-) -> (Vec<PackedFile>, bool) {
+    cache: Option<&ExtractCache>,
+) -> Option<EntryPack> {
     if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-        return (Vec::new(), false);
+        return None;
     }
     if opts.list_only {
-        return (vec![list_only_file(entry, opts)], false);
+        return Some(EntryPack::note(list_only_file(entry, opts)));
     }
     if let Some(msg) = changed_since_scan(entry) {
-        return (vec![packed_changed(entry, msg)], false);
+        return Some(EntryPack::note(packed_changed(entry, msg)));
     }
-    if entry.size > opts.max_file_size {
-        let too_large = packed_too_large(
+    let (file, meta) = match open_checked(entry, opts.follow_links) {
+        Ok(Ok(opened)) => opened,
+        Ok(Err(msg)) => return Some(EntryPack::note(packed_changed(entry, msg))),
+        Err(err) => return Some(EntryPack::note(entry_error(entry, &err))),
+    };
+    // The file as it is now decides, not as the scan found it.
+    let stat = FileStat {
+        size: meta.len(),
+        modified: meta.modified().ok(),
+    };
+    if let Some(cache) = cache
+        && let Some(hit) = cache.lookup(&entry.id, &entry.absolute, stat.size, stat.modified)
+    {
+        return Some(EntryPack {
+            files: cache.entry_files(&entry.id).cloned().collect(),
+            read: hit.bytes_read(),
+            cut: hit.archive_cut(),
+            stat: Some(stat),
+            reused: true,
+        });
+    }
+    let too_large = |size| {
+        packed_too_large(
             entry.id.clone(),
             entry.relative.clone(),
             entry.kind,
-            entry.size,
+            size,
             opts.max_file_size,
-        );
-        return (vec![too_large], false);
+        )
+    };
+    let mut packed = EntryPack {
+        files: Vec::new(),
+        read: 0,
+        cut: false,
+        stat: Some(stat),
+        reused: false,
+    };
+    if stat.size > opts.max_file_size {
+        packed.files.push(too_large(stat.size));
+        return Some(packed);
     }
-    let bytes = match read_limited(entry, opts.follow_links, opts.max_file_size) {
+    let bytes = match read_capped(&file, stat.size, opts.max_file_size) {
         Ok(EntryRead::Bytes(bytes)) => bytes,
         Ok(EntryRead::TooLarge(size)) => {
-            let too_large = packed_too_large(
-                entry.id.clone(),
-                entry.relative.clone(),
-                entry.kind,
-                size,
-                opts.max_file_size,
-            );
-            return (vec![too_large], false);
+            packed.files.push(too_large(size));
+            return Some(packed);
         }
-        Ok(EntryRead::Changed(msg)) => return (vec![packed_changed(entry, msg)], false),
-        Err(err) => {
-            let failed = packed_error(
-                entry.id.clone(),
-                entry.relative.clone(),
-                entry.kind,
-                entry.size,
-                err.to_string(),
-            );
-            return (vec![failed], false);
-        }
+        Err(err) => return Some(EntryPack::note(entry_error(entry, &err))),
     };
-    bytes_read.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    packed.read = bytes.len() as u64;
     let mut budget = ArchiveBudget::default();
-    let files = process_item(
+    packed.files = process_item(
         WorkItem {
             id: entry.id.clone(),
             relative: entry.relative.clone(),
@@ -504,35 +695,58 @@ fn process_entry(
         extract_opts,
         &mut budget,
     );
-    (files, budget.cut())
+    packed.cut = budget.cut();
+    Some(packed)
 }
 
-/// What reading a scanned entry found.
+/// The note for an entry that could not be opened or read.
+#[cfg(feature = "native")]
+fn entry_error(entry: &ManifestEntry, err: &std::io::Error) -> PackedFile {
+    packed_error(
+        entry.id.clone(),
+        entry.relative.clone(),
+        entry.kind,
+        entry.size,
+        err.to_string(),
+    )
+}
+
+/// Open the file behind `entry` for reading, and check on the open file
+/// that it is still a regular file. Returns it with its metadata, or why it
+/// is no longer the file the scan found.
+///
+/// The open refuses the swaps [`open_entry`] names, and the check runs on
+/// the open file, so nothing done to the path after the open changes what
+/// is judged or read.
+#[cfg(feature = "native")]
+fn open_checked(
+    entry: &ManifestEntry,
+    follow_links: bool,
+) -> std::io::Result<Result<(std::fs::File, std::fs::Metadata), String>> {
+    let file = match open_entry(entry, follow_links)? {
+        Ok(file) => file,
+        Err(msg) => return Ok(Err(msg.into())),
+    };
+    let meta = file.metadata()?;
+    if let Some(msg) = not_regular(&meta) {
+        return Ok(Err(msg));
+    }
+    Ok(Ok((file, meta)))
+}
+
+/// What reading an open file found.
 #[cfg(feature = "native")]
 enum EntryRead {
     Bytes(Vec<u8>),
-    /// Grew past the per-file cap; holds its size.
+    /// Grew past the per-file cap while it was read; holds its size.
     TooLarge(u64),
-    /// Not the file the scan saw; holds why.
-    Changed(String),
 }
 
-/// Read the file behind `entry`, up to `max` bytes.
-///
-/// The file is opened first, refusing the swaps [`open_entry`] names, and
-/// its type, size, and modification time are then checked on the open
-/// file, so nothing done to the path after the open changes what is read.
+/// Read `file`, which reported `size` bytes, to its end, up to `max` bytes.
 #[cfg(feature = "native")]
-fn read_limited(entry: &ManifestEntry, follow_links: bool, max: u64) -> std::io::Result<EntryRead> {
-    let file = match open_entry(entry, follow_links)? {
-        Ok(file) => file,
-        Err(msg) => return Ok(EntryRead::Changed(msg.into())),
-    };
-    if let Some(msg) = changed_from(entry, &file.metadata()?) {
-        return Ok(EntryRead::Changed(msg));
-    }
-    let mut buf = Vec::new();
-    let n = (&file).take(max.saturating_add(1)).read_to_end(&mut buf)?;
+fn read_capped(file: &std::fs::File, size: u64, max: u64) -> std::io::Result<EntryRead> {
+    let mut buf = Vec::with_capacity(usize::try_from(size.min(max)).unwrap_or(0));
+    let n = file.take(max.saturating_add(1)).read_to_end(&mut buf)?;
     if n as u64 > max {
         let size = file.metadata().map_or(n as u64, |meta| meta.len());
         return Ok(EntryRead::TooLarge(size));
@@ -615,10 +829,13 @@ fn process_item(
     )]
 }
 
-/// Why the file at `entry.absolute` is no longer the one the scan saw, if
-/// it is not, judged from its path before anything opens it, so a path that
-/// has become a device or a FIFO is never opened. A path that has gone is
-/// left for the read to report.
+/// Why the file at `entry.absolute` can no longer be read as the one the
+/// scan found, if it cannot, judged from its path before anything opens it,
+/// so a path that has become a device or a FIFO is never opened. A path
+/// that has gone is left for the open to report.
+///
+/// An edit is no reason: a file whose size or modification time changed
+/// since the scan is read as it is now.
 #[cfg(feature = "native")]
 fn changed_since_scan(entry: &ManifestEntry) -> Option<String> {
     let link = std::fs::symlink_metadata(&entry.absolute).ok()?;
@@ -634,32 +851,14 @@ fn changed_since_scan(entry: &ManifestEntry) -> Option<String> {
     } else {
         link
     };
-    changed_from(entry, &meta)
+    not_regular(&meta)
 }
 
-/// Why a file whose metadata is `meta` is not the one the scan saw.
-///
-/// The type, size, and modification time decide, as they do for `make`.
-/// The device and inode do not: a remount, a network share reconnecting
-/// after sleep, or an overlay copy-up gives unchanged files new ones.
+/// Why a file whose metadata is `meta` cannot be read in place of the
+/// regular file the scan found: it is a folder, a FIFO, or a device now.
 #[cfg(feature = "native")]
-fn changed_from(entry: &ManifestEntry, meta: &std::fs::Metadata) -> Option<String> {
-    if !meta.is_file() {
-        return Some("changed since scan: no longer a regular file".into());
-    }
-    if meta.len() != entry.size {
-        return Some(format!(
-            "changed since scan: size {} -> {}",
-            entry.size,
-            meta.len()
-        ));
-    }
-    if let (Some(was), Ok(now)) = (entry.modified, meta.modified())
-        && was != now
-    {
-        return Some("changed since scan".into());
-    }
-    None
+fn not_regular(meta: &std::fs::Metadata) -> Option<String> {
+    (!meta.is_file()).then(|| "changed since scan: no longer a regular file".to_string())
 }
 
 #[cfg(feature = "native")]
@@ -1032,6 +1231,9 @@ fn extract_contained(
 ) -> Result<String, Error> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if crate::extract::isolate::needs_isolation(kind) {
+            // A file that is not what its name says needs no parser, so no
+            // child either; the child would write the same note.
+            crate::extract::check_signature(bytes, kind)?;
             crate::extract::isolate::extract_heavy(path, bytes, kind, extract_opts)
         } else {
             extract(relative, bytes, kind, extract_opts)
@@ -1138,6 +1340,15 @@ mod tests {
         assert!(err.contains("pdf header missing"));
         assert!(err.contains("80"));
         assert!(FileStatus::SkippedArchive.message(12).contains("archives"));
+    }
+
+    #[test]
+    fn test_file_status_message_with_skipped_binary_returns_text_true_in_every_mill() {
+        // The mills have no binaries option, so the message offers none.
+        assert_eq!(
+            FileStatus::SkippedBinary.message(649),
+            "Skipped a binary file (649 bytes): the dump holds no text for it."
+        );
     }
 
     #[test]
@@ -1638,9 +1849,20 @@ mod tests {
     /// Returns what packing that entry gives, failing if it blocks.
     #[cfg(unix)]
     fn pack_after_swap(dir: &Path, name: &str, swap: impl FnOnce(&Path)) -> Vec<PackedFile> {
+        pack_after_swap_with(Options::default(), dir, name, swap)
+    }
+
+    /// [`pack_after_swap`] with `opts` for every setting but the root.
+    #[cfg(unix)]
+    fn pack_after_swap_with(
+        opts: Options,
+        dir: &Path,
+        name: &str,
+        swap: impl FnOnce(&Path),
+    ) -> Vec<PackedFile> {
         let opts = Options {
             roots: vec![dir.to_path_buf()],
-            ..Options::default()
+            ..opts
         };
         let manifest = crate::manifest::scan_manifest(&opts).unwrap();
         let entry = manifest
@@ -1694,14 +1916,28 @@ mod tests {
         );
     }
 
+    /// What reading `entry` finds: its bytes as text, or why it was not read.
+    #[cfg(unix)]
+    fn read_entry(entry: &ManifestEntry) -> Result<String, String> {
+        match open_checked(entry, false) {
+            Ok(Ok((file, meta))) => match read_capped(&file, meta.len(), 1024) {
+                Ok(EntryRead::Bytes(bytes)) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+                Ok(EntryRead::TooLarge(size)) => Err(format!("too large: {size}")),
+                Err(err) => Err(err.to_string()),
+            },
+            Ok(Err(changed)) => Err(changed),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
-    fn test_read_limited_with_fifo_after_the_check_returns_changed_without_blocking() {
+    fn test_open_checked_with_fifo_after_the_check_returns_changed_without_blocking() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
         write(&path, b"");
         let entry = scanned_entry(&path);
-        // The swap lands after the path check, so only the read can see it.
+        // The swap lands after the path check, so only the open can see it.
         fs::remove_file(&path).unwrap();
         let made = std::process::Command::new("mkfifo")
             .arg(&path)
@@ -1710,21 +1946,18 @@ mod tests {
         assert!(made.success());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(match read_limited(&entry, false, 1024) {
-                Ok(EntryRead::Changed(msg)) => msg,
-                Ok(_) => "read".into(),
-                Err(err) => err.to_string(),
-            });
+            let _ = tx.send(read_entry(&entry));
         });
-        let msg = rx
+        let read = rx
             .recv_timeout(Duration::from_secs(20))
             .expect("open blocked");
+        let msg = read.expect_err("a FIFO was read");
         assert!(msg.contains("no longer a regular file"), "{msg}");
     }
 
     #[cfg(unix)]
     #[test]
-    fn test_read_limited_with_symlink_swapped_in_after_the_check_returns_changed() {
+    fn test_open_checked_with_symlink_swapped_in_after_the_check_returns_changed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
         write(&path, b"scanned\n");
@@ -1735,12 +1968,8 @@ mod tests {
         copy_mtime(&path, &secret);
         fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(&secret, &path).unwrap();
-        match read_limited(&entry, false, 1024) {
-            Ok(EntryRead::Changed(msg)) => assert!(msg.contains("replaced by a symlink"), "{msg}"),
-            Ok(EntryRead::Bytes(bytes)) => panic!("read {:?}", String::from_utf8_lossy(&bytes)),
-            Ok(EntryRead::TooLarge(size)) => panic!("too large: {size}"),
-            Err(err) => panic!("{err}"),
-        }
+        let msg = read_entry(&entry).expect_err("the symlink was followed");
+        assert!(msg.contains("replaced by a symlink"), "{msg}");
     }
 
     #[cfg(unix)]
@@ -1757,11 +1986,7 @@ mod tests {
         copy_mtime(&path, &copy);
         fs::rename(&copy, &path).unwrap();
         assert_eq!(changed_since_scan(&entry), None);
-        match read_limited(&entry, false, 1024).unwrap() {
-            EntryRead::Bytes(bytes) => assert_eq!(bytes, b"scanned\n"),
-            EntryRead::Changed(msg) => panic!("{msg}"),
-            EntryRead::TooLarge(size) => panic!("too large: {size}"),
-        }
+        assert_eq!(read_entry(&entry).as_deref(), Ok("scanned\n"));
     }
 
     #[cfg(unix)]
@@ -1794,6 +2019,76 @@ mod tests {
         });
         assert_eq!(files[0].status, FileStatus::Extracted, "{:?}", files[0]);
         assert_eq!(files[0].text, "scanned\n");
+    }
+
+    /// Set `path`'s modification time, following links.
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_manifest_entry_with_file_edited_after_scan_returns_its_current_text() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.txt"), b"scanned\n");
+        let files = pack_after_swap(dir.path(), "a.txt", |path| {
+            fs::write(path, b"edited after the scan\n").unwrap();
+        });
+        assert_eq!(files[0].status, FileStatus::Extracted, "{:?}", files[0]);
+        assert_eq!(files[0].text, "edited after the scan\n");
+        assert_eq!(files[0].size, 22);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_manifest_entry_with_same_size_edit_after_scan_returns_its_current_text() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.txt"), b"scanned\n");
+        let files = pack_after_swap(dir.path(), "a.txt", |path| {
+            let scanned = fs::metadata(path).unwrap().modified().unwrap();
+            fs::write(path, b"SCANNED\n").unwrap();
+            set_mtime(path, scanned + Duration::from_secs(10));
+        });
+        assert_eq!(files[0].status, FileStatus::Extracted, "{:?}", files[0]);
+        assert_eq!(files[0].text, "SCANNED\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_manifest_entry_with_file_grown_past_cap_returns_too_large_at_current_size() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.txt"), b"scanned\n");
+        let capped = Options {
+            max_file_size: 16,
+            ..Options::default()
+        };
+        let files = pack_after_swap_with(capped, dir.path(), "a.txt", |path| {
+            fs::write(path, [b'x'; 40]).unwrap();
+        });
+        assert_eq!(files[0].status, FileStatus::TooLarge(16), "{:?}", files[0]);
+        assert_eq!(files[0].size, 40);
+        assert_eq!(files[0].text, "[too large: 40 bytes; limit 16 bytes]");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_manifest_entry_with_file_shrunk_under_cap_returns_its_text() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.txt"), &[b'x'; 40]);
+        let capped = Options {
+            max_file_size: 16,
+            ..Options::default()
+        };
+        let files = pack_after_swap_with(capped, dir.path(), "a.txt", |path| {
+            fs::write(path, b"now small\n").unwrap();
+        });
+        assert_eq!(files[0].status, FileStatus::Extracted, "{:?}", files[0]);
+        assert_eq!(files[0].text, "now small\n");
     }
 
     #[cfg(unix)]
