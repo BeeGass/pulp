@@ -73,8 +73,7 @@ mod tests {
 
     #[test]
     fn test_sync_with_scratch_tree_copies_then_settles() {
-        let dir = std::env::temp_dir().join(format!("pulp-xtask-site-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::uitest::private_scratch_dir().unwrap();
         for &(from, _) in COPIES {
             let src = dir.join(from);
             std::fs::create_dir_all(src.parent().unwrap()).unwrap();
