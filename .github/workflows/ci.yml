@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # The browser mill builds pulp without its native features, for wasm32.
+      - name: clippy (pulp without native features)
+        run: cargo clippy -p pulp --no-default-features --lib -- -D warnings
+      - name: clippy (browser mill, wasm32)
+        run: cargo clippy -p pulp-wasm --target wasm32-unknown-unknown -- -D warnings
+      - name: test
+        run: cargo test --workspace
+      - name: site copies match web/
+        run: cargo xtask site --check
+      # ubuntu-latest ships google-chrome, which the harness finds on PATH.
+      - name: mill browser tests
+        run: cargo xtask ui-test
