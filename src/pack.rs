@@ -134,6 +134,17 @@ impl FileStatus {
             ),
             Self::Changed => "File changed on disk after the scan. Rescan, then pulp again so the dump matches the current bytes.".into(),
             Self::Error(err) => format!("Extraction failed for a {size}-byte file. {err}"),
+            // A misnamed file's reason already says what it holds, which a
+            // guess at damage or encryption would only blur.
+            Self::Unreadable(reason) if crate::extract::is_misnamed(reason) => {
+                let mut chars = reason.chars();
+                let first = chars.next().map(|c| c.to_ascii_uppercase());
+                format!(
+                    "{}{}. The dump holds a one-line note in its place.",
+                    first.map(String::from).unwrap_or_default(),
+                    chars.as_str()
+                )
+            }
             Self::Unreadable(reason) => format!(
                 "Could not parse this {size}-byte file, so the dump holds a one-line note in its place. It may be damaged, encrypted, or too large to unpack. {reason}"
             ),
@@ -1230,10 +1241,11 @@ fn extract_contained(
     extract_opts: &ExtractOpts,
 ) -> Result<String, Error> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if crate::extract::isolate::needs_isolation(kind) {
-            // A file that is not what its name says needs no parser, so no
-            // child either; the child would write the same note.
-            crate::extract::check_signature(bytes, kind)?;
+        // A file that is not what its name says never reaches the heavy parser,
+        // so it needs no child: it is read as what it holds, or refused, here.
+        if crate::extract::isolate::needs_isolation(kind)
+            && crate::extract::check_signature(bytes, kind).is_ok()
+        {
             crate::extract::isolate::extract_heavy(path, bytes, kind, extract_opts)
         } else {
             extract(relative, bytes, kind, extract_opts)
@@ -1399,7 +1411,8 @@ mod tests {
         let math = b"V(h)=1\n";
         let f90 = b"subroutine r\nend\n";
         let gz = [0x1f_u8, 0x8b, 0x08, 0x00];
-        let pdf = b"not a pdf";
+        // A real PDF header with nothing a parser can use after it.
+        let pdf = b"%PDF-1.4 garbage";
         let files = [
             MemoryFile {
                 id: "index.math",

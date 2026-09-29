@@ -55,7 +55,9 @@ fn extract_kind(
     kind: Kind,
     opts: &ExtractOpts,
 ) -> Result<String, Error> {
-    check_signature(bytes, kind)?;
+    if let Err(refusal) = check_signature(bytes, kind) {
+        return read_misnamed(relative, bytes, opts, refusal);
+    }
     match kind {
         Kind::Html if opts.source_mode => text::extract(bytes),
         Kind::Xml if opts.source_mode => text::extract(bytes),
@@ -81,6 +83,42 @@ fn extract_kind(
             bytes.len()
         )),
         Kind::Text | Kind::Unknown => text::extract(bytes),
+    }
+}
+
+/// A document whose bytes are not what its name says, `refusal` saying what
+/// they are instead.
+///
+/// A failed download usually leaves a web page, or a line of text, under the
+/// document's name. Its text is still worth a dump, so it is read as what it
+/// holds, under a note naming the mismatch: `[not a PDF: it holds an HTML page
+/// ("Preparing to download ...")]`. An empty file is the note alone. Anything
+/// else (an image, some other format) stays unreadable with the refusal.
+fn read_misnamed(
+    relative: &str,
+    bytes: &[u8],
+    opts: &ExtractOpts,
+    refusal: Error,
+) -> Result<String, Error> {
+    let actual = if bytes.is_empty() {
+        None
+    } else if is_html_page(bytes) {
+        Some(Kind::Html)
+    } else if infer::get(bytes).is_none() && !crate::classify::looks_binary(bytes) {
+        Some(Kind::Text)
+    } else {
+        return Err(refusal);
+    };
+    let note = match refusal {
+        Error::Unreadable(reason) => format!("[{reason}]"),
+        other => format!("[{other}]"),
+    };
+    match actual {
+        Some(kind) => {
+            let text = extract_kind(relative, bytes, kind, opts)?;
+            Ok(format!("{note}\n{text}"))
+        }
+        None => Ok(note),
     }
 }
 
@@ -129,6 +167,12 @@ pub(crate) fn check_signature(bytes: &[u8], kind: Kind) -> Result<(), Error> {
             contents(bytes)
         )))
     }
+}
+
+/// Whether an unreadable `reason` is [`check_signature`]'s refusal of a file
+/// whose bytes are not what its name says (`not a PDF: it holds ...`).
+pub(crate) fn is_misnamed(reason: &str) -> bool {
+    reason.starts_with("not a ") || reason.starts_with("not an ")
 }
 
 /// Whether `%PDF-` starts within the first [`PDF_HEADER_WITHIN`] bytes.
@@ -382,35 +426,71 @@ mod tests {
         }
     }
 
+    /// What `extract` reads from bytes that are not a `kind` document, split
+    /// into its note line and the text after it.
+    fn misnamed(bytes: &[u8], kind: Kind) -> (String, String) {
+        let text = extract("file", bytes, kind, &default_opts())
+            .unwrap_or_else(|err| panic!("expected text under a note, got {err:?}"));
+        let (note, rest) = text.split_once('\n').unwrap_or((&text, ""));
+        (note.to_string(), rest.to_string())
+    }
+
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x02\0\0\0";
 
     #[test]
-    fn test_extract_with_html_page_saved_as_pdf_returns_note_naming_the_page() {
+    fn test_extract_with_html_page_saved_as_pdf_returns_its_text_under_a_note() {
         let page = b"<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\n\
             <title>Preparing to download ...</title></head>\n\
             <body><p>Your file will start shortly.</p></body></html>\n";
+        let (note, text) = misnamed(page, Kind::Pdf);
         assert_eq!(
-            refusal(page, Kind::Pdf),
-            "not a PDF: it holds an HTML page (\"Preparing to download ...\")"
+            note,
+            "[not a PDF: it holds an HTML page (\"Preparing to download ...\")]"
         );
+        assert!(text.contains("Your file will start shortly."), "{text}");
         let untitled = b"  <html><body><p>Sign in to continue</p></body></html>";
+        let (note, text) = misnamed(untitled, Kind::Pdf);
+        assert_eq!(note, "[not a PDF: it holds an HTML page]");
+        assert!(text.contains("Sign in to continue"), "{text}");
+    }
+
+    #[test]
+    fn test_extract_with_html_page_saved_as_pdf_in_source_mode_returns_its_source() {
+        let page = b"<html><head><title>Notice</title></head><body><p>Moved</p></body></html>";
+        let opts = ExtractOpts {
+            source_mode: true,
+            ..default_opts()
+        };
+        let text = extract("file", page, Kind::Pdf, &opts).unwrap();
         assert_eq!(
-            refusal(untitled, Kind::Pdf),
-            "not a PDF: it holds an HTML page"
+            text,
+            format!(
+                "[not a PDF: it holds an HTML page (\"Notice\")]\n{}",
+                String::from_utf8_lossy(page)
+            )
         );
     }
 
     #[test]
-    fn test_extract_with_text_saved_as_docx_returns_note_naming_plain_text() {
-        assert_eq!(
-            refusal(b"Meeting notes\n- tide tables\n- storm log\n", Kind::Docx),
-            "not a Word document: it holds plain text"
-        );
+    fn test_extract_with_text_saved_as_docx_returns_the_text_under_a_note() {
+        let (note, text) = misnamed(b"Meeting notes\n- tide tables\n- storm log\n", Kind::Docx);
+        assert_eq!(note, "[not a Word document: it holds plain text]");
+        assert_eq!(text.trim_end(), "Meeting notes\n- tide tables\n- storm log");
     }
 
     #[test]
-    fn test_extract_with_empty_epub_returns_note_naming_an_empty_file() {
-        assert_eq!(refusal(b"", Kind::Epub), "not an EPUB: the file is empty");
+    fn test_extract_with_empty_epub_returns_the_note_alone() {
+        let text = extract("file", b"", Kind::Epub, &default_opts()).unwrap();
+        assert_eq!(text, "[not an EPUB: the file is empty]");
+    }
+
+    #[test]
+    fn test_is_misnamed_with_signature_refusal_and_parser_error_tells_them_apart() {
+        assert!(is_misnamed("not a PDF: it holds a PNG image"));
+        assert!(is_misnamed("not an EPUB: the file is empty"));
+        assert!(!is_misnamed(
+            "PDF error: couldn't parse input: invalid xref"
+        ));
     }
 
     #[test]
@@ -423,8 +503,8 @@ mod tests {
         let xhtml = b"<?xml version=\"1.0\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\">\
             <head><title>Access denied</title></head></html>";
         assert_eq!(
-            refusal(xhtml, Kind::Odt),
-            "not an OpenDocument text: it holds an HTML page (\"Access denied\")"
+            misnamed(xhtml, Kind::Odt).0,
+            "[not an OpenDocument text: it holds an HTML page (\"Access denied\")]"
         );
         let noise: Vec<u8> = (0..=255u8).cycle().skip(7).take(2048).collect();
         assert_eq!(
@@ -439,11 +519,11 @@ mod tests {
             "<html><head><title lang=\"en\">\n  Q3 &amp; Q4\n\ttide report {} </TITLE>",
             "and more ".repeat(20)
         );
-        let reason = refusal(page.as_bytes(), Kind::Epub);
-        let title = reason
-            .strip_prefix("not an EPUB: it holds an HTML page (\"")
-            .and_then(|rest| rest.strip_suffix("\")"))
-            .unwrap_or_else(|| panic!("{reason}"));
+        let (note, _) = misnamed(page.as_bytes(), Kind::Epub);
+        let title = note
+            .strip_prefix("[not an EPUB: it holds an HTML page (\"")
+            .and_then(|rest| rest.strip_suffix("\")]"))
+            .unwrap_or_else(|| panic!("{note}"));
         // Cut on the last word break within 57 characters, then "...".
         assert_eq!(
             title,
@@ -463,8 +543,8 @@ mod tests {
         let mut too_late = vec![b' '; 1024];
         too_late.extend_from_slice(b"%PDF-1.4 garbage");
         assert_eq!(
-            refusal(&too_late, Kind::Pdf),
-            "not a PDF: it holds plain text"
+            misnamed(&too_late, Kind::Pdf).0,
+            "[not a PDF: it holds plain text]"
         );
         // An old binary spreadsheet is a spreadsheet, not a zip.
         let mut xls = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1".to_vec();

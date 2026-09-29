@@ -374,7 +374,7 @@ const DOWNLOAD_PAGE: &[u8] = b"<html><head><meta charset=\"utf-8\">\
     <body><p>Your download will start in a moment.</p></body></html>\n";
 
 #[test]
-fn test_pack_with_files_not_matching_their_names_returns_notes_saying_what_they_hold() {
+fn test_pack_with_files_not_matching_their_names_returns_their_text_under_a_note() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("report.pdf"), DOWNLOAD_PAGE).unwrap();
     fs::write(
@@ -383,32 +383,44 @@ fn test_pack_with_files_not_matching_their_names_returns_notes_saying_what_they_
     )
     .unwrap();
     fs::write(tmp.path().join("novel.epub"), b"").unwrap();
+    fs::write(
+        tmp.path().join("scan.pdf"),
+        b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR",
+    )
+    .unwrap();
 
     let opts = options_for(tmp.path());
     let packed = pack(&opts).unwrap_or_else(|e| panic!("{e}"));
-    for (name, kind, reason) in [
+    for (name, text) in [
         (
             "report.pdf",
-            "pdf",
-            "not a PDF: it holds an HTML page (\"Preparing to download ...\")",
+            "[not a PDF: it holds an HTML page (\"Preparing to download ...\")]\n",
         ),
         (
             "minutes.docx",
-            "docx",
-            "not a Word document: it holds plain text",
+            "[not a Word document: it holds plain text]\nMinutes of the tide board",
         ),
-        ("novel.epub", "epub", "not an EPUB: the file is empty"),
+        ("novel.epub", "[not an EPUB: the file is empty]"),
     ] {
         let file = find_file(&packed, name);
-        assert_unreadable(file, kind);
-        assert_eq!(file.status, FileStatus::Unreadable(reason.into()), "{name}");
+        assert_eq!(file.status, FileStatus::Extracted, "{name}");
+        assert!(file.text.starts_with(text), "{name}: {:?}", file.text);
     }
-    let dump = dump_with(&opts);
     assert!(
-        dump.contains(
-            "[pdf unreadable: not a PDF: it holds an HTML page (\"Preparing to download ...\")]"
-        ),
-        "{dump}"
+        find_file(&packed, "report.pdf")
+            .text
+            .contains("Your download will start in a moment."),
+        "the page's text follows the note"
+    );
+    // An image under a PDF name has no text to read, so it stays unreadable.
+    let scan = find_file(&packed, "scan.pdf");
+    assert_eq!(
+        scan.status,
+        FileStatus::Unreadable("not a PDF: it holds a PNG image".into())
+    );
+    assert_eq!(
+        scan.status.message(scan.size),
+        "Not a PDF: it holds a PNG image. The dump holds a one-line note in its place."
     );
 }
 
