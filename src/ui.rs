@@ -844,10 +844,20 @@ fn packed_from_stored(stored: &StoredResult, opts: &Options) -> pack::Packed {
             .collect();
         crate::tree::render_tree(&pack::tree_label(&stored.roots), &paths)
     };
+    // Count what this drawing holds, the map included or not, the way a fresh
+    // pack with these settings would.
+    let mut stats = stored.stats.clone();
+    let extracted = stored
+        .files
+        .iter()
+        .filter(|f| f.status == pack::FileStatus::Extracted)
+        .map(|f| f.text.as_str());
+    (stats.chars_emitted, stats.tokens_est) =
+        crate::tokens::summarize_chunks(std::iter::once(tree.as_str()).chain(extracted));
     pack::Packed {
         files: stored.files.clone(),
         tree,
-        stats: stored.stats.clone(),
+        stats,
     }
 }
 
@@ -1388,6 +1398,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn test_render_with_map_toggled_counts_like_a_fresh_pack() {
+        let app = router();
+        let path = testdata().display().to_string();
+        let body = |extra: serde_json::Value| {
+            let mut req = serde_json::json!({
+                "path": path,
+                "format": "txt",
+                "gitignore": false,
+                "selected": ["hello.rs"]
+            });
+            req.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            req
+        };
+        let (status, with_map) = post_to(&app, "/api/pack", body(serde_json::json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{with_map}");
+        let result_id = with_map["result_id"].clone();
+        let (status, redrawn) = post_to(
+            &app,
+            "/api/render",
+            body(serde_json::json!({ "no_tree": true, "result_id": result_id })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{redrawn}");
+        // `binaries` changes the extraction key, so this is a real pack to compare
+        // with, not another redraw of the stored result.
+        let (status, fresh) = post_to(
+            &app,
+            "/api/pack",
+            body(serde_json::json!({ "no_tree": true, "binaries": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{fresh}");
+        assert!(
+            redrawn["chars_emitted"].as_u64() < with_map["chars_emitted"].as_u64(),
+            "{redrawn} vs {with_map}"
+        );
+        assert_eq!(redrawn["chars_emitted"], fresh["chars_emitted"]);
+        assert_eq!(redrawn["tokens_est"], fresh["tokens_est"]);
     }
 
     #[tokio::test]
