@@ -30,6 +30,7 @@ struct AppState {
     token: Arc<str>,
     origin: Arc<str>,
     mill: Arc<Mill>,
+    sample: Arc<crate::sample::Scratch>,
 }
 
 const TEST_TOKEN: &str = "test-token";
@@ -42,6 +43,7 @@ pub fn router() -> Router {
         token: Arc::from(TEST_TOKEN),
         origin: Arc::from(TEST_ORIGIN),
         mill: Arc::new(Mill::new()),
+        sample: Arc::default(),
     })
 }
 
@@ -58,6 +60,7 @@ fn router_with(state: AppState) -> Router {
         .route("/api/cancel", post(cancel_pack))
         .route("/api/artifact/{id}", get(artifact))
         .route("/api/browse", post(browse))
+        .route("/api/sample", post(sample))
         .with_state(state)
 }
 
@@ -74,21 +77,49 @@ pub async fn serve(preferred: u16, try_next: bool, open_browser: bool) -> anyhow
         eprintln!("pulp mill on {url}");
     }
     eprintln!("localhost only. nothing is uploaded.");
+    let sample: Arc<crate::sample::Scratch> = Arc::default();
     let state = AppState {
         pick: pick::pick_folder,
         token: Arc::from(new_session_token()?),
         origin: Arc::from(url.as_str()),
         mill: Arc::new(Mill::new()),
+        sample: Arc::clone(&sample),
     };
     if open_browser {
         let _ = opener::open(&url);
     }
-    axum::serve(listener, router_with(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    let served = axum::serve(listener, router_with(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+    sample.remove();
+    served?;
     Ok(())
+}
+
+/// Resolve on Ctrl-C, and on SIGTERM or SIGHUP where they exist, so the mill
+/// stops cleanly (and removes its sample folder) however its terminal ends.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let wait = |kind: SignalKind| async move {
+            match signal(kind) {
+                Ok(mut stream) => {
+                    stream.recv().await;
+                }
+                Err(_) => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            () = wait(SignalKind::terminate()) => {}
+            () = wait(SignalKind::hangup()) => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn new_session_token() -> anyhow::Result<String> {
@@ -374,6 +405,11 @@ struct TreeResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct SampleResponse {
+    path: String,
+}
+
+#[derive(Debug, Serialize)]
 struct BrowseResponse {
     path: Option<String>,
     cancelled: bool,
@@ -447,6 +483,22 @@ async fn browse(
             cancelled: true,
         })),
     }
+}
+
+/// Write the built-in sample project to a temp folder and return its path.
+async fn sample(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SampleResponse>, ApiError> {
+    authorize(&state, &headers)?;
+    let scratch = Arc::clone(&state.sample);
+    let root = tokio::task::spawn_blocking(move || scratch.materialize())
+        .await
+        .map_err(|err| ApiError::bad(err.to_string()))?
+        .map_err(ApiError::bad)?;
+    Ok(Json(SampleResponse {
+        path: root.display().to_string(),
+    }))
 }
 
 async fn pack_dump(
@@ -1107,6 +1159,7 @@ mod tests {
             token: Arc::from(TEST_TOKEN),
             origin: Arc::from(TEST_ORIGIN),
             mill,
+            sample: Arc::default(),
         });
         let path = testdata().display().to_string();
         let body = serde_json::json!({
@@ -1243,6 +1296,7 @@ mod tests {
             token: Arc::from(TEST_TOKEN),
             origin: Arc::from(TEST_ORIGIN),
             mill: Arc::new(Mill::new()),
+            sample: Arc::default(),
         });
         let response = app
             .oneshot(
@@ -1272,6 +1326,7 @@ mod tests {
             token: Arc::from(TEST_TOKEN),
             origin: Arc::from(TEST_ORIGIN),
             mill: Arc::new(Mill::new()),
+            sample: Arc::default(),
         });
         let response = app
             .oneshot(
@@ -1359,6 +1414,51 @@ mod tests {
         assert!(json["dump"].as_str().unwrap().contains(&note), "{json}");
         assert_eq!(json["files_extracted"], 1);
         assert_eq!(json["files_skipped"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_sample_writes_project_that_scans() {
+        let (status, json) = post_json("/api/sample", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let path = json["path"].as_str().unwrap().to_string();
+        assert!(path.ends_with("tides"), "{path}");
+        let root = PathBuf::from(&path);
+        assert!(root.join("README.md").is_file());
+        assert!(root.join("docs/field-notes.pdf").is_file());
+
+        let (status, scan) = post_json(
+            "/api/scan",
+            serde_json::json!({ "path": path, "gitignore": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        let files = scan["files"].as_array().unwrap();
+        let find = |rel: &str| {
+            files
+                .iter()
+                .find(|f| f["relative"] == rel)
+                .unwrap_or_else(|| panic!("{rel} missing from {scan}"))
+        };
+        assert_eq!(find("src/lib.rs")["default_on"], true);
+        assert_eq!(find("Cargo.lock")["default_on"], false);
+        assert_eq!(find("data/archive.zip")["default_on"], false);
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_sample_with_missing_token_returns_unauthorized() {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sample")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

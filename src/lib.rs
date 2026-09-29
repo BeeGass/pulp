@@ -15,6 +15,8 @@ pub mod pack;
 mod pick;
 pub mod render;
 #[cfg(feature = "native")]
+mod sample;
+#[cfg(feature = "native")]
 mod store;
 pub mod tokens;
 pub mod tree;
