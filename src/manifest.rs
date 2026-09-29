@@ -18,6 +18,9 @@ use crate::walk::{self, WalkedFile};
 pub struct ManifestEntry {
     pub id: String,
     pub relative: String,
+    /// Path under its own root, without the multi-root label. Globs and the
+    /// hidden rule judge archive members by it, as the walk judges files.
+    pub root_relative: String,
     pub absolute: PathBuf,
     pub size: u64,
     pub kind: Kind,
@@ -64,13 +67,18 @@ fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestE
             let sniff = sniff_prefix(&wf.absolute);
             let kind = classify(&wf.absolute, sniff.as_deref());
             let oversized = wf.size > opts.max_file_size;
+            // Judge generated and virtualenv paths under the scanned root
+            // only: a project that lives in `~/build/app` or `~/venv-work`
+            // is not itself generated.
+            let default_on = is_default_selected(std::path::Path::new(&wf.root_relative), kind)
+                && !oversized
+                && (!kind.is_archive() || opts.follow_archives);
             ManifestEntry {
                 id: wf.id,
-                relative: wf.relative.clone(),
+                relative: wf.relative,
+                root_relative: wf.root_relative,
                 language: language_name(&wf.absolute, kind),
-                default_on: is_default_selected(&wf.absolute, kind)
-                    && !oversized
-                    && (!kind.is_archive() || opts.follow_archives),
+                default_on,
                 oversized,
                 is_symlink: wf.is_symlink,
                 modified: wf.modified,
@@ -177,7 +185,7 @@ mod tests {
             roots: vec![dir.path().to_path_buf()],
             hidden: true,
             gitignore: false,
-            exclude: Vec::new(),
+            default_excludes: false,
             ..Options::default()
         };
         let manifest = scan_manifest(&opts).unwrap();
@@ -266,6 +274,35 @@ mod tests {
             .unwrap();
         assert!(zip.kind.is_archive());
         assert!(!zip.default_on);
+    }
+
+    #[test]
+    fn test_scan_manifest_with_root_inside_generated_dir_names_sets_default_on_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("build/venv/app");
+        write(&root.join("src/main.rs"), b"fn main() {}\n");
+        write(&root.join("dist/bundle.js"), b"x\n");
+        let opts = Options {
+            roots: vec![root],
+            default_excludes: false,
+            ..Options::default()
+        };
+        let manifest = scan_manifest(&opts).unwrap();
+        let main = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == "src/main.rs")
+            .unwrap();
+        assert!(main.default_on, "a project under build/venv starts ticked");
+        let bundle = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == "dist/bundle.js")
+            .unwrap();
+        assert!(
+            !bundle.default_on,
+            "dist/ inside the root still starts unticked"
+        );
     }
 
     #[test]

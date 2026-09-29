@@ -158,7 +158,7 @@ fn test_classify_with_rs_lean_npz_returns_expected_kinds() {
 }
 
 #[test]
-fn test_default_exclude_globs_does_not_drop_rs_lean_npz() {
+fn test_default_exclude_globs_with_source_extensions_keeps_rs_lean_npz() {
     let g = default_exclude_globs().join(" ");
     assert!(!g.contains("*.rs"));
     assert!(!g.contains("*.lean"));

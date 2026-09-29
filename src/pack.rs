@@ -6,20 +6,71 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use globset::GlobSet;
 #[cfg(feature = "native")]
 use rayon::prelude::*;
 
 use crate::classify::{Kind, classify, looks_binary};
-use crate::config::{Options, TreeMode, apply_budgets, cmp_path_order};
+use crate::config::{Options, TreeMode, apply_budgets, cmp_path_order, default_exclude_globs};
 use crate::error::Error;
 use crate::extract::isolate::panic_message;
 use crate::extract::{ExtractOpts, expand_archive, extract};
+use crate::filter::{build_globset, glob_matches, is_hidden_rel};
 #[cfg(feature = "native")]
 use crate::manifest::ManifestEntry;
 use crate::tree::display_path;
 
 const MAX_ARCHIVE_DEPTH: u8 = 3;
 const MAX_ARCHIVE_UNCOMPRESSED: u64 = 512 * 1024 * 1024;
+
+/// Include and exclude globs for a path that has a place under its root
+/// and, with several roots, a labelled path that the dump prints.
+///
+/// The built-in excludes match only the path under the root, so a root
+/// named `build` or `runs` keeps its files. The user's globs match either
+/// path: `app/secrets/**` and `secrets/**` both leave out
+/// `app/secrets/key.txt`.
+pub(crate) struct ScopedGlobs {
+    defaults: GlobSet,
+    exclude: GlobSet,
+    include: Option<GlobSet>,
+}
+
+impl ScopedGlobs {
+    pub(crate) fn new(opts: &Options) -> Result<Self, Error> {
+        let defaults = if opts.default_excludes {
+            build_globset(&default_exclude_globs())?
+        } else {
+            GlobSet::empty()
+        };
+        let include = if opts.include.is_empty() {
+            None
+        } else {
+            Some(build_globset(&opts.include)?)
+        };
+        Ok(Self {
+            defaults,
+            exclude: build_globset(&opts.exclude)?,
+            include,
+        })
+    }
+
+    /// Whether a path passes. `labelled` is the path the dump prints, the
+    /// same as `under_root` with one root. An archive about to be unpacked
+    /// passes the include globs, since its members are judged one by one.
+    pub(crate) fn keep(&self, under_root: &str, labelled: &str, unpacking: bool) -> bool {
+        let either = |set: &GlobSet| {
+            glob_matches(set, under_root) || (labelled != under_root && glob_matches(set, labelled))
+        };
+        if glob_matches(&self.defaults, under_root) || either(&self.exclude) {
+            return false;
+        }
+        match &self.include {
+            None => true,
+            Some(set) => unpacking || either(set),
+        }
+    }
+}
 
 /// Outcome of packing one input (or archive member).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +184,9 @@ pub struct MemoryFile<'a> {
 struct WorkItem {
     id: String,
     relative: String,
+    /// Path under its root, which the globs and the hidden rule judge; the
+    /// same as `relative` with one root.
+    root_relative: String,
     absolute: Option<PathBuf>,
     bytes: Vec<u8>,
     depth: u8,
@@ -310,6 +364,7 @@ pub fn pack_entries(
             WorkItem {
                 id: entry.id.to_string(),
                 relative: entry.relative.to_string(),
+                root_relative: entry.relative.to_string(),
                 absolute: None,
                 bytes: entry.bytes.to_vec(),
                 depth: 0,
@@ -434,6 +489,7 @@ fn process_entry(
         WorkItem {
             id: entry.id.clone(),
             relative: entry.relative.clone(),
+            root_relative: entry.root_relative.clone(),
             absolute: Some(entry.absolute.clone()),
             bytes,
             depth: 0,
@@ -468,15 +524,7 @@ fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> V
                 .as_ref()
                 .is_some_and(|path| is_input_root(path, &opts.roots)));
     if should_expand {
-        return expand_item(
-            &item.id,
-            &item.relative,
-            &item.bytes,
-            kind,
-            opts,
-            extract_opts,
-            item.depth,
-        );
+        return expand_item(&item, kind, opts, extract_opts);
     }
     vec![pack_one(
         item.id,
@@ -570,50 +618,44 @@ fn pack_one(
 }
 
 fn expand_item(
-    id: &str,
-    relative: &str,
-    bytes: &[u8],
+    item: &WorkItem,
     kind: Kind,
     opts: &Options,
     extract_opts: &ExtractOpts,
-    depth: u8,
 ) -> Vec<PackedFile> {
-    match expand_archive(bytes, kind, extract_opts) {
-        Ok(members) => take_archive_members(id, relative, members, opts, extract_opts, depth),
+    let Ok(globs) = ScopedGlobs::new(opts) else {
+        return Vec::new();
+    };
+    match expand_archive(&item.bytes, kind, extract_opts) {
+        Ok(members) => take_archive_members(item, members, opts, extract_opts, &globs),
         Err(err) => vec![packed_error(
-            id.to_string(),
-            relative.to_string(),
+            item.id.clone(),
+            item.relative.clone(),
             kind,
-            bytes.len() as u64,
+            item.bytes.len() as u64,
             err.to_string(),
         )],
     }
 }
 
 fn take_archive_members(
-    parent_id: &str,
-    relative: &str,
+    parent: &WorkItem,
     members: Vec<(String, Vec<u8>)>,
     opts: &Options,
     extract_opts: &ExtractOpts,
-    depth: u8,
+    globs: &ScopedGlobs,
 ) -> Vec<PackedFile> {
-    let include = if opts.include.is_empty() {
-        None
-    } else {
-        crate::filter::build_globset(&opts.include).ok()
-    };
-    let Ok(exclude) = crate::filter::build_globset(&opts.exclude) else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
     let mut total = 0u64;
     for (name, mem_bytes) in members {
         if is_unsafe_entry(&name) {
             continue;
         }
-        let child = join_rel(relative, &name);
-        if !opts.hidden && crate::filter::is_hidden_rel(&child) {
+        let child = join_rel(&parent.relative, &name);
+        // Judged by its path under the root, as the walk judges files, so a
+        // root named `runs` or `.dotfiles` keeps its archives' members.
+        let child_under_root = join_rel(&parent.root_relative, &name);
+        if !opts.hidden && is_hidden_rel(&child_under_root) {
             continue;
         }
         let n = mem_bytes.len() as u64;
@@ -621,31 +663,24 @@ fn take_archive_members(
             break;
         }
         let kind = classify(Path::new(&child), Some(&mem_bytes));
-        let emit = !kind.is_archive();
-        if emit && !crate::filter::keep_relative(&child, include.as_ref(), &exclude) {
-            continue;
-        }
-        if !emit && glob_exclude_only(&child, &exclude) {
+        if !globs.keep(&child_under_root, &child, kind.is_archive()) {
             continue;
         }
         total = total.saturating_add(n);
         out.extend(process_item(
             WorkItem {
-                id: format!("{parent_id}!{child}"),
+                id: format!("{}!{child}", parent.id),
                 relative: child,
+                root_relative: child_under_root,
                 absolute: None,
                 bytes: mem_bytes,
-                depth: depth + 1,
+                depth: parent.depth + 1,
             },
             opts,
             extract_opts,
         ));
     }
     out
-}
-
-fn glob_exclude_only(relative: &str, exclude: &globset::GlobSet) -> bool {
-    !crate::filter::keep_relative(relative, None, exclude)
 }
 
 #[cfg(feature = "native")]
@@ -1231,6 +1266,38 @@ mod tests {
     }
 
     #[test]
+    fn test_pack_with_multiple_roots_named_like_excluded_dirs_keeps_archive_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        let dotfiles = dir.path().join(".dotfiles");
+        let notes = dir.path().join("notes");
+        write(
+            &runs.join("data.zip"),
+            &stored_zip(&[("a.txt", b"alpha\n")]),
+        );
+        write(
+            &dotfiles.join("cfg.zip"),
+            &stored_zip(&[("b.txt", b"beta\n")]),
+        );
+        write(&notes.join("n.md"), b"# n\n");
+        let opts = Options {
+            roots: vec![runs, dotfiles, notes],
+            follow_archives: true,
+            ..Options::default()
+        };
+        let packed = pack(&opts).unwrap();
+        let rels: Vec<&str> = packed.files.iter().map(|f| f.relative.as_str()).collect();
+        assert_eq!(
+            rels,
+            [
+                ".dotfiles/cfg.zip/b.txt",
+                "notes/n.md",
+                "runs/data.zip/a.txt"
+            ]
+        );
+    }
+
+    #[test]
     fn test_pack_manifest_entry_with_one_entry_returns_its_text_only() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join("a.rs"), b"fn a() {}\n");
@@ -1314,7 +1381,7 @@ mod tests {
         ];
         let opts = Options {
             max_entries: 0,
-            exclude: Vec::new(),
+            default_excludes: false,
             ..Options::default()
         };
         let packed = pack_entries(&files, &opts, None).unwrap();

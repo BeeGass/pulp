@@ -72,8 +72,17 @@ pub struct Options {
     /// available parallelism). The walk runs on one thread, so the order it
     /// finds files in, and what the budgets keep, never depends on this.
     pub jobs: usize,
+    /// Include globs. A file is kept when one matches the path under its
+    /// root or, with several roots, the labelled path the dump prints
+    /// (`app/src/a.rs`). Empty keeps every file.
     pub include: Vec<String>,
+    /// Exclude globs, matched like [`Self::include`], on top of the
+    /// built-in list that [`Self::default_excludes`] turns on.
     pub exclude: Vec<String>,
+    /// Apply [`default_exclude_globs`]. They match only the path under each
+    /// root, never a root's own name, so a root named `build` or `runs` is
+    /// still walked.
+    pub default_excludes: bool,
     pub follow_archives: bool,
     pub skip_binaries: bool,
     pub tree: TreeMode,
@@ -128,7 +137,8 @@ impl Default for Options {
             max_file_size: 8 * 1024 * 1024,
             jobs: 0,
             include: Vec::new(),
-            exclude: default_exclude_globs(),
+            exclude: Vec::new(),
+            default_excludes: true,
             follow_archives: false,
             skip_binaries: true,
             tree: TreeMode::Selected,
@@ -143,6 +153,22 @@ impl Default for Options {
             max_entries: 0,
             max_total_bytes: 1 << 30,
         }
+    }
+}
+
+impl Options {
+    /// Every exclude glob, for matching one path per file where the path
+    /// under the root is the only path (one root, or an in-memory file set):
+    /// the built-in list when it is on, then [`Self::exclude`].
+    #[must_use]
+    pub fn exclude_globs(&self) -> Vec<String> {
+        let mut globs = if self.default_excludes {
+            default_exclude_globs()
+        } else {
+            Vec::new()
+        };
+        globs.extend(self.exclude.iter().cloned());
+        globs
     }
 }
 
@@ -449,7 +475,23 @@ mod tests {
     }
 
     #[test]
-    fn test_default_exclude_globs_include_next_out_and_toolchains() {
+    fn test_exclude_globs_with_defaults_off_returns_only_user_globs() {
+        let opts = Options {
+            exclude: vec!["*.log".into()],
+            ..Options::default()
+        };
+        let globs = opts.exclude_globs();
+        assert!(globs.iter().any(|g| g == "node_modules/**"));
+        assert_eq!(globs.last().map(String::as_str), Some("*.log"));
+        let bare = Options {
+            default_excludes: false,
+            ..opts
+        };
+        assert_eq!(bare.exclude_globs(), ["*.log"]);
+    }
+
+    #[test]
+    fn test_default_exclude_globs_with_generated_dirs_returns_next_out_and_toolchains() {
         let globs = default_exclude_globs();
         for pat in [
             ".next/**",

@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use pulp::config::{default_exclude_globs, parse_size};
+use pulp::config::parse_size;
 use pulp::tree::display_path;
 use pulp::{Options, OutputFormat, TreeMode, pack};
 
@@ -203,12 +203,6 @@ fn main() -> anyhow::Result<()> {
             TreeCli::None => TreeMode::None,
         }
     };
-    let mut exclude = if cli.no_default_excludes {
-        Vec::new()
-    } else {
-        default_exclude_globs()
-    };
-    exclude.extend(cli.exclude);
     let mut skip_paths = Vec::new();
     if let Some(out) = &cli.output {
         skip_paths.push(out.clone());
@@ -225,7 +219,8 @@ fn main() -> anyhow::Result<()> {
         max_file_size: cli.max_file_size,
         jobs: cli.jobs,
         include: cli.include,
-        exclude,
+        exclude: cli.exclude,
+        default_excludes: !cli.no_default_excludes,
         follow_archives: cli.archives,
         skip_binaries: !cli.binaries,
         tree,

@@ -29,9 +29,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
-use crate::config::{
-    Options, OutputFormat, Selection, TreeMode, default_exclude_globs, parse_size,
-};
+use crate::config::{Options, OutputFormat, Selection, TreeMode, parse_size};
 use crate::manifest::{self, ManifestEntry, ScanManifest};
 use crate::pack;
 use crate::pick;
@@ -1008,7 +1006,8 @@ fn scan_sync(req: ScanRequest, mill: &Mill) -> Result<ScanResponse, ApiError> {
         gitignore: req.gitignore,
         hidden: req.hidden,
         follow_archives: req.archives,
-        exclude: merge_excludes(req.no_default_excludes, req.exclude),
+        exclude: req.exclude,
+        default_excludes: !req.no_default_excludes,
         list_only: true,
         ..Options::default()
     };
@@ -1471,21 +1470,12 @@ fn options_from_pack(
         tree,
         format,
         selection: Selection::Only(req.selected),
-        exclude: merge_excludes(req.no_default_excludes, req.exclude),
+        exclude: req.exclude,
+        default_excludes: !req.no_default_excludes,
         max_file_size,
         list_only,
         ..Options::default()
     })
-}
-
-fn merge_excludes(no_defaults: bool, extra: Vec<String>) -> Vec<String> {
-    let mut exclude = if no_defaults {
-        Vec::new()
-    } else {
-        default_exclude_globs()
-    };
-    exclude.extend(extra);
-    exclude
 }
 
 fn resolve_root(raw: &str) -> Result<PathBuf, ApiError> {

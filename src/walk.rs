@@ -4,13 +4,12 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use globset::GlobSet;
 use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 
 use crate::config::{Budget, Options, Selection};
 use crate::error::Error;
-use crate::filter::{build_globset, glob_matches};
+use crate::pack::ScopedGlobs;
 
 /// A file discovered under the pack roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,8 +17,12 @@ pub struct WalkedFile {
     /// Unique within one walk. Independent of display [`Self::relative`].
     pub id: String,
     pub absolute: PathBuf,
-    /// `/` separators, no leading `./`.
+    /// `/` separators, no leading `./`. With several roots, the root's
+    /// label comes first.
     pub relative: String,
+    /// Path under its own root, without the multi-root label. A file named
+    /// as a root is its own name here.
+    pub root_relative: String,
     pub size: u64,
     pub is_symlink: bool,
     pub modified: Option<SystemTime>,
@@ -58,12 +61,7 @@ pub fn collect_detailed(opts: &Options) -> Result<WalkOutcome, Error> {
     if kinds.is_empty() || opts.selection.is_empty_only() {
         return Ok(found.finish());
     }
-    let include = if opts.include.is_empty() {
-        None
-    } else {
-        Some(build_globset(&opts.include)?)
-    };
-    let exclude = build_globset(&opts.exclude)?;
+    let globs = ScopedGlobs::new(opts)?;
     let labels = root_labels(&opts.roots);
     let multi = kinds.len() > 1;
     for (idx, (root, kind)) in opts.roots.iter().zip(kinds).enumerate() {
@@ -79,7 +77,7 @@ pub fn collect_detailed(opts: &Options) -> Result<WalkOutcome, Error> {
             // followed.
             RootKind::File { is_symlink, .. } if is_symlink && !opts.follow_links => true,
             RootKind::File { meta, is_symlink } => found.offer(scope.file_root(&meta, is_symlink)),
-            RootKind::Dir => walk_dir(&scope, opts, include.as_ref(), &exclude, &mut found)?,
+            RootKind::Dir => walk_dir(&scope, opts, &globs, &mut found)?,
         };
         if !more {
             break;
@@ -256,10 +254,12 @@ impl RootScope<'_> {
     /// The file this root names, when it names a file.
     fn file_root(&self, meta: &fs::Metadata, is_symlink: bool) -> WalkedFile {
         let relative = self.relative("");
+        let root_relative = file_name_label(self.root).unwrap_or_else(|| relative.clone());
         WalkedFile {
             id: self.id(&relative),
             absolute: self.absolute.clone(),
             relative,
+            root_relative,
             size: meta.len(),
             is_symlink,
             modified: meta.modified().ok(),
@@ -272,8 +272,7 @@ impl RootScope<'_> {
 fn walk_dir(
     scope: &RootScope<'_>,
     opts: &Options,
-    include: Option<&GlobSet>,
-    exclude: &GlobSet,
+    globs: &ScopedGlobs,
     found: &mut Found<'_>,
 ) -> Result<bool, Error> {
     let root = scope.root;
@@ -288,9 +287,13 @@ fn walk_dir(
         .sort_by_file_name(|a, b| a.cmp(b))
         .filter_entry(|entry| entry.file_name() != OsStr::new(".git"));
 
-    if !opts.exclude.is_empty() {
+    // Excluded directories are pruned whole. These match the path under the
+    // root; the user's globs are also matched against the labelled path, per
+    // file, below.
+    let prune = opts.exclude_globs();
+    if !prune.is_empty() {
         let mut overrides = OverrideBuilder::new(root);
-        for pat in &opts.exclude {
+        for pat in &prune {
             if pat.is_empty() {
                 continue;
             }
@@ -326,7 +329,8 @@ fn walk_dir(
             continue;
         }
         let relative = scope.relative(&rel);
-        if !keep_for_walk(&relative, include, exclude, opts.follow_archives) {
+        let unpacking = opts.follow_archives && looks_like_archive(&rel);
+        if !globs.keep(&rel, &relative, unpacking) {
             continue;
         }
         let Ok(meta) = entry.metadata() else {
@@ -336,6 +340,7 @@ fn walk_dir(
             id: scope.id(&relative),
             absolute: scope.absolute_of(entry.path()),
             relative,
+            root_relative: rel,
             size: meta.len(),
             is_symlink,
             modified: meta.modified().ok(),
@@ -345,24 +350,6 @@ fn walk_dir(
         }
     }
     Ok(true)
-}
-
-/// Whether a filesystem path may enter the pipeline (emit or traverse).
-pub(crate) fn keep_for_walk(
-    relative: &str,
-    include: Option<&GlobSet>,
-    exclude: &GlobSet,
-    follow_archives: bool,
-) -> bool {
-    if glob_matches(exclude, relative) {
-        return false;
-    }
-    match include {
-        None => true,
-        Some(set) => {
-            glob_matches(set, relative) || (follow_archives && looks_like_archive(relative))
-        }
-    }
 }
 
 fn looks_like_archive(relative: &str) -> bool {
@@ -636,7 +623,7 @@ mod tests {
             roots: vec![dir.path().to_path_buf()],
             include: vec!["*.rs".into()],
             follow_archives: true,
-            exclude: Vec::new(),
+            default_excludes: false,
             ..Options::default()
         };
         let files = collect(&opts).unwrap();
@@ -655,7 +642,7 @@ mod tests {
         let opts = Options {
             roots: vec![dir.path().to_path_buf()],
             max_entries: 0,
-            exclude: Vec::new(),
+            default_excludes: false,
             gitignore: false,
             ..Options::default()
         };
@@ -673,7 +660,7 @@ mod tests {
         let opts = Options {
             roots: vec![dir.path().to_path_buf()],
             max_entries: 1,
-            exclude: Vec::new(),
+            default_excludes: false,
             ..Options::default()
         };
         let outcome = collect_detailed(&opts).unwrap();
@@ -721,7 +708,7 @@ mod tests {
         write(&dir.path().join(".git/objects/ab"), b"blob");
         let mut opts = opts_for(dir.path().to_path_buf());
         opts.hidden = true;
-        opts.exclude = Vec::new();
+        opts.default_excludes = false;
         let files = collect(&opts).unwrap();
         let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
         assert!(rels.contains(&"src/a.rs"));
@@ -736,7 +723,7 @@ mod tests {
         write(&dir.path().join("ok.rs"), b"fn ok() {}\n");
         let mut opts = opts_for(dir.path().to_path_buf());
         opts.gitignore = false;
-        opts.exclude = Vec::new();
+        opts.default_excludes = false;
         let files = collect(&opts).unwrap();
         let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
         assert!(rels.contains(&"ok.rs"));
@@ -831,6 +818,88 @@ mod tests {
         let outcome = collect_detailed(&opts).unwrap();
         assert!(!outcome.truncated);
         assert_eq!(rels(&outcome.files), ["b_small.txt"]);
+    }
+
+    #[test]
+    fn test_collect_with_roots_named_like_excluded_dirs_keeps_their_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        let notes = dir.path().join("notes");
+        write(&runs.join("log.txt"), b"loss 0.1\n");
+        write(&runs.join("build/out.txt"), b"generated\n");
+        write(&notes.join("a.md"), b"# a\n");
+        let opts = Options {
+            roots: vec![runs, notes],
+            ..Options::default()
+        };
+        let files = collect(&opts).unwrap();
+        assert_eq!(rels(&files), ["runs/log.txt", "notes/a.md"]);
+        let log = files.iter().find(|f| f.relative == "runs/log.txt").unwrap();
+        assert_eq!(log.root_relative, "log.txt");
+    }
+
+    /// Roots `app` and `lib`, each with `src/`, and `app` with `secrets/`.
+    fn app_and_lib(dir: &Path) -> Vec<PathBuf> {
+        let app = dir.join("app");
+        let lib = dir.join("lib");
+        write(&app.join("src/a.rs"), b"fn a() {}\n");
+        write(&app.join("secrets/prod.txt"), b"key\n");
+        write(&lib.join("src/l.rs"), b"fn l() {}\n");
+        write(&lib.join("secrets/dev.txt"), b"key\n");
+        vec![app, lib]
+    }
+
+    #[test]
+    fn test_collect_with_multiple_roots_and_label_scoped_exclude_drops_those_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = Options {
+            roots: app_and_lib(dir.path()),
+            exclude: vec!["app/secrets/**".into()],
+            ..Options::default()
+        };
+        assert_eq!(
+            rels(&collect(&opts).unwrap()),
+            ["app/src/a.rs", "lib/secrets/dev.txt", "lib/src/l.rs"]
+        );
+    }
+
+    #[test]
+    fn test_collect_with_multiple_roots_and_label_scoped_include_keeps_those_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = Options {
+            roots: app_and_lib(dir.path()),
+            include: vec!["app/src/**".into()],
+            ..Options::default()
+        };
+        assert_eq!(rels(&collect(&opts).unwrap()), ["app/src/a.rs"]);
+    }
+
+    #[test]
+    fn test_collect_with_multiple_roots_and_root_relative_exclude_drops_those_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = Options {
+            roots: app_and_lib(dir.path()),
+            exclude: vec!["secrets/**".into()],
+            ..Options::default()
+        };
+        assert_eq!(
+            rels(&collect(&opts).unwrap()),
+            ["app/src/a.rs", "lib/src/l.rs"]
+        );
+    }
+
+    #[test]
+    fn test_collect_with_user_exclude_keeps_default_excludes() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("src/a.rs"), b"fn a() {}\n");
+        write(&dir.path().join("notes.log"), b"log\n");
+        write(&dir.path().join("node_modules/x/i.js"), b"x\n");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            exclude: vec!["*.log".into()],
+            ..Options::default()
+        };
+        assert_eq!(rels(&collect(&opts).unwrap()), ["src/a.rs"]);
     }
 
     #[test]
