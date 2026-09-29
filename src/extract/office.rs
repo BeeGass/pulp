@@ -57,10 +57,10 @@ pub fn extract_spreadsheet(bytes: &[u8]) -> Result<String, crate::error::Error> 
     let mut workbook = match calamine::open_workbook_auto_from_rs(cursor) {
         Ok(wb) => wb,
         Err(err) => {
-            if let Ok(text) = extract_opendocument(bytes) {
-                if !text.trim().is_empty() {
-                    return Ok(text);
-                }
+            if let Ok(text) = extract_opendocument(bytes)
+                && !text.trim().is_empty()
+            {
+                return Ok(text);
             }
             return Err(crate::error::Error::msg(err.to_string()));
         }

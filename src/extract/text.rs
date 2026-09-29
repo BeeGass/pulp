@@ -98,10 +98,8 @@ fn decode_wide(bytes: &[u8], wide: WideText) -> String {
             .into_owned(),
         WideText::Utf32Le | WideText::Utf32Be => {
             let mut out = String::with_capacity(bytes.len() / 4);
-            let units = bytes.chunks_exact(4);
-            let partial = !units.remainder().is_empty();
-            for unit in units {
-                let raw = [unit[0], unit[1], unit[2], unit[3]];
+            let (units, rest) = bytes.as_chunks::<4>();
+            for &raw in units {
                 let code = if wide == WideText::Utf32Le {
                     u32::from_le_bytes(raw)
                 } else {
@@ -109,7 +107,7 @@ fn decode_wide(bytes: &[u8], wide: WideText) -> String {
                 };
                 out.push(char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER));
             }
-            if partial {
+            if !rest.is_empty() {
                 out.push(char::REPLACEMENT_CHARACTER);
             }
             out

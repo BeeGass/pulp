@@ -14,7 +14,7 @@ pulp ui
 pulp -o dump.xml .
 ```
 
-Requires [Rust](https://rustup.rs/) 1.85 or newer.
+Requires [Rust](https://rustup.rs/) 1.88 or newer.
 
 ---
 

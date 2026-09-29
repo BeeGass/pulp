@@ -84,10 +84,10 @@ impl Scratch {
     /// even after a sample write panicked, so a stop signal still removes it.
     pub fn remove(&self) {
         let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(private) = slot.take() {
-            if private.is_intact() {
-                let _ = std::fs::remove_dir_all(&private.path);
-            }
+        if let Some(private) = slot.take()
+            && private.is_intact()
+        {
+            let _ = std::fs::remove_dir_all(&private.path);
         }
     }
 }
@@ -181,7 +181,7 @@ fn decode_base64(encoded: &str) -> Result<Vec<u8>, String> {
         .bytes()
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
-    if clean.len() % 4 != 0 {
+    if !clean.len().is_multiple_of(4) {
         return Err("base64 length is not a multiple of 4".into());
     }
     let mut out = Vec::with_capacity(clean.len() / 4 * 3);

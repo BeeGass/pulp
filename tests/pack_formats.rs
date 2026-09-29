@@ -181,7 +181,7 @@ fn tiny_npz() -> Vec<u8> {
 fn tiny_f32_npy() -> Vec<u8> {
     let mut header = "{'descr': '<f4', 'fortran_order': False, 'shape': (3,), }".to_string();
     let prefix = 10;
-    while (prefix + header.len()) % 16 != 0 {
+    while !(prefix + header.len()).is_multiple_of(16) {
         header.push(' ');
     }
     header.pop();

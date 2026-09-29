@@ -397,13 +397,13 @@ fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     // Browsers name where a request came from. Only the page's own fetches
     // (same-origin) may reach the API; other sites on this machine, even other
     // ports of 127.0.0.1, are same-site at best.
-    if let Some(site) = headers.get("sec-fetch-site") {
-        if site.as_bytes() != b"same-origin" {
-            return Err(ApiError {
-                status: StatusCode::FORBIDDEN,
-                message: "cross-site request".into(),
-            });
-        }
+    if let Some(site) = headers.get("sec-fetch-site")
+        && site.as_bytes() != b"same-origin"
+    {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: "cross-site request".into(),
+        });
     }
     let got = headers
         .get("x-pulp-token")
@@ -1153,13 +1153,13 @@ fn artifact_sync(id: &str, query: &ArtifactQuery, mill: &Mill) -> Result<Respons
 /// settings; otherwise a fresh scan, stored for the requests that follow.
 fn load_or_scan_manifest(req: &PackRequest, mill: &Mill) -> Result<Arc<StoredManifest>, ApiError> {
     let want = discovery_key_pack(req);
-    if !req.manifest_id.is_empty() {
-        if let Some(stored) = mill.get_manifest(&req.manifest_id) {
-            if stored.discovery_key == want {
-                return Ok(stored);
-            }
-            return Err(ApiError::bad("manifest settings changed; rescan"));
+    if !req.manifest_id.is_empty()
+        && let Some(stored) = mill.get_manifest(&req.manifest_id)
+    {
+        if stored.discovery_key == want {
+            return Ok(stored);
         }
+        return Err(ApiError::bad("manifest settings changed; rescan"));
     }
     let opts = options_from_pack(req.clone(), true, false)?;
     let manifest = manifest::scan_manifest(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
@@ -1529,10 +1529,10 @@ fn expand_tilde(raw: &str) -> PathBuf {
     if raw == "~" {
         return home_dir().unwrap_or_else(|| PathBuf::from(raw));
     }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(raw)
 }

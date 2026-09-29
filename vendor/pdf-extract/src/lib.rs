@@ -1,6 +1,6 @@
 // Vendored from pdf-extract 0.12.1 with pulp's fixes. The upstream code keeps
 // helpers, fields, and bindings it does not use; allow them rather than
-// diverge from upstream. (The lifetime lint is newer than the 1.85 MSRV.)
+// diverge from upstream. (The lifetime lint is newer than the 1.88 MSRV.)
 #![allow(unknown_lints)]
 #![allow(
     dead_code,
@@ -804,7 +804,7 @@ trait PdfFont : Debug {
 }
 
 impl<'a> dyn PdfFont + 'a {
-    fn char_codes(&'a self, chars: &'a [u8]) -> PdfFontIter {
+    fn char_codes(&'a self, chars: &'a [u8]) -> PdfFontIter<'a> {
         PdfFontIter{i: chars.iter(), font: self}
     }
     fn decode(&self, chars: &[u8]) -> String {

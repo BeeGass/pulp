@@ -14,7 +14,7 @@ readme = "README.md"
 authors = ["Bryan Gass"]
 keywords = ["llm", "prompt", "text", "extract", "cli"]
 categories = ["command-line-utilities", "text-processing"]
-rust-version = "1.85"
+rust-version = "1.88"
 
 [lib]
 name = "pulp"

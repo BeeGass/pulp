@@ -654,10 +654,10 @@ fn changed_from(entry: &ManifestEntry, meta: &std::fs::Metadata) -> Option<Strin
             meta.len()
         ));
     }
-    if let (Some(was), Ok(now)) = (entry.modified, meta.modified()) {
-        if was != now {
-            return Some("changed since scan".into());
-        }
+    if let (Some(was), Ok(now)) = (entry.modified, meta.modified())
+        && was != now
+    {
+        return Some("changed since scan".into());
     }
     None
 }

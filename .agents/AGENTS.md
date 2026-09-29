@@ -39,7 +39,7 @@ cargo xtask site
 cargo xtask ui-test
 ```
 
-It also documents `pulp ui --port 9000 --no-open` and `cargo xtask ui-test --serve`. Rust 1.85 or newer is required, as written there. Do not invent a separate lint command.
+It also documents `pulp ui --port 9000 --no-open` and `cargo xtask ui-test --serve`. Rust 1.88 or newer is required, as written there. Do not invent a separate lint command.
 
 ## Where agent material goes
 

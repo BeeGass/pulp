@@ -108,10 +108,10 @@ fn add_glob(builder: &mut GlobSetBuilder, pat: &str) -> Result<(), Error> {
     let trimmed = pat.trim_start_matches('/');
     if !pat.starts_with("**/") && !trimmed.is_empty() {
         let nested = format!("**/{trimmed}");
-        if nested != pat {
-            if let Ok(glob) = Glob::new(&nested) {
-                builder.add(glob);
-            }
+        if nested != pat
+            && let Ok(glob) = Glob::new(&nested)
+        {
+            builder.add(glob);
         }
     }
     Ok(())

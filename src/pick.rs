@@ -104,12 +104,12 @@ end tell
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("osascript: {err}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(err) = stdin.write_all(SCRIPT.as_bytes()) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("osascript stdin: {err}"));
-        }
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(err) = stdin.write_all(SCRIPT.as_bytes())
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("osascript stdin: {err}"));
     }
     let output = child
         .wait_with_output()
