@@ -3,9 +3,14 @@ use std::path::Path;
 
 use crate::Packed;
 use crate::config::{Options, OutputFormat};
+use crate::pack::{FileStatus, PackedFile};
 use crate::tree::display_path;
 
 /// Write the packed dump in plain, markdown, or XML.
+///
+/// Every file gets a section except skipped binaries: their bytes and their
+/// placeholder stay out of the dump unless binaries are enabled, in which
+/// case the pack marks them extracted with a one-line placeholder.
 pub fn write_all<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::Result<()> {
     match opts.format {
         OutputFormat::Plain => write_plain(w, packed, opts),
@@ -69,12 +74,20 @@ fn write_tree_body<W: Write>(w: &mut W, packed: &Packed) -> io::Result<()> {
     Ok(())
 }
 
+/// Files that get a section in the dump body.
+fn dumped_files(packed: &Packed) -> impl Iterator<Item = &PackedFile> {
+    packed
+        .files
+        .iter()
+        .filter(|file| file.status != FileStatus::SkippedBinary)
+}
+
 fn write_plain<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::Result<()> {
     if !packed.tree.is_empty() {
         write_tree(w, packed, opts)?;
         writeln!(w)?;
     }
-    for file in &packed.files {
+    for file in dumped_files(packed) {
         writeln!(w, "================================================")?;
         writeln!(w, "FILE: {}", display_path(&file.relative))?;
         writeln!(w, "================================================")?;
@@ -92,7 +105,7 @@ fn write_markdown<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::R
         write_tree(w, packed, opts)?;
         writeln!(w)?;
     }
-    for file in &packed.files {
+    for file in dumped_files(packed) {
         writeln!(w, "## {}", display_path(&file.relative))?;
         writeln!(w)?;
         let fence = fence_for(&file.text);
@@ -120,7 +133,7 @@ fn write_xml<W: Write>(w: &mut W, packed: &Packed) -> io::Result<()> {
         writeln!(w)?;
         writeln!(w, "</document_tree>")?;
     }
-    for (i, file) in packed.files.iter().enumerate() {
+    for (i, file) in dumped_files(packed).enumerate() {
         writeln!(w, "<document index=\"{}\">", i + 1)?;
         write!(w, "<source>")?;
         write_xml_escaped(w, &display_path(&file.relative))?;
@@ -438,6 +451,37 @@ mod tests {
         let md = render(&packed, OutputFormat::Markdown);
         assert!(md.contains("## a\\nFILE: forged.txt\n"), "{md}");
         assert!(!md.contains("\nFILE: forged"), "{md}");
+    }
+
+    #[test]
+    fn test_write_all_with_skipped_binary_omits_its_section() {
+        let packed = Packed {
+            tree: String::new(),
+            files: vec![
+                file("a.rs", "fn a() {}\n", FileStatus::Extracted),
+                file(
+                    "logo.png",
+                    "[binary file, 4 bytes]",
+                    FileStatus::SkippedBinary,
+                ),
+                file("big.log", "[too large]", FileStatus::TooLarge(1)),
+            ],
+            stats: Stats::default(),
+        };
+        for format in [
+            OutputFormat::Plain,
+            OutputFormat::Markdown,
+            OutputFormat::Xml,
+        ] {
+            let dump = render(&packed, format);
+            assert!(!dump.contains("logo.png"), "{format:?}: {dump}");
+            assert!(!dump.contains("[binary file"), "{format:?}: {dump}");
+            assert!(dump.contains("a.rs"), "{format:?}: {dump}");
+            assert!(dump.contains("big.log"), "{format:?}: {dump}");
+        }
+        let xml = render(&packed, OutputFormat::Xml);
+        assert!(xml.contains("<document index=\"2\">"), "{xml}");
+        assert!(!xml.contains("<document index=\"3\">"), "{xml}");
     }
 
     #[test]
