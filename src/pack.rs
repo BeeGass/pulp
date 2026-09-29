@@ -1,3 +1,4 @@
+#[cfg(feature = "native")]
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -10,6 +11,7 @@ use crate::classify::{Kind, classify, looks_binary};
 use crate::config::{Options, TreeMode};
 use crate::error::Error;
 use crate::extract::{ExtractOpts, expand_archive, extract};
+#[cfg(feature = "native")]
 use crate::manifest::ManifestEntry;
 
 const MAX_ARCHIVE_DEPTH: u8 = 3;
@@ -318,6 +320,7 @@ pub fn pack_entries(
     })
 }
 
+#[cfg(feature = "native")]
 fn run_parallel<T, F>(jobs: usize, f: F) -> Result<T, Error>
 where
     T: Send,
@@ -343,6 +346,7 @@ where
     }
 }
 
+#[cfg(feature = "native")]
 fn process_entry(
     entry: &ManifestEntry,
     opts: &Options,
@@ -410,6 +414,7 @@ fn process_entry(
     )
 }
 
+#[cfg(feature = "native")]
 fn read_limited(path: &Path, max: u64) -> std::io::Result<Result<Vec<u8>, u64>> {
     let file = std::fs::File::open(path)?;
     let mut buf = Vec::new();
@@ -456,6 +461,7 @@ fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> V
     )]
 }
 
+#[cfg(feature = "native")]
 fn changed_since_scan(entry: &ManifestEntry) -> Option<String> {
     let meta = std::fs::metadata(&entry.absolute).ok()?;
     if meta.len() != entry.size {
@@ -602,6 +608,7 @@ fn glob_exclude_only(relative: &str, exclude: &globset::GlobSet) -> bool {
     !crate::filter::keep_relative(relative, None, exclude)
 }
 
+#[cfg(feature = "native")]
 fn list_only_file(entry: &ManifestEntry, opts: &Options) -> PackedFile {
     let kind = entry.kind;
     let status = if entry.size > opts.max_file_size {
