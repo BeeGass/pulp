@@ -264,7 +264,8 @@ span.mill-twist {
   color: var(--text-3);
 }
 .mill-lang {
-  width: 62px;
+  width: auto;
+  max-width: 62px;
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: right;
@@ -1025,9 +1026,12 @@ span.mill-twist {
     margin: 0 -10px 0 -8px;
   }
   .mill-twist {
-    width: 40px;
+    width: 44px;
     height: 44px;
-    flex-basis: 40px;
+    flex-basis: 44px;
+  }
+  .mill-lang {
+    display: none;
   }
   /* the whole row height opens the preview, not only the text */
   .mill-name {
