@@ -177,12 +177,16 @@ impl<'a> Found<'a> {
         }
     }
 
-    /// Whether the selection names `file`, by id or by relative path.
+    /// Whether the selection names `file`. A name picks the file whose id it
+    /// is; a name that no file found so far has as its id falls back to the
+    /// relative path. The first file found at a path keeps that path as its
+    /// id, so a later file whose name prints alike is never picked by it.
     fn is_selected(&self, file: &WalkedFile) -> bool {
         let Some(names) = &self.selection else {
             return true;
         };
-        names.contains(file.id.as_str()) || names.contains(file.relative.as_str())
+        names.contains(file.id.as_str())
+            || (names.contains(file.relative.as_str()) && !self.ids.contains(&file.relative))
     }
 
     fn is_skipped(&self, file: &WalkedFile) -> bool {
@@ -1046,6 +1050,36 @@ mod tests {
         assert_eq!(ids, ["a.txt", "a.txt#2", "a.txt#2#2", "a.txt#3", "b.txt"]);
     }
 
+    #[test]
+    fn test_collect_with_selected_id_of_colliding_name_returns_only_that_file() {
+        // Two files whose names print alike, as `a\xff.txt` and a literal
+        // `a\xff.txt` do: one relative path, ids `a\xff.txt` and `…#2`.
+        for (pick, want) in [
+            ("a\\xff.txt", "a\\xff.txt"),
+            ("a\\xff.txt#2", "a\\xff.txt#2"),
+        ] {
+            let opts = Options {
+                selection: Selection::Only(vec![pick.to_string()]),
+                ..Options::default()
+            };
+            let mut found = Found::new(&opts);
+            assert!(found.offer(walked("a\\xff.txt")));
+            assert!(found.offer(walked("a\\xff.txt")));
+            let ids: Vec<String> = found.finish().files.into_iter().map(|f| f.id).collect();
+            assert_eq!(ids, [want], "{pick}");
+        }
+        // With several roots a relative path is no id, so it still selects.
+        let opts = Options {
+            selection: Selection::Only(vec!["app/x.rs".into()]),
+            ..Options::default()
+        };
+        let mut found = Found::new(&opts);
+        let mut file = walked("app/x.rs");
+        file.id = "0:app/x.rs".into();
+        assert!(found.offer(file));
+        assert_eq!(found.finish().files.len(), 1);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn test_collect_with_non_utf8_names_returns_distinct_paths_and_ids() {
@@ -1064,6 +1098,29 @@ mod tests {
         assert_eq!(rels, ["a\\xfe.txt", "a\\xff.txt", "a\u{fffd}.txt"]);
         let ids: HashSet<&str> = files.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(ids.len(), 3);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_collect_with_selected_id_of_names_that_print_alike_returns_that_file() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join(OsStr::from_bytes(b"a\xff.txt")), b"byte\n");
+        write(&dir.path().join("a\\xff.txt"), b"literal\n");
+        let all = collect(&opts_for(dir.path().to_path_buf())).unwrap();
+        let ids: Vec<String> = all.iter().map(|f| f.id.clone()).collect();
+        assert_eq!(ids, ["a\\xff.txt", "a\\xff.txt#2"]);
+        assert!(all.iter().all(|f| f.relative == "a\\xff.txt"));
+        for id in ids {
+            let picked = collect(&Options {
+                roots: vec![dir.path().to_path_buf()],
+                selection: Selection::Only(vec![id.clone()]),
+                ..Options::default()
+            })
+            .unwrap();
+            let picked: Vec<&str> = picked.iter().map(|f| f.id.as_str()).collect();
+            assert_eq!(picked, [id.as_str()]);
+        }
     }
 
     #[cfg(unix)]

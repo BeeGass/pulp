@@ -30,8 +30,8 @@ pub use classify::{
     looks_binary,
 };
 pub use config::{
-    Budget, Options, OutputFormat, Selection, TreeMode, apply_budgets, cmp_path_order,
-    default_exclude_globs,
+    Budget, Options, OutputFormat, Selection, SelectionFilter, TreeMode, apply_budgets,
+    cmp_path_order, default_exclude_globs,
 };
 pub use error::Error;
 pub use filter::PathPolicy;

@@ -312,10 +312,10 @@ pub(crate) fn pack_manifest_entry(entry: &ManifestEntry, opts: &Options) -> Vec<
 
 /// Pack an in-memory file set (browser / virtual trees). No filesystem reads.
 ///
-/// Enforces [`Options::selection`], include/exclude, hidden, and the entry
-/// and byte budgets. The budgets are spent in path order whatever order
-/// `entries` come in, so they keep the files a walk of the same folder keeps
-/// (see [`crate::config::Budget`]).
+/// Enforces [`Options::selection`] (see [`crate::config::SelectionFilter`]),
+/// include/exclude, hidden, and the entry and byte budgets. The budgets are
+/// spent in path order whatever order `entries` come in, so they keep the
+/// files a walk of the same folder keeps (see [`crate::config::Budget`]).
 pub fn pack_entries(
     entries: &[MemoryFile<'_>],
     opts: &Options,
@@ -335,11 +335,11 @@ pub fn pack_entries(
     let policy = crate::filter::PathPolicy::from_options(opts)?;
     let extract_opts = ExtractOpts::from_options(opts);
     let bytes_read = AtomicU64::new(0);
+    let selection = opts.selection.resolve(entries.iter().map(|entry| entry.id));
     let mut chosen: Vec<&MemoryFile<'_>> = entries
         .iter()
         .filter(|entry| {
-            (opts.selection.allows(entry.id) || opts.selection.allows(entry.relative))
-                && policy.keep_walk(entry.relative)
+            selection.contains(entry.id, entry.relative) && policy.keep_walk(entry.relative)
         })
         .collect();
     chosen.sort_by(|a, b| cmp_path_order(a.relative, b.relative).then_with(|| a.id.cmp(b.id)));
@@ -1144,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pack_entries_preserves_distinct_ids() {
+    fn test_pack_entries_with_one_path_under_two_ids_returns_both_ids() {
         let bytes = b"fn x() {}\n";
         let files = [
             MemoryFile {

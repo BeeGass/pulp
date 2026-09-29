@@ -11,7 +11,6 @@
 //! - Every API call must send the token in `x-pulp-token`. Calls from another
 //!   origin or site are refused, and a CORS preflight gets no CORS headers.
 
-use std::collections::HashSet;
 use std::io::{Cursor, ErrorKind};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -29,7 +28,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
-use crate::config::{Options, OutputFormat, Selection, TreeMode, parse_size};
+use crate::config::{Options, OutputFormat, Selection, SelectionFilter, TreeMode, parse_size};
 use crate::manifest::{self, ManifestEntry, ScanManifest};
 use crate::pack;
 use crate::pick;
@@ -1145,18 +1144,20 @@ fn load_or_scan_manifest(req: &PackRequest, mill: &Mill) -> Result<Arc<StoredMan
     Ok(mill.put_manifest(want, manifest))
 }
 
-/// A copy of `manifest` with only the entries whose id or relative path the
-/// request ticked. Copies those entries alone, not the whole scan.
+/// A copy of `manifest` with only the entries the request ticked, matched by
+/// id first (see [`SelectionFilter`]). Copies those entries alone, not the
+/// whole scan.
 fn selected_manifest(manifest: &ScanManifest, selected: &[String]) -> ScanManifest {
-    let want: HashSet<&str> = selected.iter().map(String::as_str).collect();
+    let want = SelectionFilter::only(
+        selected,
+        manifest.entries.iter().map(|entry| entry.id.as_str()),
+    );
     ScanManifest {
         root: manifest.root.clone(),
         entries: manifest
             .entries
             .iter()
-            .filter(|entry| {
-                want.contains(entry.id.as_str()) || want.contains(entry.relative.as_str())
-            })
+            .filter(|entry| want.contains(&entry.id, &entry.relative))
             .cloned()
             .collect(),
         bytes: manifest.bytes,
@@ -1380,9 +1381,10 @@ fn plain_members(files: Vec<pack::PackedFile>, opts: &Options) -> Result<String,
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// The selected file's entry in the request's stored manifest, matched by id or
-/// relative path so a request can never name a path of its own. `Ok(None)` when
-/// the manifest id is unknown or was scanned with other discovery settings.
+/// The selected file's entry in the request's stored manifest, matched by id or,
+/// when no entry has that id, by relative path, so a request can never name a
+/// path of its own. `Ok(None)` when the manifest id is unknown or was scanned
+/// with other discovery settings.
 fn stored_entry(
     req: &PackRequest,
     want: &str,
@@ -1394,11 +1396,11 @@ fn stored_entry(
     if stored.discovery_key != discovery_key_pack(req) {
         return Ok(None);
     }
-    stored
-        .manifest
-        .entries
+    let entries = &stored.manifest.entries;
+    entries
         .iter()
-        .find(|entry| entry.id == want || entry.relative == want)
+        .find(|entry| entry.id == want)
+        .or_else(|| entries.iter().find(|entry| entry.relative == want))
         .cloned()
         .map(Some)
         .ok_or_else(|| ApiError::bad("file is not in this scan; rescan"))

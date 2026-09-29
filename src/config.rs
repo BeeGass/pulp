@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// How the directory map at the top of the dump is produced.
@@ -124,6 +125,63 @@ impl Selection {
     #[must_use]
     pub fn is_empty_only(&self) -> bool {
         matches!(self, Self::Only(ids) if ids.is_empty())
+    }
+
+    /// This selection resolved against every id of one file set; see
+    /// [`SelectionFilter`].
+    #[must_use]
+    pub fn resolve<'a, 'i>(
+        &'a self,
+        ids: impl IntoIterator<Item = &'i str>,
+    ) -> SelectionFilter<'a> {
+        match self {
+            Self::AllEligible => SelectionFilter {
+                names: None,
+                by_path: HashSet::new(),
+            },
+            Self::Only(names) => SelectionFilter::only(names, ids),
+        }
+    }
+}
+
+/// A selection resolved against every id of one file set.
+///
+/// A selected name picks the file whose id it is. Only a name that is no
+/// file's id falls back to picking files by relative path, so ticking one
+/// of two files whose names print alike picks that one alone.
+#[derive(Debug, Clone)]
+pub struct SelectionFilter<'a> {
+    /// `None` selects every file.
+    names: Option<HashSet<&'a str>>,
+    /// Names that are no file's id, matched against relative paths.
+    by_path: HashSet<&'a str>,
+}
+
+impl<'a> SelectionFilter<'a> {
+    /// Only the files `names` picks among a set with these `ids`.
+    #[must_use]
+    pub fn only<'i>(names: &'a [String], ids: impl IntoIterator<Item = &'i str>) -> Self {
+        let names: HashSet<&'a str> = names.iter().map(String::as_str).collect();
+        let mut by_path = names.clone();
+        for id in ids {
+            if by_path.is_empty() {
+                break;
+            }
+            by_path.remove(id);
+        }
+        Self {
+            names: Some(names),
+            by_path,
+        }
+    }
+
+    /// Whether the file with this id and relative path is selected.
+    #[must_use]
+    pub fn contains(&self, id: &str, relative: &str) -> bool {
+        match &self.names {
+            None => true,
+            Some(names) => names.contains(id) || self.by_path.contains(relative),
+        }
     }
 }
 
@@ -418,13 +476,31 @@ mod tests {
     }
 
     #[test]
-    fn test_selection_only_empty_allows_nothing() {
+    fn test_selection_with_empty_only_allows_nothing() {
         let sel = Selection::Only(Vec::new());
         assert!(sel.is_empty_only());
         assert!(!sel.allows("src/lib.rs"));
         assert!(Selection::AllEligible.allows("src/lib.rs"));
         assert!(Selection::Only(vec!["src/lib.rs".into()]).allows("src/lib.rs"));
         assert!(!Selection::Only(vec!["src/lib.rs".into()]).allows("src/main.rs"));
+    }
+
+    #[test]
+    fn test_selection_filter_with_name_that_is_an_id_returns_only_that_file() {
+        // Two files whose names print alike: one relative path, two ids.
+        let ids = ["a\\xff.txt", "a\\xff.txt#2"];
+        let pick = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+            let filter = SelectionFilter::only(&names, ids);
+            ids.map(|id| filter.contains(id, "a\\xff.txt"))
+        };
+        assert_eq!(pick(&["a\\xff.txt"]), [true, false]);
+        assert_eq!(pick(&["a\\xff.txt#2"]), [false, true]);
+        let names = ["app/x.rs".to_string()];
+        let by_path = SelectionFilter::only(&names, ["0:app/x.rs"]);
+        assert!(by_path.contains("0:app/x.rs", "app/x.rs"));
+        let all = Selection::AllEligible.resolve(ids);
+        assert!(all.contains("anything", "else"));
     }
 
     #[test]
