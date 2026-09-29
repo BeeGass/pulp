@@ -834,6 +834,11 @@ textarea {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+  .p-progress:not([data-p])::before {
+    width: 100%;
+    transform: none;
+    background: color-mix(in srgb, var(--acc) 45%, transparent);
+  }
 }
 
 /* Forced colors (Windows High Contrast) drop backgrounds and shadows, which is
@@ -858,5 +863,15 @@ textarea {
   }
   .p-chip[data-state="on"] {
     border-color: Highlight;
+  }
+  .p-progress::before,
+  .p-status::before {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+  .p-status[data-tone="idle"]::before,
+  .p-status[data-tone="stale"]::before {
+    background: Canvas;
+    box-shadow: inset 0 0 0 1.5px CanvasText;
   }
 }
