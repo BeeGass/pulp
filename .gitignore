@@ -4,3 +4,10 @@
 # wasm-pack metadata (binaries tracked for static deploy)
 site/mill/pkg/package.json
 site/mill/pkg/README.md
+
+# Agent working files
+.agents/scratchpad/**
+!.agents/scratchpad/.gitkeep
+!.agents/scratchpad/README.md
+.agents/memory/sessions/**
+!.agents/memory/sessions/.gitkeep
