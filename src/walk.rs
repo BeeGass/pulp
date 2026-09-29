@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use globset::GlobSet;
@@ -64,7 +64,7 @@ pub fn collect_detailed(opts: &Options) -> Result<WalkOutcome, Error> {
         Some(build_globset(&opts.include)?)
     };
     let exclude = build_globset(&opts.exclude)?;
-    let labels: Vec<String> = opts.roots.iter().map(|root| root_label(root)).collect();
+    let labels = root_labels(&opts.roots);
     let multi = kinds.len() > 1;
     for (idx, (root, kind)) in opts.roots.iter().zip(kinds).enumerate() {
         let scope = RootScope {
@@ -395,11 +395,101 @@ fn file_name_label(path: &Path) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
-fn root_label(root: &Path) -> String {
-    root.file_name()
-        .map(|name| name.to_string_lossy().replace('\\', "/"))
-        .filter(|name| !name.is_empty() && name != ".")
-        .unwrap_or_else(|| "root".to_string())
+/// Labels that prefix each root's files when several roots are walked.
+///
+/// A label is the root's directory name, with `.` and `..` resolved to the
+/// directory they name. Labels grow by parent directories until they are
+/// prefix-free: none equals another or is a component prefix of one, since
+/// `a` and `a/b` would print `b/x.txt` under the first and `x.txt` under the
+/// second as the same `a/b/x.txt`. Equal labels all grow; of a label and one
+/// that extends it, the shorter grows, or the longer when the shorter has no
+/// parent left. A root named twice keeps one label.
+pub(crate) fn root_labels(roots: &[PathBuf]) -> Vec<String> {
+    let names: Vec<Vec<String>> = roots.iter().map(|root| named_components(root)).collect();
+    let mut distinct: Vec<&[String]> = Vec::new();
+    let mut slot_of: HashMap<&[String], usize> = HashMap::new();
+    let slots: Vec<usize> = names
+        .iter()
+        .map(|parts| {
+            *slot_of.entry(parts.as_slice()).or_insert_with(|| {
+                distinct.push(parts.as_slice());
+                distinct.len() - 1
+            })
+        })
+        .collect();
+    let mut take = vec![1usize; distinct.len()];
+    loop {
+        let labels: Vec<String> = distinct
+            .iter()
+            .zip(&take)
+            .map(|(parts, &take)| label_of(parts, take))
+            .collect();
+        let grow = labels_to_grow(&labels, |slot| take[slot] < distinct[slot].len());
+        if grow.is_empty() {
+            return slots.iter().map(|&slot| labels[slot].clone()).collect();
+        }
+        for slot in grow {
+            take[slot] += 1;
+        }
+    }
+}
+
+/// The last `take` components of `parts`, or `root` for the filesystem root.
+fn label_of(parts: &[String], take: usize) -> String {
+    if parts.is_empty() {
+        return "root".to_string();
+    }
+    parts[parts.len().saturating_sub(take)..].join("/")
+}
+
+/// Which of `labels` must grow by a parent directory, among those that can:
+/// one equal to another, one that another extends, and one that extends a
+/// label that cannot grow.
+fn labels_to_grow(labels: &[String], can_grow: impl Fn(usize) -> bool) -> Vec<usize> {
+    let mut count: HashMap<&str, usize> = HashMap::new();
+    let mut extended: HashSet<&str> = HashSet::new();
+    let mut stuck: HashSet<&str> = HashSet::new();
+    for (slot, label) in labels.iter().enumerate() {
+        *count.entry(label.as_str()).or_default() += 1;
+        extended.extend(proper_prefixes(label));
+        if !can_grow(slot) {
+            stuck.insert(label.as_str());
+        }
+    }
+    labels
+        .iter()
+        .enumerate()
+        .filter(|&(slot, label)| {
+            can_grow(slot)
+                && (count[label.as_str()] > 1
+                    || extended.contains(label.as_str())
+                    || proper_prefixes(label).any(|prefix| stuck.contains(prefix)))
+        })
+        .map(|(slot, _)| slot)
+        .collect()
+}
+
+/// The component prefixes of `label` short of itself: `a` and `a/b` for
+/// `a/b/c`.
+fn proper_prefixes(label: &str) -> impl Iterator<Item = &str> {
+    label.match_indices('/').map(move |(end, _)| &label[..end])
+}
+
+/// Normal components of `path` made absolute, with `.` and `..` resolved
+/// by name. Symlinks are kept as written, so a label shows the name typed.
+fn named_components(path: &Path) -> Vec<String> {
+    let absolute = make_absolute(path);
+    let mut parts: Vec<String> = Vec::new();
+    for component in absolute.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::ParentDir => {
+                parts.pop();
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    parts
 }
 
 fn make_absolute(path: &Path) -> PathBuf {
@@ -761,6 +851,58 @@ mod tests {
             assert!(outcome.truncated);
             assert_eq!(rels(&outcome.files), want, "max_entries={max_entries}");
         }
+    }
+
+    #[test]
+    fn test_root_labels_with_shared_names_and_dot_roots_returns_distinct_labels() {
+        let labels = root_labels(&[PathBuf::from("/tmp/a/src"), PathBuf::from("/tmp/b/src")]);
+        assert_eq!(labels, ["a/src", "b/src"]);
+        let labels = root_labels(&[PathBuf::from("/x/one"), PathBuf::from("/y/two")]);
+        assert_eq!(labels, ["one", "two"]);
+        let labels = root_labels(&[
+            PathBuf::from("/x/p/.."),
+            PathBuf::from("/"),
+            "/x/q/.".into(),
+        ]);
+        assert_eq!(labels, ["x", "root", "q"]);
+
+        let cwd = std::env::current_dir().unwrap();
+        let labels = root_labels(&[PathBuf::from("."), PathBuf::from("..")]);
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(labels, [name(&cwd), name(cwd.parent().unwrap())]);
+    }
+
+    #[test]
+    fn test_root_labels_with_label_nested_in_another_returns_prefix_free_labels() {
+        let labels = root_labels(&[
+            PathBuf::from("/p/a"),
+            PathBuf::from("/q/a/b"),
+            PathBuf::from("/r/b"),
+        ]);
+        assert_eq!(labels, ["p/a", "a/b", "r/b"]);
+        // `a` has no parent left to add, so the label extending it grows.
+        let labels = root_labels(&[PathBuf::from("/a"), PathBuf::from("/x/a/b"), "/y/b".into()]);
+        assert_eq!(labels, ["a", "x/a/b", "y/b"]);
+        // One directory named twice keeps one label.
+        let labels = root_labels(&[PathBuf::from("/s/src"), PathBuf::from("/s/src")]);
+        assert_eq!(labels, ["src", "src"]);
+    }
+
+    #[test]
+    fn test_collect_with_roots_whose_labels_nest_returns_distinct_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("p/a");
+        let second = dir.path().join("q/a/b");
+        let third = dir.path().join("r/b");
+        write(&first.join("b/x.txt"), b"one\n");
+        write(&second.join("x.txt"), b"two\n");
+        write(&third.join("y.txt"), b"three\n");
+        let files = collect(&Options {
+            roots: vec![first, second, third],
+            ..Options::default()
+        })
+        .unwrap();
+        assert_eq!(rels(&files), ["p/a/b/x.txt", "a/b/x.txt", "r/b/y.txt"]);
     }
 
     #[test]
