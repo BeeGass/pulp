@@ -758,7 +758,7 @@ test('cancel: Esc cancels, and a pack rejected as cancelled is not an error', as
 
 /* ---------- issues ---------- */
 
-test('issues: flagged rows, a count badge, and Untick or Report on the flagged file', async () => {
+test('issues: flagged rows, a count badge, and Untick or Turn on archives on the flagged file', async () => {
   const { a, m } = await flagged();
   equal(tone(m), 'warn');
   match(status(m), /\b1 issue\b/, 'the status counts the issues');
@@ -787,13 +787,36 @@ test('issues: flagged rows, a count badge, and Untick or Report on the flagged f
   match(text(note), /skipped.archive/);
   ok(note.querySelector('[data-act="untick"]'), 'Untick is offered');
   ok(note.querySelector('[data-act="archives-on"]'), 'Turn on archives is offered');
+  equal(note.querySelector('[data-act="report-issue"]'), null, 'an archive left packed is expected, not a bug to report');
+});
 
-  note.querySelector('[data-act="report-issue"]').click();
+test('issues: only what pulp may get wrong is reported, and a changed file offers Scan again', async () => {
+  const outcomes = TICKED.map((id) => ({ id, relative: id, status: 'extracted', message: '' }));
+  const flag = (id, status, message) => Object.assign(outcomes.find((o) => o.id === id), { status, message });
+  flag('docs/briefing.docx', 'unreadable', 'not a Word document: it holds an HTML page');
+  flag('README.md', 'skipped_binary', 'Skipped a binary file (649 bytes): the dump holds no text for it.');
+  flag('src/lib.rs', 'changed', 'changed since scan: no longer there');
+  const { a, m } = await pulped(undefined, { outcomes });
+  m.$('[data-view="issues"]').click();
+  const issue = (id) => m.$$('.mill-issue').find((i) => i.querySelector('[data-id="' + CSS.escape(id) + '"]'));
+  const unreadable = issue('docs/briefing.docx');
+  ok(unreadable.querySelector('[data-act="report-issue"]'), 'an unreadable file can be reported');
+  ok(unreadable.querySelector('[data-act="copy-issue"]'), 'and its report copied');
+  equal(issue('README.md').querySelector('[data-act="report-issue"]'), null, 'a skipped binary is not a bug to report');
+  const changed = issue('src/lib.rs');
+  equal(changed.querySelector('[data-act="report-issue"]'), null, 'nor is a file that changed');
+  unreadable.querySelector('[data-act="report-issue"]').click();
   const url = new URL(opened.at(-1));
   equal(url.origin + url.pathname, 'https://github.com/BeeGass/pulp/issues/new');
-  match(url.searchParams.get('title'), /skipped_archive.*data\/archive\.zip/, 'the issue title names the status and file');
-  match(url.searchParams.get('body'), /skipped_archive/);
-  match(url.searchParams.get('body'), /nested archive; turn on archives/, 'the report carries the error text');
+  match(url.searchParams.get('title'), /unreadable.*docs\/briefing\.docx/, 'the issue title names the status and file');
+  match(url.searchParams.get('body'), /not a Word document: it holds an HTML page/, 'the report carries the error text');
+
+  changed.querySelector('[data-act="rescan"]').click();
+  const scan = await a.next('scan');
+  equal(scan.args[0].path, '/tmp/tides', 'Scan again rescans the same folder');
+  scan.resolve({ files: FILES });
+  await flush();
+  ok(ticked(m, 'src/main.rs') && !ticked(m, 'Cargo.lock'), 'the rescan keeps the ticks');
 });
 
 test('issues: Untick on the flagged file, then Pulp again, returns to Combined', async () => {

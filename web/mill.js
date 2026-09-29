@@ -108,6 +108,13 @@ function errText(err) {
 }
 
 /**
+ * Outcomes that may be pulp's fault, so they offer a GitHub report. The rest
+ * (a binary skipped, a file over the cap, an archive left packed, a file that
+ * changed after the scan) are expected, and get the key that resolves them.
+ */
+const REPORTABLE = new Set(['error', 'unreadable']);
+
+/**
  * The folders a scan could not open (no read permission, say), as a warning
  * title and the lines naming them; null when the scan read everything. The
  * local mill sends the first few messages and a count of all of them.
@@ -1446,10 +1453,16 @@ export function mountMill(root, adapter, options) {
 
   function issueKeys(o, inNote) {
     const where = esc(o.relative || o.id);
+    const rescan = caps.source === 'path'
+      ? '<button type="button" class="p-key is-sm" data-act="rescan">Scan again</button>'
+      : '<button type="button" class="p-key is-sm" data-act="browse">Choose folder again</button>';
     return '<button type="button" class="p-key is-sm" data-act="untick" data-id="' + esc(o.id) + '" aria-label="Untick ' + where + '">Untick</button>' +
       (o.status === 'skipped_archive' && !S.settings.archives ? '<button type="button" class="p-key is-sm" data-act="archives-on">Turn on archives</button>' : '') +
-      '<button type="button" class="p-key is-sm is-quiet" data-act="report-issue" data-id="' + esc(o.id) + '" aria-label="Report ' + where + ' on GitHub">' + icon('github') + 'Report</button>' +
-      (inNote ? '' : '<button type="button" class="p-key is-sm is-quiet" data-act="copy-issue" data-id="' + esc(o.id) + '" aria-label="Copy the report for ' + where + '">' + icon('copy') + 'Copy report</button>');
+      (o.status === 'changed' ? rescan : '') +
+      (REPORTABLE.has(o.status)
+        ? '<button type="button" class="p-key is-sm is-quiet" data-act="report-issue" data-id="' + esc(o.id) + '" aria-label="Report ' + where + ' on GitHub">' + icon('github') + 'Report</button>' +
+          (inNote ? '' : '<button type="button" class="p-key is-sm is-quiet" data-act="copy-issue" data-id="' + esc(o.id) + '" aria-label="Copy the report for ' + where + '">' + icon('copy') + 'Copy report</button>')
+        : '');
   }
 
   function renderPreview() {
@@ -2092,6 +2105,7 @@ export function mountMill(root, adapter, options) {
         setSetting('archives', true);
         syncSettingsInputs();
         break;
+      case 'rescan': doScan(true); break;
       case 'report-issue': if (id && S.issues.has(id)) openReport(outcomeReport(S.issues.get(id))); break;
       case 'copy-issue': if (id && S.issues.has(id)) copyReport(outcomeReport(S.issues.get(id))); break;
       case 'report-alert': openReport(alertReport()); break;
