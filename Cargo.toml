@@ -80,7 +80,6 @@ tempfile = "3.27.0"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "abort"
 
 [patch.crates-io]
 pdf-extract = { path = "vendor/pdf-extract" }
