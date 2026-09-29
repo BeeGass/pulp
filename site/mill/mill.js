@@ -377,8 +377,10 @@ export function mountMill(root, adapter, options) {
       '<div class="mill-loading" data-el="filesloading" tabindex="-1" hidden><span class="p-spin"></span><span>scanning</span></div>' +
       '<div data-el="filesbody" hidden style="display:flex;flex-direction:column;min-height:0;flex:1 1 auto">' +
       '<div class="mill-filter"><label class="p-field">' + icon('search') +
-      '<input data-el="filter" type="search" placeholder="filter" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" enterkeyhint="search" aria-label="Filter files" aria-keyshortcuts="/">' +
-      '<kbd class="p-kbd">/</kbd></label></div>' +
+      '<input data-el="filter" name="filter" type="search" placeholder="filter" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" enterkeyhint="search" aria-label="Filter files" aria-keyshortcuts="/">' +
+      '<kbd class="p-kbd">/</kbd></label><span class="mill-filter-keys">' +
+      '<button type="button" class="p-key is-quiet is-sm" data-act="all" title="Tick every file that matches the filter">All</button>' +
+      '<button type="button" class="p-key is-quiet is-sm" data-act="none" title="Untick every file that matches the filter">None</button></span></div>' +
       '<div class="mill-chips" data-el="chips" role="group" aria-label="Tick by language"></div>' +
       '<div class="mill-tree" data-el="tree"><div class="mill-rows" data-el="rows" role="tree" aria-label="Files"></div></div></div></section>' +
       // Settings come before the output in the DOM: the order of the task, and the

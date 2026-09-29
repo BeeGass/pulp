@@ -135,8 +135,17 @@
 
 /* files */
 .mill-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   padding: 8px 10px 4px;
   flex: 0 0 auto;
+}
+.mill-filter .p-field {
+  flex: 1 1 auto;
+}
+.mill-filter-keys {
+  display: none;
 }
 .mill-filter .p-field {
   min-height: 28px;
@@ -890,12 +899,10 @@ span.mill-twist {
     box-shadow: none;
   }
   .mill-files .mill-pane-h {
-    padding: 0;
-  }
-  .mill-files .mill-pane-h .p-label,
-  .mill-files .mill-pane-h .p-meta,
-  .mill:not(.has-files) .mill-files .mill-pane-h {
     display: none;
+  }
+  .mill-filter-keys {
+    display: flex;
   }
   .mill-filter {
     padding: 8px 0 4px;
@@ -935,6 +942,9 @@ span.mill-twist {
   }
   .mill-insp.is-open .mill-set {
     width: 100%;
+  }
+  .mill-insp.is-open .mill-set > .p-label {
+    min-width: 64px;
   }
   .mill-insp.is-open .mill-set-opts {
     display: grid;
