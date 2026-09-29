@@ -150,33 +150,43 @@ enum Node {
     Dir(Dir),
 }
 
+/// Deepest directory level the map draws. A path nested deeper keeps its
+/// remaining segments on one line, so an archive member named `a/a/a/…`
+/// thousands of levels deep cannot make the map grow with the square of its
+/// depth.
+const MAX_TREE_DEPTH: usize = 64;
+
 fn insert_path(root: &mut Dir, path: &str) {
     let normalized = path.replace('\\', "/");
     let last_is_dir = normalized.ends_with('/');
-    let parts: Vec<&str> = normalized
+    let mut parts: Vec<Cow<'_, str>> = normalized
         .split('/')
         .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+        .map(Cow::Borrowed)
         .collect();
     if parts.is_empty() {
         return;
     }
+    if parts.len() > MAX_TREE_DEPTH {
+        let tail = parts[MAX_TREE_DEPTH - 1..].join("/");
+        parts.truncate(MAX_TREE_DEPTH - 1);
+        parts.push(Cow::Owned(tail));
+    }
     insert(root, &parts, last_is_dir);
 }
 
-fn insert(dir: &mut Dir, parts: &[&str], last_is_dir: bool) {
+fn insert(dir: &mut Dir, parts: &[Cow<'_, str>], last_is_dir: bool) {
     let Some((name, rest)) = parts.split_first() else {
         return;
     };
     if rest.is_empty() && !last_is_dir {
-        dir.children
-            .entry((*name).to_string())
-            .or_insert(Node::File);
+        dir.children.entry(name.to_string()).or_insert(Node::File);
         return;
     }
 
     let node = dir
         .children
-        .entry((*name).to_string())
+        .entry(name.to_string())
         .or_insert_with(|| Node::Dir(Dir::default()));
     if matches!(node, Node::File) {
         *node = Node::Dir(Dir::default());
@@ -358,6 +368,16 @@ root\\nlabel/
 └── b.rs
 ";
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn test_render_tree_with_path_deeper_than_cap_returns_tail_on_one_line() {
+        let deep = vec!["d"; 5000].join("/") + "/leaf.txt";
+        let rendered = render_tree("root", &[deep]);
+        assert_eq!(rendered.lines().count(), 1 + MAX_TREE_DEPTH);
+        assert!(rendered.len() < 64 * 1024, "{} bytes", rendered.len());
+        let last = rendered.lines().last().unwrap();
+        assert!(last.ends_with("d/d/leaf.txt"), "{last}");
     }
 
     #[test]

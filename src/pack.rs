@@ -716,16 +716,55 @@ fn render_pack_tree(opts: &Options, files: &[PackedFile]) -> String {
     }
 }
 
+/// Label on the first line of the directory map.
+///
+/// One root is labelled with its directory's name. A file named as the root
+/// is drawn inside its directory (`src/` then `└── main.rs`), not as a
+/// directory of its own. `..` and `/` name the directory they resolve to.
 pub(crate) fn tree_label(roots: &[PathBuf]) -> String {
     match roots {
-        [] => "pulp".to_string(),
-        [root] => root
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| ".".to_string()),
+        [root] => {
+            let dir = if root.is_file() {
+                root.parent().unwrap_or_else(|| Path::new(""))
+            } else {
+                root.as_path()
+            };
+            dir_label(dir)
+        }
         _ => "pulp".to_string(),
     }
+}
+
+fn dir_label(dir: &Path) -> String {
+    if let Some(name) = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+    {
+        return name;
+    }
+    if dir.components().all(|c| matches!(c, Component::CurDir)) {
+        return ".".to_string();
+    }
+    let absolute = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(dir),
+            Err(_) => return ".".to_string(),
+        }
+    };
+    let mut names: Vec<String> = Vec::new();
+    for component in absolute.components() {
+        match component {
+            Component::Normal(name) => names.push(name.to_string_lossy().into_owned()),
+            Component::ParentDir => {
+                names.pop();
+            }
+            _ => {}
+        }
+    }
+    names.pop().unwrap_or_else(|| "/".to_string())
 }
 
 fn class_path(item: &WorkItem) -> &Path {
@@ -1327,6 +1366,36 @@ mod tests {
             zw.write_all(data).unwrap();
         }
         zw.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn test_tree_label_with_file_and_dot_roots_returns_directory_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        write(&src.join("main.rs"), b"fn main() {}\n");
+        assert_eq!(tree_label(&[src.join("main.rs")]), "src");
+        assert_eq!(tree_label(std::slice::from_ref(&src)), "src");
+        assert_eq!(tree_label(&[src.join("..")]), dir_label(dir.path()));
+        assert_eq!(tree_label(&[PathBuf::from(".")]), ".");
+        assert_eq!(tree_label(&[PathBuf::from("/")]), "/");
+        assert_eq!(tree_label(&[src.clone(), src]), "pulp");
+
+        let cwd = std::env::current_dir().unwrap();
+        let parent = cwd.parent().unwrap().file_name().unwrap();
+        assert_eq!(tree_label(&[PathBuf::from("..")]), parent.to_string_lossy());
+    }
+
+    #[test]
+    fn test_pack_with_single_file_root_draws_file_inside_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("proj/main.rs");
+        write(&file, b"fn main() {}\n");
+        let packed = pack(&Options {
+            roots: vec![file],
+            ..Options::default()
+        })
+        .unwrap();
+        assert_eq!(packed.tree, "proj/\n└── main.rs\n");
     }
 
     #[test]

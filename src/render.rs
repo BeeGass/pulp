@@ -50,11 +50,12 @@ pub fn write_tree<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::R
             write_tree_body(w, packed)?;
         }
         OutputFormat::Markdown => {
+            let fence = fence_for(&packed.tree);
             writeln!(w, "# Directory structure")?;
             writeln!(w)?;
-            writeln!(w, "```")?;
+            writeln!(w, "{fence}")?;
             write_tree_body(w, packed)?;
-            writeln!(w, "```")?;
+            writeln!(w, "{fence}")?;
         }
         OutputFormat::Xml => {
             writeln!(w, "<document_tree>")?;
@@ -482,6 +483,18 @@ mod tests {
         let xml = render(&packed, OutputFormat::Xml);
         assert!(xml.contains("<document index=\"2\">"), "{xml}");
         assert!(!xml.contains("<document index=\"3\">"), "{xml}");
+    }
+
+    #[test]
+    fn test_write_tree_with_markdown_and_backtick_run_uses_longer_fence() {
+        let packed = Packed {
+            tree: crate::tree::render_tree("root", &["````.txt".to_string()]),
+            files: Vec::new(),
+            stats: Stats::default(),
+        };
+        let md = render(&packed, OutputFormat::Markdown);
+        assert!(md.starts_with("# Directory structure\n\n`````\n"), "{md}");
+        assert!(md.trim_end().ends_with("\n`````"), "{md}");
     }
 
     #[test]
