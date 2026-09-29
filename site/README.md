@@ -21,3 +21,7 @@ The live axum mill (`pulp ui`) stays localhost-only. Do not point this site at a
 ## Browser mill
 
 `/mill` is the in-browser WASM mill (`crates/pulp-wasm`). Rebuild with `wasm-pack` (see `docs/wasm-mill.md`) and commit updated `site/mill/pkg/*` artifacts.
+
+`pulp.css`, `mill/mill.css`, `mill/mill.js`, `mill/sample.json`, `mill/demo.json`, and `fonts/` are copies of files in `web/`. Edit `web/` and run `cargo xtask site`; `cargo xtask test` fails if the copies drift.
+
+The product shot's data, `web/sample-demo.json`, is a snapshot of pulp's real scan and pack of the sample project. When the sample or the dump format changes, regenerate it with `PULP_BLESS=1 cargo test --lib sample`, then run `cargo xtask site`.

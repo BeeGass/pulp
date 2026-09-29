@@ -63,7 +63,10 @@ cargo xtask doctor    # OS, arch, detected jobs
 cargo xtask build
 cargo xtask test
 cargo xtask ui
+cargo xtask site      # copy the shared mill UI from web/ into site/
 ```
+
+The mill's interface lives in `web/` (`pulp.css`, `mill.css`, `mill.js`, and the sample project). `pulp ui` embeds it; `cargo xtask site` copies it into `site/` for the browser mill, and `cargo xtask test` fails if the copies drift.
 
 ---
 
