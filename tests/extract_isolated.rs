@@ -114,3 +114,84 @@ fn test_pulp_cli_isolated_with_html_the_plain_count_doubts_renders_it_in_a_child
     assert!(rendered.contains("# Tide Tables"), "{rendered}");
     assert_eq!(rendered, in_process);
 }
+
+/// A PDF whose one font names a CMap the PDF parser has no table for
+/// (`90ms-RKSJ-H`), which makes that parser panic.
+fn pdf_that_panics() -> Vec<u8> {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+         /Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R >>",
+        "<< /Type /Font /Subtype /Type0 /BaseFont /KozMinPro-Regular \
+         /Encoding /90ms-RKSJ-H /DescendantFonts [5 0 R] >>",
+        "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /KozMinPro-Regular \
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >> >>",
+    ];
+    let content = "BT /F1 12 Tf 10 100 Td <0041> Tj ET";
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.push_str(&format!("{} 0 obj\n{body}\nendobj\n", i + 1));
+    }
+    offsets.push(pdf.len());
+    pdf.push_str(&format!(
+        "6 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+        content.len()
+    ));
+    let xref = pdf.len();
+    pdf.push_str("xref\n0 7\n0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+        "trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    pdf.into_bytes()
+}
+
+const PANIC_NOTE: &str = "extractor panicked: unsupported encoding 90ms-RKSJ-H";
+
+#[test]
+fn test_pulp_extract_child_with_panicking_parser_prints_only_the_note() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pulp"))
+        .args(["__extract", "--stdin", "--kind", "pdf"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pulp __extract");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&pdf_that_panics())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    // No thread name or id, no source location, no backtrace hint.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!("{PANIC_NOTE}\n")
+    );
+}
+
+#[test]
+fn test_pulp_cli_with_panicking_parser_writes_the_same_note_isolated_or_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("docs");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("cjk.pdf"), pdf_that_panics()).unwrap();
+    let (_, isolated) = pack_isolated(&root, &dir.path().join("dump.txt"), None);
+    let expected = format!("[error extracting cjk.pdf: {PANIC_NOTE}]");
+    assert!(isolated.contains(&expected), "{isolated}");
+    let in_process = Command::new(env!("CARGO_BIN_EXE_pulp"))
+        .env("PULP_ISOLATE", "0")
+        .arg(&root)
+        .output()
+        .expect("spawn pulp");
+    assert!(in_process.status.success(), "{in_process:?}");
+    assert_eq!(String::from_utf8(in_process.stdout).unwrap(), isolated);
+}

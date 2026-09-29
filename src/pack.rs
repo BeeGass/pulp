@@ -12,6 +12,7 @@ use rayon::prelude::*;
 use crate::classify::{Kind, classify, looks_binary};
 use crate::config::{Options, TreeMode};
 use crate::error::Error;
+use crate::extract::isolate::panic_message;
 use crate::extract::{ExtractOpts, expand_archive, extract};
 #[cfg(feature = "native")]
 use crate::manifest::ManifestEntry;
@@ -811,16 +812,6 @@ fn extract_contained(
             panic_message(payload.as_ref())
         ))),
     }
-}
-
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        return (*message).to_string();
-    }
-    if let Some(message) = payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-    "unknown panic".to_string()
 }
 
 fn packed_too_large(id: String, relative: String, kind: Kind, size: u64, limit: u64) -> PackedFile {

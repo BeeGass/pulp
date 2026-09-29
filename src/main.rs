@@ -168,6 +168,7 @@ fn main() -> anyhow::Result<()> {
             notebook_outputs,
         }) => {
             pulp::extract::isolate::start_child_watchdog();
+            pulp::extract::isolate::set_child_panic_hook();
             let kind = pulp::kind_from_label(&kind)
                 .ok_or_else(|| anyhow::anyhow!("unknown kind {kind}"))?;
             let opts = pulp::extract::ExtractOpts {

@@ -285,6 +285,32 @@ fn read_capped<R: Read>(mut reader: R, max: usize) -> Result<Vec<u8>, Error> {
     Ok(buf)
 }
 
+/// Make a panic in this child extractor print only `extractor panicked:
+/// <message>`, the words a parser that panics in the parent leaves in its
+/// note. The parent passes the child's stderr on as the note, which then
+/// carries no thread id or source location and reads the same whether the
+/// parser ran in a child, in the parent, or in the browser.
+pub fn set_child_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let _ = writeln!(
+            std::io::stderr(),
+            "extractor panicked: {}",
+            panic_message(info.payload())
+        );
+    }));
+}
+
+/// The message a panic carried, or `unknown panic` when it held none.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "unknown panic".to_string()
+}
+
 /// Make this child process exit once the extraction timeout, plus a short
 /// grace, has passed.
 ///
