@@ -106,6 +106,25 @@ fn test_pulp_with_reader_closing_pipe_early_exits_quietly() {
     assert!(!err.contains("panicked"), "{err}");
 }
 
+#[test]
+fn test_pulp_list_with_output_writes_escaped_paths_to_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    write(&root.join("a.rs"), b"fn a() {}\n");
+    write(&root.join("odd\nname.txt"), b"x\n");
+    let list = dir.path().join("list.txt");
+    let out = run(pulp().arg("--list").arg("-o").arg(&list).arg(&root));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.stdout.is_empty(), "{:?}", out.stdout);
+    let listed = fs::read_to_string(&list).unwrap();
+    assert_eq!(listed, "a.rs\nodd\\nname.txt\n");
+    assert!(
+        stderr(&out).starts_with("listed 2 files in "),
+        "{}",
+        stderr(&out)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn test_pulp_with_stdout_redirected_into_root_leaves_dump_out() {
@@ -118,6 +137,22 @@ fn test_pulp_with_stdout_redirected_into_root_leaves_dump_out() {
     let text = fs::read_to_string(&dump_path).unwrap();
     assert!(text.contains("FILE: a.rs"), "{text}");
     assert!(!text.contains("dump.txt"), "{text}");
+}
+
+#[test]
+fn test_pulp_with_quiet_and_tokens_prints_only_the_estimate() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("a.rs"), b"fn a() {}\n");
+    let out = run(pulp().args(["-q", "--tokens"]).arg(dir.path()));
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.starts_with('~') && err.trim_end().ends_with(" tokens"),
+        "{err}"
+    );
+    assert_eq!(err.lines().count(), 1, "{err}");
+    let quiet = run(pulp().arg("-q").arg(dir.path()));
+    assert!(quiet.stderr.is_empty(), "{}", stderr(&quiet));
 }
 
 #[test]
@@ -360,6 +395,32 @@ fn test_pulp_with_stderr_closed_early_exits_zero() {
     drop(child.stderr.take());
     let status = child.wait().unwrap();
     assert_eq!(status.code(), Some(0), "{status:?}");
+}
+
+#[test]
+fn test_pulp_list_with_binary_file_returns_only_dumped_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("a.rs"), b"fn a() {}\n");
+    write(
+        &dir.path().join("logo.png"),
+        &[0x89, b'P', b'N', b'G', 0, 0],
+    );
+    let out = run(pulp().arg("--list").arg(dir.path()));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a.rs\n");
+    assert!(
+        stderr(&out).starts_with("listed 1 files in "),
+        "{}",
+        stderr(&out)
+    );
+    let out = run(pulp().args(["--list", "--binaries"]).arg(dir.path()));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a.rs\nlogo.png\n");
+    assert!(
+        stderr(&out).starts_with("listed 2 files in "),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[cfg(unix)]

@@ -94,11 +94,14 @@ struct Cli {
     #[arg(long)]
     source: bool,
 
-    /// Print the token estimate (also part of the summary).
-    #[arg(long)]
+    /// Print the token estimate (also part of the summary; printed alone with --quiet).
+    #[arg(long, conflicts_with = "list")]
     tokens: bool,
 
     /// List paths that would be pulped; do not extract.
+    ///
+    /// Binaries are left out unless --binaries. Listing does not read files,
+    /// so a file whose text name hides binary bytes is still listed.
     #[arg(long)]
     list: bool,
 
@@ -259,16 +262,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         pulp::manifest::scan_manifest_with_warnings(&opts).context("pulp failed")?;
     let packed =
         pulp::pack_manifest(&manifest, &opts, None, None, Some(start)).context("pulp failed")?;
-    if opts.list_only {
-        let mut out = io::stdout().lock();
-        for file in &packed.files {
-            writeln!(out, "{}", display_path(&file.relative))?;
-        }
-    } else {
-        output
-            .dest
-            .write(|mut w| pulp::render::write_all(&mut w, &packed, &opts))?;
-    }
+    output
+        .dest
+        .write(|mut w| write_output(&mut w, &packed, &opts))?;
     // Walk warnings print even with --quiet, which hides only the summary.
     // A closed stderr is no reason to fail a dump that was written.
     let mut err = io::stderr().lock();
@@ -276,9 +272,32 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         let _ = writeln!(err, "{line}");
     }
     if !opts.quiet {
-        let _ = writeln!(err, "{}", summary_line(&packed));
+        let _ = writeln!(err, "{}", summary_line(&packed, opts.list_only));
+    } else if opts.tokens {
+        let _ = writeln!(err, "~{} tokens", packed.stats.tokens_est);
     }
     Ok(())
+}
+
+/// The dump, or with `--list` one display-safe path per line.
+fn write_output<W: Write>(w: &mut W, packed: &pulp::Packed, opts: &Options) -> io::Result<()> {
+    if opts.list_only {
+        for file in listed_files(packed) {
+            writeln!(w, "{}", display_path(&file.relative))?;
+        }
+        Ok(())
+    } else {
+        pulp::render::write_all(w, packed, opts)
+    }
+}
+
+/// The files `--list` prints: those the dump would hold, so a binary is left
+/// out unless binaries are kept.
+fn listed_files(packed: &pulp::Packed) -> impl Iterator<Item = &pulp::PackedFile> {
+    packed
+        .files
+        .iter()
+        .filter(|file| file.status != pulp::FileStatus::SkippedBinary)
 }
 
 /// Where the dump goes and what the walk must leave out because of it.
@@ -830,16 +849,24 @@ fn warning_lines(warnings: &pulp::walk::WalkWarnings) -> Vec<String> {
 }
 
 /// The stderr summary. Unreadable files are counted apart from the skipped
-/// ones: pulp tried them, and the dump holds a note for each.
-fn summary_line(packed: &pulp::Packed) -> String {
+/// ones: pulp tried them, and the dump holds a note for each. A `--list`
+/// run extracted nothing, so it only counts what it listed.
+fn summary_line(packed: &pulp::Packed, list_only: bool) -> String {
     let stats = &packed.stats;
+    let ms = duration_ms(stats.elapsed);
+    if list_only {
+        let mut line = format!("listed {} files in {ms}ms", listed_files(packed).count());
+        if stats.truncated {
+            line.push_str(", truncated");
+        }
+        return line;
+    }
     let unreadable = packed
         .files
         .iter()
         .filter(|file| matches!(file.status, pulp::FileStatus::Unreadable(_)))
         .count();
     let skipped = stats.files_skipped.saturating_sub(unreadable);
-    let ms = duration_ms(stats.elapsed);
     let mut line = format!(
         "pulped {} files ({} read, {} chars, ~{} tokens) in {ms}ms",
         stats.files_extracted,
@@ -926,14 +953,32 @@ mod tests {
                 ..pulp::Stats::default()
             },
         };
-        let line = summary_line(&packed);
+        let line = summary_line(&packed, false);
         assert!(line.starts_with("pulped 1 files ("), "{line}");
         assert!(line.ends_with(" in 0ms, 1 unreadable, 1 skipped"), "{line}");
 
         packed.files.remove(1);
         packed.stats.files_skipped = 1;
-        let line = summary_line(&packed);
+        let line = summary_line(&packed, false);
         assert!(line.ends_with(" in 0ms, 1 skipped"), "{line}");
+        assert_eq!(summary_line(&packed, true), "listed 1 files in 0ms");
+    }
+
+    #[test]
+    fn test_summary_line_with_list_only_returns_listed_count() {
+        let packed = pulp::Packed {
+            files: Vec::new(),
+            tree: String::new(),
+            stats: pulp::Stats {
+                files_extracted: 3,
+                truncated: true,
+                ..pulp::Stats::default()
+            },
+        };
+        assert_eq!(
+            summary_line(&packed, true),
+            "listed 0 files in 0ms, truncated"
+        );
     }
 
     #[test]
@@ -1148,6 +1193,13 @@ mod tests {
             other => panic!("expected __extract, got {other:?}"),
         }
         assert!(Cli::try_parse_from(["pulp", "__extract", "--kind", "pdf"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_with_list_and_tokens_returns_error() {
+        assert!(Cli::try_parse_from(["pulp", "--list", "--tokens"]).is_err());
+        assert!(Cli::try_parse_from(["pulp", "--list", "-q"]).is_ok());
+        assert!(Cli::try_parse_from(["pulp", "--tokens", "-q"]).is_ok());
     }
 
     #[test]
