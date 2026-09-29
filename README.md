@@ -2,7 +2,7 @@
 
 Grind a local folder into one LLM-ready dump.
 
-Pulp walks a tree in parallel, pulls text out of mixed documents, and writes a single file you can hand a model. The name is a triple entendre: paper pulp; the verb *to pulp* (extract the juice); and pulp fiction — disposable reading.
+Pulp walks a tree, pulls text out of mixed documents in parallel, and writes a single file you can hand a model. The name is a triple entendre: paper pulp; the verb *to pulp* (extract the juice); and pulp fiction — disposable reading.
 
 **Files never leave the machine.** There is no upload, no account, and no cloud packer. The mill binds `127.0.0.1` only.
 
@@ -29,6 +29,8 @@ Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is
 - A checkbox includes a file or a whole folder; the file name previews what pulp extracts; language chips tick every file of a kind; `/` filters.
 - Changing format or the directory map redraws the last extraction. Other changes mark the dump out of date, and Copy and Download stay off until you pulp again.
 - Files that could not be extracted are flagged in the tree. Select one to see why, untick it, or open a GitHub issue with the error text.
+- A scan that could not read some folders (no read permission, say) names the first few and counts the rest.
+- A file that changes, disappears, or is swapped for a link between the scan and the pack is flagged as changed rather than read; scan again to pick up its new contents.
 - One pack job at a time. Cancel (or Esc) asks it to stop between files. File previews run beside a pack and read only the chosen file from the last scan.
 - Lockfiles, images, and virtualenv trees (`.venv/`, `venv/`) start unticked.
 - The mill follows your OS light or dark setting and works on a phone.
@@ -38,7 +40,7 @@ Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is
 pulp ui --port 9000 --no-open    # headless or remote; then open the printed link yourself
 ```
 
-The in-browser mill at [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill) packs files you choose or drop in this tab (no gitignore walk, no OS folder dialog). It shares its interface with `pulp ui`; `pulp ui` still wins for `.gitignore` discovery and hang isolation.
+The in-browser mill at [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill) packs files you choose or drop in this tab (no gitignore walk, no OS folder dialog). It shares its interface with `pulp ui` and produces the same dump for the same files; `pulp ui` still wins for `.gitignore` discovery and typed paths.
 
 ---
 
@@ -54,7 +56,7 @@ Pulp is meant to feel the same on a laptop, a workstation, a Pi-class ARM board,
 | **Headless / SSH** | Skip the browser with `pulp ui --no-open` and open the printed `…/?token=…` link through a local forward on the same port (`ssh -L 8747:127.0.0.1:8747 host`), or stay on the CLI (`pulp -o dump.xml .`). |
 | **Any other OS** | The CLI still packs if the crate builds. The graphical folder picker is macOS, Linux, or Windows only. |
 
-**Hardware.** Walk and extract use as many threads as the OS reports, unless you pass `-j N`. A phone-class ARM board, a 4-core laptop, and a 32-thread desktop all work; more cores mainly shorten large trees. Release builds on macOS and Linux can use the host CPU (`cargo xtask build --release`). PDF, Office, EPUB, and RTF extractors run in a child `pulp` process with a timeout so a stuck parser does not take down the mill.
+**Hardware.** Extraction uses as many threads as the OS reports, unless you pass `-j N`; the walk runs in one thread so its order never changes. A phone-class ARM board, a 4-core laptop, and a 32-thread desktop all work; more cores mainly shorten large trees. Release builds on macOS and Linux can use the host CPU (`cargo xtask build --release`). PDF, Office, EPUB, and RTF extractors run in a child `pulp` process with a timeout so a stuck parser does not take down the mill; so does HTML whose nesting pulp cannot vouch for. HTML nested too deep to lay out is reduced to its text by a linear tag stripper.
 
 **Building from source.** `cargo xtask` sets job count from available parallelism and, on macOS, prefers Command Line Tools clang when it is installed. Named-lab overrides exist for a few boxes; everyone else is `unknown` and still gets a sensible default. `PULP_HOST` is only needed if you are deliberately pretending to be one of those boxes.
 
@@ -85,6 +87,8 @@ pulp --tree none -o dump.txt
 
 Omit `-o` to write to stdout. If `-f` is omitted, layout follows the `-o` extension (`.txt`, `.md`, `.xml`) and otherwise defaults to plain text.
 
+The dump never packs itself: a file that `-o` names, or that stdout is redirected into, is left out of the walk and spends none of the budget. `-o` refuses a file that is one of the inputs, and checks before any work that its folder exists and can be written. The dump goes to a temporary file beside FILE (`.pulp-<pid>-<n>.tmp`) and replaces FILE only once it is complete, so a failed or interrupted run leaves an old FILE, or a symlink's target, as it was, and no temporary file. A FIFO or a device is written in place. If the reader of a pipe goes away (`pulp . | head`), pulp stops quietly.
+
 | How to select | Layout |
 | --- | --- |
 | `-f txt` / `-o dump.txt` | `FILE:` headers and an optional directory map |
@@ -97,7 +101,11 @@ Unless `--quiet`, stderr looks like:
 pulped 12 files (48.2 KiB read, 12100 chars, ~12100 tokens) in 35ms
 ```
 
-When some files do not make it in, the line ends with counts such as `, 1 unreadable, 2 skipped`. An unreadable file (a damaged or encrypted PDF, say) keeps a one-line note in the dump in place of its text; it is not counted as pulped and is left out of the directory map.
+When some files do not make it in, the line ends with counts such as `, 1 unreadable, 2 skipped`. An unreadable file (a damaged or encrypted PDF, say) keeps a one-line note in the dump in place of its text; it is not counted as pulped and is left out of the directory map. So does an archive member that cannot be read out: unsupported compression, encryption, damage, or data shared with another member. Skipped binary media gets no section at all; a file over `--max-file-size` keeps a one-line note.
+
+Folders pulp cannot open, such as one without read permission or a symlink loop, print a `warning:` line each before the summary (the first ten, then a count); the rest of the tree is still pulped. `--list` ends with `listed N files` instead. `-q` hides the summary but not the warnings, and with `--tokens` prints the estimate alone.
+
+Names with control, bidi, or invisible format characters appear escaped (`\n`, `\u{202e}`) in headers, notes, the directory map, and `--list`, so a name cannot break a header or forge one. In XML, characters XML 1.0 cannot hold become U+FFFD.
 
 ---
 
@@ -113,11 +121,13 @@ When some files do not make it in, the line ends with counts such as `, 1 unread
 | Jupyter | Cells; `--notebook-outputs` keeps outputs |
 | Zip / tar | A root archive always expands; nested members need `--archives` |
 
-Binary media (images, audio, wasm, …) is skipped unless `--binaries`.
+Binary media (images, audio, wasm, …) is skipped unless `--binaries`, and so is a file whose name says text but whose bytes are binary. `--list` leaves binaries out too, except such a file, since listing reads no file.
 
 Noisy trees stay out even when they are tracked: `node_modules/`, `.next/`, `out/`, `runs/`, `target/`, `dist/`, `build/`, `toolchains/`, virtualenvs, `__pycache__/`, VCS dirs, lockfiles, `.env`, keys, object files, and similar. Rust `.rs`, Lean `.lean`, and NumPy arrays next to a skipped `target/` are still included. Generated paths that do show up start unchecked.
 
-`.gitignore` is honored unless `--no-gitignore`. `--exclude GLOB` adds patterns. `--no-default-excludes` starts from an empty deny list.
+Inside a git repository, pulp honors its `.gitignore` files, `.git/info/exclude`, and your global excludes, as `git status` does; `.ignore` files count anywhere. `--no-gitignore` turns all of them off. `--exclude GLOB` adds patterns and `--no-default-excludes` drops the built-in list. With several roots, the built-in list matches paths under each root, while your `--include` and `--exclude` globs match either that path or the path the dump prints (`secrets/**` or `app/secrets/**`).
+
+Budgets follow path order: depth first, each folder's entries sorted by name. The walk stops at the first file that does not fit `--max-entries` or `--max-total-bytes`, so the same tree always yields the same dump.
 
 ---
 
@@ -125,14 +135,14 @@ Noisy trees stay out even when they are tracked: `node_modules/`, `.next/`, `out
 
 | Flag | Meaning |
 | --- | --- |
-| `-o, --output FILE` | Write the dump here (default: stdout) |
+| `-o, --output FILE` | Write the dump here (default: stdout, as is `-o -`) |
 | `-f, --format FMT` | `txt` / `md` / `xml` |
 | `--tree MODE` | `selected` (default), `full`, `none` |
 | `--no-tree` | Same as `--tree none` |
-| `-j, --jobs N` | Parallelism (`0` = all available cores) |
+| `-j, --jobs N` | Extraction threads (`0` = all available cores) |
 | `--max-file-size SIZE` | Cap per file (default `8MiB`) |
-| `--max-entries N` | Optional cap on discovered files (`0`, the default, means no cap) |
-| `--max-total-bytes SIZE` | Cap summed input (default `1GiB`) |
+| `--max-entries N` | Keep only the first N files in path order (`0`, the default, means no cap) |
+| `--max-total-bytes SIZE` | Cap summed input, filled in path order (default `1GiB`) |
 | `--include GLOB` | Repeatable allow-list |
 | `--exclude GLOB` | Repeatable extra deny-list |
 | `--no-default-excludes` | Do not apply the built-in deny-list |
@@ -143,9 +153,9 @@ Noisy trees stay out even when they are tracked: `node_modules/`, `.next/`, `out
 | `--binaries` | Keep binary placeholders instead of skipping |
 | `--notebook-outputs` | Include Jupyter cell outputs |
 | `--source` | Keep HTML, XML, and JSON as source |
-| `--tokens` | Token estimate in the summary |
-| `--list` | Print relative paths only |
-| `-q, --quiet` | No stderr summary |
+| `--tokens` | With `-q`, print only the token estimate (not with `--list`) |
+| `--list` | Print the paths that would be pulped (to `-o` when given) |
+| `-q, --quiet` | No stderr summary; warnings still print |
 | `ui` | Local mill (`--port`, `--no-open`) |
 
 ---
@@ -164,7 +174,7 @@ let opts = Options {
 let packed = pack(&opts)?;
 ```
 
-`Selection::Only(vec![])` matches nothing; it never becomes “all files”. Render with `pulp::render::write_all`. `scan_manifest` is the shared discovery step for scan, tree, and pack.
+`Selection::Only(vec![])` matches nothing; it never becomes “all files”, and an id is matched before a path. `Options::exclude` holds your own globs; the built-in list applies while `default_excludes` is on, and `exclude_globs()` gives both. Render with `pulp::render::write_all`, which leaves skipped binaries out. `scan_manifest` is the shared discovery step for scan, tree, and pack; `scan_manifest_with_warnings` also returns the paths the walk could not read. `apply_budgets` and `cmp_path_order` apply the same budgets in the same order to any file list.
 
 ---
 

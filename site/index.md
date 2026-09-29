@@ -10,7 +10,7 @@ author: "Bryan Gass"
 
 Grind a folder into one **LLM-ready dump**.
 
-Pulp walks a tree in parallel, pulls text out of code, PDFs, Office files, and notebooks, and writes one file you can hand a model.
+Pulp walks a tree, pulls text out of code, PDFs, Office files, and notebooks in parallel, and writes one file you can hand a model.
 
 **Local first.** Nothing is uploaded. The CLI mill (`pulp ui`) binds localhost only. The [browser mill](https://pulp.onlygass.dev/mill) packs in WebAssembly inside your tab. Both mills have a **Try a sample** key that loads a small built-in project.
 
@@ -37,7 +37,7 @@ Requires Rust 1.85 or newer.
 | Jupyter | Cells; `--notebook-outputs` keeps outputs |
 | Zip, tar | A root archive always expands; nested members need `--archives` |
 
-Binary media is skipped unless `--binaries`. Noisy trees stay out even when tracked: `node_modules/`, `target/`, `dist/`, virtualenvs, lockfiles, `.env`, keys, and similar. `.gitignore` is honored unless `--no-gitignore`.
+Binary media is skipped unless `--binaries`. Noisy trees stay out even when tracked: `node_modules/`, `target/`, `dist/`, virtualenvs, lockfiles, `.env`, keys, and similar. Inside a git repository, `.gitignore` is honored unless `--no-gitignore`.
 
 ## Formats
 
@@ -50,7 +50,7 @@ Plain text (`-f txt`), Markdown (`-f md`), or Claude-style XML (`-f xml`). Witho
 | `-o, --output FILE` | Write the dump here (default: stdout) |
 | `-f, --format FMT` | `txt`, `md`, or `xml` |
 | `--tree MODE` | `selected` (default), `full`, or `none` |
-| `-j, --jobs N` | Parallelism; `0` uses every available core |
+| `-j, --jobs N` | Extraction threads; `0` uses every available core |
 | `--include GLOB` | Repeatable allow-list |
 | `--exclude GLOB` | Repeatable extra deny-list |
 | `--hidden` | Include hidden files (`.git` is still skipped) |
@@ -58,7 +58,7 @@ Plain text (`-f txt`), Markdown (`-f md`), or Claude-style XML (`-f xml`). Witho
 | `--archives` | Expand nested zip and tar members |
 | `--source` | Keep HTML, XML, and JSON as source |
 | `--notebook-outputs` | Include Jupyter cell outputs |
-| `--list` | Print relative paths only |
+| `--list` | Print the paths that would be pulped |
 
 Every flag is in the [README](https://github.com/BeeGass/pulp#options).
 
@@ -70,7 +70,7 @@ Every flag is in the [README](https://github.com/BeeGass/pulp#options).
 | Choosing files | Folder or file picker, or drop | OS file manager, or any typed path |
 | `.gitignore` | Not available | Honored |
 | Default excludes | Same core matcher | Same core matcher |
-| PDF, Office, zip | In-process WebAssembly | A child process with a timeout |
+| PDF, Office, zip | A worker of its own, with a time limit | A child process with a time limit |
 | Cancel | Stops the worker | Between files |
 | Setup | None | One cargo line |
 

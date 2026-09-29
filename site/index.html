@@ -46,7 +46,7 @@
     <section class="lp-hero">
       <p class="p-label">Local-first · written in Rust · MIT</p>
       <h1>Grind a folder into one <span class="lp-nowrap">LLM-ready</span> dump.</h1>
-      <p class="lp-lede">Pulp walks a tree in parallel, pulls text out of code, PDFs, Office files, and notebooks, and writes one file you can hand a model.</p>
+      <p class="lp-lede">Pulp walks a tree, pulls text out of code, PDFs, Office files, and notebooks in parallel, and writes one file you can hand a model.</p>
       <div class="lp-install">
         <span class="dollar" aria-hidden="true">$</span>
         <code tabindex="0">cargo install --git https://github.com/BeeGass/pulp --locked</code>
@@ -83,7 +83,7 @@
           </tbody>
         </table>
       </div>
-      <p>Binary media (images, audio, wasm, …) is skipped unless <code>--binaries</code>. Noisy trees stay out even when they are tracked: <code>node_modules/</code>, <code>target/</code>, <code>dist/</code>, virtualenvs, lockfiles, <code>.env</code>, keys, and similar. <code>.gitignore</code> is honored unless <code>--no-gitignore</code>.</p>
+      <p>Binary media (images, audio, wasm, …) is skipped unless <code>--binaries</code>. Noisy trees stay out even when they are tracked: <code>node_modules/</code>, <code>target/</code>, <code>dist/</code>, virtualenvs, lockfiles, <code>.env</code>, keys, and similar. Inside a git repository, <code>.gitignore</code> is honored unless <code>--no-gitignore</code>.</p>
     </section>
 
     <section class="lp-sec" id="formats">
@@ -170,7 +170,7 @@
             <tr><td><code>-o, --output FILE</code></td><td>Write the dump here (default: stdout)</td></tr>
             <tr><td><code>-f, --format FMT</code></td><td><code>txt</code>, <code>md</code>, or <code>xml</code></td></tr>
             <tr><td><code>--tree MODE</code></td><td><code>selected</code> (default), <code>full</code>, or <code>none</code></td></tr>
-            <tr><td><code>-j, --jobs N</code></td><td>Parallelism; <code>0</code> uses every available core</td></tr>
+            <tr><td><code>-j, --jobs N</code></td><td>Extraction threads; <code>0</code> uses every available core</td></tr>
             <tr><td><code>--include GLOB</code></td><td>Repeatable allow-list</td></tr>
             <tr><td><code>--exclude GLOB</code></td><td>Repeatable extra deny-list</td></tr>
             <tr><td><code>--hidden</code></td><td>Include hidden files (<code>.git</code> is still skipped)</td></tr>
@@ -178,7 +178,7 @@
             <tr><td><code>--archives</code></td><td>Expand nested zip and tar members</td></tr>
             <tr><td><code>--source</code></td><td>Keep HTML, XML, and JSON as source</td></tr>
             <tr><td><code>--notebook-outputs</code></td><td>Include Jupyter cell outputs</td></tr>
-            <tr><td><code>--list</code></td><td>Print relative paths only</td></tr>
+            <tr><td><code>--list</code></td><td>Print the paths that would be pulped</td></tr>
           </tbody>
         </table>
       </div>
@@ -196,7 +196,7 @@
             <tr><td>Choosing files</td><td>Folder or file picker, or drop</td><td>Your OS file manager, or any typed path</td></tr>
             <tr><td><code>.gitignore</code></td><td class="lp-no">Not available</td><td class="lp-yes">Honored</td></tr>
             <tr><td>Default excludes</td><td>Same core matcher</td><td>Same core matcher</td></tr>
-            <tr><td>PDF, Office, zip</td><td>In-process WebAssembly</td><td>A child process with a timeout</td></tr>
+            <tr><td>PDF, Office, zip</td><td>A worker of its own, with a time limit</td><td>A child process with a time limit</td></tr>
             <tr><td>Cancel</td><td>Stops the worker</td><td>Between files</td></tr>
             <tr><td>Setup</td><td class="lp-yes">None</td><td>One cargo line</td></tr>
           </tbody>

@@ -28,7 +28,6 @@ The public mill UI at [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill) p
 Local `pulp ui` (`127.0.0.1`) still wins for:
 
 - gitignore-aware walks
-- hang isolation for stuck extractors
 - full native extract path on your machine
 
 ## Related
