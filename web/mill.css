@@ -559,6 +559,16 @@ span.mill-twist {
   gap: 14px;
   padding: 14px;
 }
+/* On a short screen the settings scroll and the run block below them keeps
+   Pulp and the stats in view. */
+.mill-insp-sets {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 .mill-set {
   display: grid;
   justify-items: start;
@@ -742,6 +752,9 @@ span.mill-twist {
     gap: 10px 20px;
     overflow: visible;
     padding: 10px 12px;
+  }
+  .mill-insp-sets {
+    display: contents;
   }
   .mill-set {
     display: flex;

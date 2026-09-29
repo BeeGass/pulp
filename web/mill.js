@@ -393,12 +393,14 @@ export function mountMill(root, adapter, options) {
       '<div class="mill-sum"><span class="p-meta" data-el="sumtext"></span>' +
       '<button type="button" class="p-key is-sm" data-act="insp" aria-expanded="false">' + icon('sliders') + 'Settings</button></div>' +
       // Each group's label sits above its keys in the wide inspector and beside them in the strip.
+      // The groups scroll on their own in the wide inspector, so Pulp and the stats stay in view.
+      '<div class="mill-insp-sets">' +
       '<div class="mill-set"><span class="p-label" id="' + uid + '-content">Content</span>' + seg('content', [['readable', 'Readable'], ['source', 'Source']]) +
       '<p class="mill-hint" data-el="contenthint" hidden>HTML, XML, and JSON stay as decoded source; PDFs and Office files are still turned into text.</p></div>' +
       '<div class="mill-set"><span class="p-label" id="' + uid + '-format">Format</span>' + seg('format', [['txt', 'Txt'], ['md', 'Md'], ['xml', 'Xml']]) + '</div>' +
       '<div class="mill-set mill-set-opts" role="group" aria-labelledby="' + uid + '-options"><span class="p-label" id="' + uid + '-options">Options</span>' +
       '<button type="button" class="p-key is-sm mill-opts-toggle" data-el="optstoggle" data-act="opts" aria-expanded="false">' + icon('sliders') + 'Options<span class="p-count" data-el="optscount"></span></button>' +
-      '<div class="mill-opts" data-el="opts">' + optRows + '</div></div>' +
+      '<div class="mill-opts" data-el="opts">' + optRows + '</div></div></div>' +
       '<div class="mill-run">' +
       '<button type="button" class="p-key is-primary is-lg is-block" data-act="pulp" data-el="pulpkey" title="Pulp (Ctrl+Enter or Cmd+Enter)" aria-keyshortcuts="Meta+Enter Control+Enter">' + icon('press') +
         '<span data-el="pulptext">Pulp</span><span class="p-kbdhint" aria-hidden="true">' + PULP_HINT + '</span></button>' +
