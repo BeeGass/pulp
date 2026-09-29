@@ -24,12 +24,14 @@ Requires [Rust](https://rustup.rs/) 1.85 or newer.
 pulp ui
 ```
 
-Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is busy). Browse picks a folder in the OS file manager. Tick files, choose **Preserve source** or **Readable text**, pick XML / Markdown / plain text, then Pulp.
+Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is busy). Browse picks a folder in the OS file manager, or paste a path. Tick files, choose **Readable** or **Source** content and XML / Markdown / plain text, then Pulp. **Try a sample** loads a small built-in project.
 
-- Checkbox includes a file; the filename inspects a capped preview; the twist expands a folder.
-- Changing format or the directory map re-renders the last extraction. Copy and Download stay off while the dump is out of date.
-- One pack job at a time. Cancel asks it to stop between files.
-- Lockfiles, images, and virtualenv trees (`.venv/`, `venv/`) start unchecked.
+- A checkbox includes a file or a whole folder; the file name previews what pulp extracts; language chips tick every file of a kind; `/` filters.
+- Changing format or the directory map redraws the last extraction. Other changes mark the dump out of date, and Copy and Download stay off until you pulp again.
+- Files that could not be extracted are flagged in the tree. Select one to see why, untick it, or open a GitHub issue with the error text.
+- One pack job at a time. Cancel (or Esc) asks it to stop between files. File previews run beside a pack and read only the chosen file from the last scan.
+- Lockfiles, images, and virtualenv trees (`.venv/`, `venv/`) start unticked.
+- The mill follows your OS light or dark setting and works on a phone.
 - Nothing is uploaded. POSTs carry a per-process session token.
 
 ```

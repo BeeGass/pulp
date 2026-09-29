@@ -25,6 +25,9 @@ use crate::pick;
 use crate::store::{self, JobGuard, Mill, PackJob, StoredResult};
 
 const INDEX: &str = include_str!("../web/index.html");
+const PULP_CSS: &str = include_str!("../web/pulp.css");
+const MILL_CSS: &str = include_str!("../web/mill.css");
+const MILL_JS: &str = include_str!("../web/mill.js");
 
 #[derive(Clone)]
 struct AppState {
@@ -52,6 +55,9 @@ pub fn router() -> Router {
 fn router_with(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/pulp.css", get(pulp_css))
+        .route("/mill.css", get(mill_css))
+        .route("/mill.js", get(mill_js))
         .route("/fonts/{name}", get(font_file))
         .route("/api/health", get(health))
         .route("/api/scan", post(scan))
@@ -297,6 +303,30 @@ async fn font_file(axum::extract::Path(name): axum::extract::Path<String>) -> Re
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         bytes,
+    )
+        .into_response()
+}
+
+async fn pulp_css() -> Response {
+    asset(PULP_CSS, "text/css; charset=utf-8")
+}
+
+async fn mill_css() -> Response {
+    asset(MILL_CSS, "text/css; charset=utf-8")
+}
+
+async fn mill_js() -> Response {
+    asset(MILL_JS, "text/javascript; charset=utf-8")
+}
+
+/// Embedded UI assets change with the binary, so browsers revalidate each load.
+fn asset(body: &'static str, content_type: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
     )
         .into_response()
 }
@@ -1239,6 +1269,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_assets_return_css_and_module_script() {
+        for (uri, content_type, marker) in [
+            ("/pulp.css", "text/css; charset=utf-8", "--acc:"),
+            ("/mill.css", "text/css; charset=utf-8", ".mill-grid"),
+            (
+                "/mill.js",
+                "text/javascript; charset=utf-8",
+                "export function mountMill",
+            ),
+        ] {
+            let response = get(uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                content_type,
+                "{uri}"
+            );
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                "no-cache",
+                "{uri}"
+            );
+            let text = body_text(response).await;
+            assert!(text.contains(marker), "{uri} lacks {marker}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mill_js_keeps_the_github_report_flow() {
+        let js = body_text(get("/mill.js").await).await;
+        assert!(js.contains("https://github.com/BeeGass/pulp/issues/new"));
+        assert!(js.contains("Open GitHub issue"));
+        assert!(js.contains("Files stayed on this machine."));
+    }
+
+    #[tokio::test]
     async fn test_font_with_fraunces_returns_woff2() {
         let response = router()
             .oneshot(
@@ -1273,20 +1339,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_index_returns_html_mill() {
-        let response = router()
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+    async fn test_index_returns_mill_shell_with_token_and_version() {
+        let response = get("/").await;
         assert_eq!(response.status(), StatusCode::OK);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let html = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(html.contains("pulp mill"));
-        assert!(html.contains("localhost"));
-        assert!(html.contains("Fraunces"));
-        assert!(html.contains("/fonts/fraunces.woff2"));
+        let html = body_text(response).await;
+        assert!(html.contains("<title>pulp mill</title>"));
+        assert!(html.contains("href=\"/pulp.css\""));
+        assert!(html.contains("href=\"/mill.css\""));
+        assert!(html.contains("from '/mill.js'"));
         assert!(html.contains(TEST_TOKEN));
         assert!(!html.contains("__PULP_TOKEN__"));
+        assert!(html.contains(env!("CARGO_PKG_VERSION")));
+        assert!(!html.contains("__PULP_VERSION__"));
+        assert!(html.contains("127.0.0.1 only"));
     }
 
     #[tokio::test]
@@ -1926,41 +1991,6 @@ mod tests {
         assert!(json["path"].is_null());
     }
 
-    #[tokio::test]
-    async fn test_index_contains_browse_button() {
-        let response = router()
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let html = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(html.contains("id=\"browse\""));
-        assert!(html.contains("file manager"));
-        assert!(html.contains("Copy tree"));
-        assert!(html.contains("id=\"types\""));
-        assert!(html.contains("id=\"stale\""));
-        assert!(html.contains("x-pulp-token"));
-        assert!(html.contains("id=\"settings\""));
-        assert!(html.contains("class=\"info\""));
-        assert!(html.contains("data-tip"));
-        assert!(html.contains("data-fmt=\"xml\" class=\"on\""));
-        assert!(html.contains("<option value=\"xml\" selected>"));
-        assert!(html.contains("id=\"github\""));
-        assert!(html.contains("https://github.com/BeeGass/pulp"));
-        assert!(html.contains("https://github.com/BeeGass/pulp/issues/new"));
-        assert!(html.contains(env!("CARGO_PKG_VERSION")));
-        assert!(html.contains("Open GitHub issue"));
-        assert!(!html.contains("__PULP_VERSION__"));
-        assert!(html.contains("Preserve source"));
-        assert!(html.contains("Readable text"));
-        assert!(html.contains("Select matches"));
-        assert!(html.contains("data-out=\"issues\""));
-        assert!(html.contains("/api/preview"));
-        assert!(html.contains("/api/render"));
-        assert!(html.contains("/api/cancel"));
-        assert!(html.contains("/api/artifact/"));
-    }
-
     #[cfg(unix)]
     fn stub_pick_in_home() -> Result<Option<PathBuf>, String> {
         Ok(home_dir().map(|home| home.join("Projects").join("pulp")))
@@ -2185,6 +2215,27 @@ mod tests {
         assert!(json["dump"].as_str().unwrap().contains(&note), "{json}");
         assert_eq!(json["files_extracted"], 1);
         assert_eq!(json["files_skipped"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_index_wires_every_mill_endpoint() {
+        let html = body_text(get("/").await).await;
+        assert!(html.contains("x-pulp-token"));
+        for endpoint in [
+            "/api/browse",
+            "/api/sample",
+            "/api/scan",
+            "/api/pack",
+            "/api/render",
+            "/api/preview",
+            "/api/tree",
+            "/api/cancel",
+            "/api/progress",
+            "/api/artifact/",
+        ] {
+            assert!(html.contains(endpoint), "shell does not call {endpoint}");
+        }
+        assert!(html.contains("progress: true"), "shell hides pack progress");
     }
 
     #[tokio::test]
