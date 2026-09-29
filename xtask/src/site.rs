@@ -24,6 +24,7 @@ pub const COPIES: &[(&str, &str)] = &[
         "site/fonts/plex-mono-500.woff2",
     ),
     ("web/fonts/LICENSE.md", "site/fonts/LICENSE.md"),
+    ("web/fonts/OFL.txt", "site/fonts/OFL.txt"),
 ];
 
 /// Copy every stale pair and return the destinations that changed.

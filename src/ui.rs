@@ -289,7 +289,6 @@ async fn index(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn font_file(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     let bytes: &'static [u8] = match name.as_str() {
-        "fraunces.woff2" => include_bytes!("../web/fonts/fraunces.woff2"),
         "plex-sans.woff2" => include_bytes!("../web/fonts/plex-sans.woff2"),
         "plex-mono-400.woff2" => include_bytes!("../web/fonts/plex-mono-400.woff2"),
         "plex-mono-500.woff2" => include_bytes!("../web/fonts/plex-mono-500.woff2"),
@@ -1269,6 +1268,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_font_with_plex_sans_returns_woff2() {
+        let response = get("/fonts/plex-sans.woff2").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "font/woff2"
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.len() > 1000);
+    }
+
+    #[tokio::test]
+    async fn test_font_with_fraunces_returns_not_found() {
+        let response = get("/fonts/fraunces.woff2").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn test_assets_return_css_and_module_script() {
         for (uri, content_type, marker) in [
             ("/pulp.css", "text/css; charset=utf-8", "--acc:"),
@@ -1302,26 +1319,6 @@ mod tests {
         assert!(js.contains("https://github.com/BeeGass/pulp/issues/new"));
         assert!(js.contains("Open GitHub issue"));
         assert!(js.contains("Files stayed on this machine."));
-    }
-
-    #[tokio::test]
-    async fn test_font_with_fraunces_returns_woff2() {
-        let response = router()
-            .oneshot(
-                Request::builder()
-                    .uri("/fonts/fraunces.woff2")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "font/woff2"
-        );
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(bytes.len() > 1000);
     }
 
     #[tokio::test]
