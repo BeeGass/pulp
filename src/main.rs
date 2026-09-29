@@ -1,5 +1,6 @@
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -145,10 +146,32 @@ enum TreeCli {
     None,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
     // Heavy parsers run in a child `pulp` whatever this executable is named.
     pulp::extract::isolate::set_isolation(true);
-    let cli = Cli::parse();
+    match run(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        // A reader such as `head` closed the pipe; the rest of the dump has
+        // nowhere to go, which is not an error.
+        Err(err) if is_broken_pipe(&err) => ExitCode::SUCCESS,
+        Err(err) => {
+            // Like every stderr write, this one may meet a closed stderr,
+            // which must not turn into a panic.
+            let _ = writeln!(io::stderr(), "Error: {err:?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn is_broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|io| io.kind() == io::ErrorKind::BrokenPipe)
+    })
+}
+
+fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Ui { port, no_open }) => {
             let rt = tokio::runtime::Runtime::new()?;
@@ -242,8 +265,9 @@ fn main() -> anyhow::Result<()> {
     let packed =
         pulp::pack_manifest(&manifest, &opts, None, None, Some(start)).context("pulp failed")?;
     if opts.list_only {
+        let mut out = io::stdout().lock();
         for file in &packed.files {
-            println!("{}", display_path(&file.relative));
+            writeln!(out, "{}", display_path(&file.relative))?;
         }
     } else if let Some(path) = &cli.output {
         let file =
@@ -258,11 +282,13 @@ fn main() -> anyhow::Result<()> {
         w.flush()?;
     }
     // Walk warnings print even with --quiet, which hides only the summary.
+    // A closed stderr is no reason to fail a dump that was written.
+    let mut err = io::stderr().lock();
     for line in warning_lines(&warnings) {
-        eprintln!("{line}");
+        let _ = writeln!(err, "{line}");
     }
     if !opts.quiet {
-        print_summary(&packed, opts.tokens);
+        let _ = writeln!(err, "{}", summary_line(&packed));
     }
     Ok(())
 }
@@ -293,11 +319,6 @@ fn warning_lines(warnings: &pulp::walk::WalkWarnings) -> Vec<String> {
         lines.push(format!("warning: {rest} more paths could not be walked"));
     }
     lines
-}
-
-fn print_summary(packed: &pulp::Packed, show_tokens: bool) {
-    let _ = show_tokens;
-    eprintln!("{}", summary_line(packed));
 }
 
 /// The stderr summary. Unreadable files are counted apart from the skipped
@@ -420,6 +441,14 @@ mod tests {
         assert_eq!(lines[0], "warning: /p00: Permission denied");
         assert_eq!(lines[10], "warning: 5 more paths could not be walked");
         assert!(warning_lines(&pulp::walk::WalkWarnings::default()).is_empty());
+    }
+
+    #[test]
+    fn test_is_broken_pipe_with_wrapped_io_error_returns_true() {
+        let pipe = anyhow::Error::from(io::Error::from(io::ErrorKind::BrokenPipe)).context("write");
+        assert!(is_broken_pipe(&pipe));
+        let other = anyhow::Error::from(io::Error::from(io::ErrorKind::NotFound));
+        assert!(!is_broken_pipe(&other));
     }
 
     #[test]

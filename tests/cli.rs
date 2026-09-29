@@ -2,7 +2,11 @@
 //! must stay byte-identical across runs.
 
 use std::fs;
+#[cfg(unix)]
+use std::io::Read;
 use std::path::Path;
+#[cfg(unix)]
+use std::process::Stdio;
 use std::process::{Command, Output};
 
 fn pulp() -> Command {
@@ -22,6 +26,49 @@ fn write(path: &Path, body: &[u8]) {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(path, body).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_pulp_with_reader_closing_pipe_early_exits_quietly() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..400 {
+        write(
+            &dir.path().join(format!("src/f{i:03}.rs")),
+            "fn body() { let x = 1; }\n".repeat(40).as_bytes(),
+        );
+    }
+    let mut child = pulp()
+        .arg(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut first = [0u8; 64];
+    stdout.read_exact(&mut first).unwrap();
+    drop(stdout);
+    let out = child.wait_with_output().unwrap();
+    let err = stderr(&out);
+    assert!(out.status.success(), "{:?} {err}", out.status);
+    assert!(!err.contains("Broken pipe"), "{err}");
+    assert!(!err.contains("panicked"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_pulp_with_stderr_closed_early_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("a.rs"), b"fn a() {}\n");
+    let mut child = pulp()
+        .arg(dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(0), "{status:?}");
 }
 
 #[cfg(unix)]
@@ -69,6 +116,14 @@ fn test_pulp_with_unreadable_directory_warns_and_packs_the_rest() {
     assert!(err.contains("locked"), "{err}");
     let dump = String::from_utf8(out.stdout).unwrap();
     assert!(dump.contains("FILE: a.rs"), "{dump}");
+}
+
+#[test]
+fn test_pulp_with_missing_root_exits_one_with_message() {
+    let out = run(pulp().arg("/nonexistent/pulp-cli-missing-root"));
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("does not exist"), "{}", stderr(&out));
+    assert!(out.stdout.is_empty());
 }
 
 #[test]
