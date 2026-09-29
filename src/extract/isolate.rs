@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,9 @@ pub fn needs_isolation(kind: Kind) -> bool {
 /// Isolation the host program chose: 0 none yet, 1 on, 2 off.
 static ISOLATION: AtomicU8 = AtomicU8::new(0);
 
+/// Set in a child extractor, which must never spawn children of its own.
+static IN_CHILD: AtomicBool = AtomicBool::new(false);
+
 /// Choose whether this process runs heavy extractors in a child.
 ///
 /// The `pulp` binary turns isolation on at startup, so it holds whatever the
@@ -57,9 +60,12 @@ pub fn set_isolation(enabled: bool) {
 
 /// Isolation is on when `PULP_ISOLATE` is `1`/`true`, off when it is set to
 /// anything else. Otherwise it follows [`set_isolation`] and, when that was
-/// never called, [`running_as_pulp_bin`].
+/// never called, [`running_as_pulp_bin`]. A child extractor never isolates.
 #[must_use]
 pub fn should_isolate() -> bool {
+    if IN_CHILD.load(Ordering::Relaxed) {
+        return false;
+    }
     match std::env::var("PULP_ISOLATE") {
         Ok(value) => {
             let v = value.trim();
@@ -123,6 +129,20 @@ pub fn extract_heavy(
     {
         spawn_extract(bytes, kind, opts)
     }
+}
+
+/// Extract `bytes` as `kind` in a child process, whatever the kind.
+///
+/// For extractors that run in this process unless a page looks risky, such
+/// as HTML nested past what its parse model can vouch for.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn extract_in_child(bytes: &[u8], kind: Kind) -> Result<String, Error> {
+    let opts = ExtractOpts {
+        max_file_size: bytes.len() as u64,
+        notebook_outputs: false,
+        source_mode: false,
+    };
+    spawn_extract(bytes, kind, &opts)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -317,6 +337,9 @@ pub fn run_child_reader<R: Read>(
     kind: Kind,
     opts: &ExtractOpts,
 ) -> Result<(), i32> {
+    // An extractor that would isolate part of its work runs it here; a
+    // child that spawned children could recurse without end.
+    IN_CHILD.store(true, Ordering::Relaxed);
     let mut bytes = Vec::new();
     let n = match input
         .take(opts.max_file_size.saturating_add(1))

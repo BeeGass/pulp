@@ -78,3 +78,39 @@ fn test_pulp_cli_isolated_with_large_docx_round_trips_through_pipes() {
         assert!(dump.contains(&format!("paragraph {i:05} tide")), "{i}");
     }
 }
+
+/// A page the parse model finds shallow, but whose unclosed paragraphs put
+/// the plain count of open tags far past the depth limit.
+fn page_of_unclosed_paragraphs() -> String {
+    format!(
+        "<!doctype html><h1>Tide Tables</h1>{}",
+        "<p>low water".repeat(300)
+    )
+}
+
+#[test]
+fn test_pulp_cli_isolated_with_html_the_plain_count_doubts_renders_it_in_a_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("site");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("page.html"), page_of_unclosed_paragraphs()).unwrap();
+
+    // With no time to run, the child fails and the page is stripped: the
+    // heading loses the `#` html2text gives it.
+    let (_, stripped) = pack_isolated(&root, &dir.path().join("zero.txt"), Some("0"));
+    assert!(stripped.contains("\nTide Tables\n"), "{stripped}");
+    assert!(!stripped.contains("# Tide Tables"), "{stripped}");
+
+    // Given time, the child renders the page as this process would. A child
+    // that isolated the page again would recurse until the parent's timeout.
+    let (_, rendered) = pack_isolated(&root, &dir.path().join("dump.txt"), None);
+    let in_process = Command::new(env!("CARGO_BIN_EXE_pulp"))
+        .env("PULP_ISOLATE", "0")
+        .arg(&root)
+        .output()
+        .expect("spawn pulp");
+    assert!(in_process.status.success(), "{in_process:?}");
+    let in_process = String::from_utf8(in_process.stdout).unwrap();
+    assert!(rendered.contains("# Tide Tables"), "{rendered}");
+    assert_eq!(rendered, in_process);
+}

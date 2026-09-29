@@ -213,8 +213,9 @@ fn fallback_chapters(
 fn render_chapters(chapters: &[(String, String)]) -> Result<String, crate::error::Error> {
     let mut out = String::new();
     for (href, html) in chapters {
-        let text = html2text::from_read(html.as_bytes(), 100)
-            .map_err(|err| crate::error::Error::msg(err.to_string()))?;
+        // The HTML extractor guards against markup nested deep enough to
+        // stall html2text.
+        let text = super::html::extract(html.as_bytes())?;
         if !out.is_empty() {
             out.push_str("\n\n");
         }
@@ -277,6 +278,19 @@ mod tests {
         assert!(i1 < i2, "spine order, got {text}");
         assert!(text.contains("First chapter"), "{text}");
         assert!(text.contains("Second chapter"), "{text}");
+    }
+
+    #[test]
+    fn test_extract_with_deeply_nested_chapter_returns_text() {
+        let depth = 20_000;
+        let chapter = format!(
+            "<html><body>{}deep chapter{}</body></html>",
+            "<div>".repeat(depth),
+            "</div>".repeat(depth)
+        );
+        let bytes = zip_bytes(&[("c.xhtml", chapter.as_bytes())]);
+        let text = extract(&bytes).expect("epub extract");
+        assert_eq!(text, "# c.xhtml\n\ndeep chapter");
     }
 
     #[test]
