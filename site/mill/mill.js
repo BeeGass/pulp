@@ -342,7 +342,7 @@ export function mountMill(root, adapter, options) {
     const source = local
       ? '<button type="button" class="p-key" data-act="browse">' + icon('folder') + '<span class="mill-key-text">Browse</span></button>' +
         '<label class="p-field mill-path">' + icon('folder') +
-        '<input data-el="path" type="text" placeholder="~/path/to/folder" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" enterkeyhint="go" aria-label="Folder path">' +
+        '<input data-el="path" name="path" type="text" placeholder="~/path/to/folder" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" enterkeyhint="go" aria-label="Folder path">' +
         '<span class="p-meta" data-el="srcmeta"></span><kbd class="p-kbd mill-path-kbd" aria-hidden="true">↩</kbd></label>' +
         '<button type="button" class="p-key" data-act="scan">' + icon('search') + '<span class="mill-scan-label">Scan</span></button>'
       : '<button type="button" class="p-key" data-act="browse">' + icon('folder') + '<span class="mill-key-text">Choose folder</span></button>' +
@@ -350,8 +350,10 @@ export function mountMill(root, adapter, options) {
         '<div class="mill-grant">' + icon('files') + '<span data-el="srclabel"></span></div>';
     const optRows = OPTION_ROWS.map((o) => {
       const off = o.key === 'gitignore' && !caps.gitignore;
+      const id = uid + '-opt-' + o.key;
       return '<label class="mill-opt' + (off ? ' is-disabled' : '') + '"><input type="checkbox" class="p-check" data-opt="' + o.key + '"' +
-        (off ? ' disabled' : '') + '><span><b>' + esc(o.label) + '</b><small>' + esc(off ? o.off : o.help) + '</small></span></label>';
+        ' aria-labelledby="' + id + '" aria-describedby="' + id + '-help"' + (off ? ' disabled' : '') + '><span><b id="' + id + '">' + esc(o.label) +
+        '</b><small id="' + id + '-help">' + esc(off ? o.off : o.help) + '</small></span></label>';
     }).join('');
     const seg = (name, items) => '<div class="p-seg" role="radiogroup" aria-labelledby="' + uid + '-' + name + '">' + items.map((it) =>
       '<label><input type="radio" name="' + name + '-' + uid + '" data-setting="' + name + '" value="' + it[0] + '"><span>' + it[1] + '</span></label>').join('') + '</div>';
@@ -362,7 +364,7 @@ export function mountMill(root, adapter, options) {
       '<span class="mill-priv p-label">' + icon('lock') + '<span class="mill-priv-text">' + esc(adapter.privacy || 'nothing leaves this machine') + '</span></span>' +
       '<a class="p-key is-sq" href="' + REPO_URL + '" target="_blank" rel="noopener noreferrer" aria-label="pulp source on GitHub" title="pulp source on GitHub">' + icon('github') + '</a></' + box('header') + '>' +
       '<' + box('main') + ' class="mill-body">' +
-      '<' + box('section') + ' class="mill-source' + (local ? ' is-path' : '') + '" aria-label="Folder">' + source + '</' + box('section') + '>' +
+      '<' + box('section') + ' class="mill-source' + (local ? ' is-path' : '') + '"' + (demo ? '' : ' aria-label="Folder"') + '>' + source + '</' + box('section') + '>' +
       '<div class="mill-alert" data-el="alert" hidden></div>' +
       '<div class="mill-tabs" data-el="tabs" role="tablist" aria-label="Mill panes">' +
       '<button type="button" role="tab" id="' + uid + '-tab-files" aria-controls="' + uid + '-files" data-tab="files" aria-selected="true">Files <span class="mill-tabcount" data-el="tabcount"></span></button>' +
@@ -398,8 +400,10 @@ export function mountMill(root, adapter, options) {
       '<button type="button" class="p-key is-sm mill-opts-toggle" data-el="optstoggle" data-act="opts" aria-expanded="false">' + icon('sliders') + 'Options<span class="p-count" data-el="optscount"></span></button>' +
       '<div class="mill-opts" data-el="opts">' + optRows + '</div></div>' +
       '<div class="mill-run">' +
-      '<button type="button" class="p-key is-primary is-lg is-block" data-act="pulp" data-el="pulpkey" title="Pulp (Ctrl+Enter or Cmd+Enter)">' + icon('press') + '<span data-el="pulptext">Pulp</span><span class="p-kbdhint">' + PULP_HINT + '</span></button>' +
-      '<button type="button" class="p-key is-block" data-act="cancel" data-el="cancelkey" hidden>' + icon('x') + 'Cancel<span class="p-kbdhint">esc</span></button>' +
+      '<button type="button" class="p-key is-primary is-lg is-block" data-act="pulp" data-el="pulpkey" title="Pulp (Ctrl+Enter or Cmd+Enter)" aria-keyshortcuts="Meta+Enter Control+Enter">' + icon('press') +
+        '<span data-el="pulptext">Pulp</span><span class="p-kbdhint" aria-hidden="true">' + PULP_HINT + '</span></button>' +
+      '<button type="button" class="p-key is-block" data-act="cancel" data-el="cancelkey" aria-keyshortcuts="Escape" hidden>' + icon('x') +
+        'Cancel<span class="p-kbdhint" aria-hidden="true">esc</span></button>' +
       // Only the status is live; the progress beside it would announce several times a second.
       '<div class="mill-statusline"><span class="p-status" data-el="status" data-tone="idle" aria-live="polite">Not generated</span>' +
       '<span class="p-meta mill-statmeta" data-el="statmeta"></span></div>' +
@@ -421,7 +425,7 @@ export function mountMill(root, adapter, options) {
       '<div class="p-ledger" data-el="prevbody" tabindex="0" role="region" aria-label="File preview"></div></div>' +
       '<div class="mill-issues" ' + panelAttrs('issues') + ' data-el="issues" hidden></div></section>' +
       '</div>' +
-      '<' + box('section') + ' class="mill-dock" data-el="dock" aria-label="Actions"></' + box('section') + '>' +
+      '<' + box('section') + ' class="mill-dock" data-el="dock"' + (demo ? '' : ' aria-label="Actions"') + '></' + box('section') + '>' +
       '</' + box('main') + '>' +
       '<' + box('footer') + ' class="mill-foot"><span data-el="footsel"></span><span class="p-grow"></span><span>' + esc(adapter.footer || '') + '</span></' + box('footer') + '>' +
       '<div class="p-toasts" data-el="toasts" role="status" aria-live="polite"></div>' +
@@ -1421,10 +1425,11 @@ export function mountMill(root, adapter, options) {
   }
 
   function issueKeys(o, inNote) {
-    return '<button type="button" class="p-key is-sm" data-act="untick" data-id="' + esc(o.id) + '">Untick</button>' +
+    const where = esc(o.relative || o.id);
+    return '<button type="button" class="p-key is-sm" data-act="untick" data-id="' + esc(o.id) + '" aria-label="Untick ' + where + '">Untick</button>' +
       (o.status === 'skipped_archive' && !S.settings.archives ? '<button type="button" class="p-key is-sm" data-act="archives-on">Turn on archives</button>' : '') +
-      '<button type="button" class="p-key is-sm is-quiet" data-act="report-issue" data-id="' + esc(o.id) + '">' + icon('github') + 'Report</button>' +
-      (inNote ? '' : '<button type="button" class="p-key is-sm is-quiet" data-act="copy-issue" data-id="' + esc(o.id) + '">' + icon('copy') + 'Copy report</button>');
+      '<button type="button" class="p-key is-sm is-quiet" data-act="report-issue" data-id="' + esc(o.id) + '" aria-label="Report ' + where + ' on GitHub">' + icon('github') + 'Report</button>' +
+      (inNote ? '' : '<button type="button" class="p-key is-sm is-quiet" data-act="copy-issue" data-id="' + esc(o.id) + '" aria-label="Copy the report for ' + where + '">' + icon('copy') + 'Copy report</button>');
   }
 
   function renderPreview() {
@@ -2231,10 +2236,12 @@ export function mountMill(root, adapter, options) {
   });
 
   el.views.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     const tabs = [...el.views.querySelectorAll('[data-view]')];
     const i = tabs.findIndex((t) => t.dataset.view === S.view);
-    const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+    const step = { ArrowRight: i + 1, ArrowLeft: i + tabs.length - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (step === undefined) return;
+    e.preventDefault();
+    const next = tabs[step % tabs.length];
     selectView(next.dataset.view);
     next.focus();
   });
