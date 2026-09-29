@@ -1,7 +1,32 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pulp::{FileStatus, Kind, Options, OutputFormat, Selection, pack};
+use pulp::{FileStatus, Kind, MemoryFile, Options, OutputFormat, Selection, pack, pack_entries};
+
+const CORRUPT_PDF: &[u8] = b"%PDF-1.4 garbage";
+const CORRUPT_DOCX: &[u8] = b"PK\x03\x04 not really a zip";
+
+/// Asserts `file` is flagged unreadable and its dump text is the note that
+/// carries the parser's message.
+fn assert_unreadable(file: &pulp::PackedFile, kind: &str) {
+    let FileStatus::Unreadable(reason) = &file.status else {
+        panic!(
+            "{} should be unreadable, got {:?}",
+            file.relative, file.status
+        );
+    };
+    assert!(
+        !reason.trim().is_empty(),
+        "{} has no parser message",
+        file.relative
+    );
+    assert_eq!(file.text, format!("[{kind} unreadable: {reason}]"));
+    assert!(
+        file.status.message(file.size).ends_with(reason.as_str()),
+        "{}",
+        file.status.message(file.size)
+    );
+}
 
 fn testdata(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -318,6 +343,56 @@ fn test_pack_with_xml_format_returns_documents_markup() {
         dump.contains("<document_content>"),
         "xml dump must contain <document_content>:\n{dump}"
     );
+}
+
+#[test]
+fn test_pack_with_corrupt_pdf_and_docx_returns_unreadable_notes() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("paper.pdf"), CORRUPT_PDF).unwrap();
+    fs::write(tmp.path().join("memo.docx"), CORRUPT_DOCX).unwrap();
+    fs::copy(testdata("hello.rs"), tmp.path().join("hello.rs")).unwrap();
+
+    let opts = options_for(tmp.path());
+    let packed = pack(&opts).unwrap_or_else(|e| panic!("{e}"));
+    assert_unreadable(find_file(&packed, "paper.pdf"), "pdf");
+    assert_unreadable(find_file(&packed, "memo.docx"), "docx");
+    assert_eq!(packed.stats.files_extracted, 1);
+    assert_eq!(packed.stats.files_skipped, 2);
+
+    let dump = dump_with(&opts);
+    assert!(
+        dump.contains(
+            "FILE: paper.pdf\n================================================\n[pdf unreadable: "
+        ),
+        "{dump}"
+    );
+    assert!(dump.contains("[docx unreadable: "), "{dump}");
+}
+
+#[test]
+fn test_pack_entries_with_corrupt_pdf_and_docx_returns_unreadable_notes() {
+    let files = [
+        MemoryFile {
+            id: "grant/paper.pdf",
+            relative: "grant/paper.pdf",
+            bytes: CORRUPT_PDF,
+        },
+        MemoryFile {
+            id: "grant/memo.docx",
+            relative: "grant/memo.docx",
+            bytes: CORRUPT_DOCX,
+        },
+        MemoryFile {
+            id: "grant/a.rs",
+            relative: "grant/a.rs",
+            bytes: b"fn a() {}\n",
+        },
+    ];
+    let packed = pack_entries(&files, &Options::default(), None).unwrap_or_else(|e| panic!("{e}"));
+    assert_unreadable(find_file(&packed, "paper.pdf"), "pdf");
+    assert_unreadable(find_file(&packed, "memo.docx"), "docx");
+    assert_eq!(packed.stats.files_extracted, 1);
+    assert_eq!(packed.stats.files_skipped, 2);
 }
 
 #[test]

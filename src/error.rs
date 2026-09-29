@@ -10,6 +10,10 @@ pub enum Error {
     Message(String),
     #[error("{path}: {message}")]
     Path { path: PathBuf, message: String },
+    /// A parser rejected one file's bytes. Holds the parser's message; packing
+    /// keeps a note in the file's place and flags it.
+    #[error("{0}")]
+    Unreadable(String),
 }
 
 impl Error {

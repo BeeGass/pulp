@@ -17,6 +17,9 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CHILD_STDOUT: usize = 32 * 1024 * 1024;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_CHILD_STDERR: usize = 256 * 1024;
+/// Exit code of a child whose parser rejected the file. Its stderr holds the
+/// parser's message.
+const UNREADABLE_EXIT: i32 = 3;
 
 /// Kinds whose parsers can hang in native code.
 #[must_use]
@@ -136,16 +139,30 @@ fn spawn_extract(path: &Path, kind: Kind, opts: &ExtractOpts) -> Result<String, 
     let mut child = cmd.spawn().map_err(|err| Error::msg(err.to_string()))?;
     let (out, err, status) =
         wait_with_drain(&mut child, timeout, MAX_CHILD_STDOUT, MAX_CHILD_STDERR)?;
+    child_result(out, &err, status)
+}
+
+/// A finished child's text, or its failure. [`UNREADABLE_EXIT`] becomes
+/// [`Error::Unreadable`], as the same failure in this process would.
+#[cfg(not(target_arch = "wasm32"))]
+fn child_result(out: Vec<u8>, err: &[u8], status: ExitStatus) -> Result<String, Error> {
     if status.success() {
-        String::from_utf8(out).map_err(|e| Error::msg(e.to_string()))
-    } else {
-        let msg = String::from_utf8_lossy(&err);
-        Err(Error::msg(if msg.trim().is_empty() {
-            format!("extractor exited {status}")
-        } else {
-            msg.trim().to_string()
-        }))
+        return String::from_utf8(out).map_err(|e| Error::msg(e.to_string()));
     }
+    let msg = String::from_utf8_lossy(err);
+    let msg = msg.trim();
+    if status.code() == Some(UNREADABLE_EXIT) {
+        return Err(Error::Unreadable(if msg.is_empty() {
+            "the parser rejected the file".to_string()
+        } else {
+            msg.to_string()
+        }));
+    }
+    Err(Error::msg(if msg.is_empty() {
+        format!("extractor exited {status}")
+    } else {
+        msg.to_string()
+    }))
 }
 
 /// Drain stdout/stderr while waiting so a completed child cannot block on a full pipe.
@@ -267,6 +284,10 @@ pub fn run_child(path: &Path, kind: Kind, opts: &ExtractOpts) -> Result<(), i32>
             }
             Ok(())
         }
+        Err(Error::Unreadable(reason)) => {
+            let _ = writeln!(std::io::stderr(), "{reason}");
+            Err(UNREADABLE_EXIT)
+        }
         Err(err) => {
             let _ = writeln!(std::io::stderr(), "{err}");
             Err(2)
@@ -296,6 +317,39 @@ mod tests {
             !should_isolate(),
             "tests must not isolate unless PULP_ISOLATE=1"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finished(script: &str) -> (Vec<u8>, Vec<u8>, ExitStatus) {
+        let mut child = Command::new("sh")
+            .args(["-c", script])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        wait_with_drain(&mut child, Duration::from_secs(10), 1024, 1024).expect("drain")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_child_result_with_unreadable_exit_returns_unreadable_error() {
+        let (out, err, status) = finished("echo 'invalid file header' >&2; exit 3");
+        match child_result(out, &err, status) {
+            Err(Error::Unreadable(reason)) => assert_eq!(reason, "invalid file header"),
+            other => panic!("expected an unreadable error, got {other:?}"),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_child_result_with_other_failure_returns_message_error() {
+        let (out, err, status) = finished("echo 'thread panicked' >&2; exit 101");
+        match child_result(out, &err, status) {
+            Err(Error::Message(msg)) => assert_eq!(msg, "thread panicked"),
+            other => panic!("expected a message error, got {other:?}"),
+        }
+        let (out, err, status) = finished("printf 'text'");
+        assert_eq!(child_result(out, &err, status).unwrap(), "text");
     }
 
     #[test]

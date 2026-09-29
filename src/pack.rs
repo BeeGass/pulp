@@ -27,6 +27,9 @@ pub enum FileStatus {
     SkippedArchive,
     Changed,
     Error(String),
+    /// The parser rejected the file, so the dump holds a one-line note in its
+    /// place. Holds the parser's message.
+    Unreadable(String),
 }
 
 /// One file (or archive member) in a [`Packed`] dump.
@@ -50,6 +53,7 @@ impl FileStatus {
             Self::SkippedArchive => "skipped_archive",
             Self::Changed => "changed",
             Self::Error(_) => "error",
+            Self::Unreadable(_) => "unreadable",
         }
     }
 
@@ -68,6 +72,9 @@ impl FileStatus {
             ),
             Self::Changed => "File changed on disk after the scan. Rescan, then pulp again so the dump matches the current bytes.".into(),
             Self::Error(err) => format!("Extraction failed for a {size}-byte file. {err}"),
+            Self::Unreadable(reason) => format!(
+                "Could not parse this {size}-byte file, so the dump holds a one-line note in its place. It may be damaged, encrypted, or too large to unpack. {reason}"
+            ),
         }
     }
 }
@@ -75,7 +82,10 @@ impl FileStatus {
 /// Totals for a pack run.
 #[derive(Debug, Clone)]
 pub struct Stats {
+    /// Files whose text went into the dump ([`FileStatus::Extracted`]).
     pub files_extracted: usize,
+    /// Every other file, unreadable ones included. The dump holds a one-line
+    /// note for each.
     pub files_skipped: usize,
     pub bytes_read: u64,
     pub chars_emitted: usize,
@@ -525,6 +535,7 @@ fn pack_one(
             text,
             status: FileStatus::Extracted,
         },
+        Err(Error::Unreadable(reason)) => packed_unreadable(id, relative, kind, size, reason),
         Err(err) => packed_error(id, relative, kind, size, err.to_string()),
     }
 }
@@ -800,6 +811,23 @@ fn packed_error(
     }
 }
 
+fn packed_unreadable(
+    id: String,
+    relative: String,
+    kind: Kind,
+    size: u64,
+    reason: String,
+) -> PackedFile {
+    PackedFile {
+        text: format!("[{} unreadable: {reason}]", kind.as_str()),
+        id,
+        relative,
+        kind,
+        size,
+        status: FileStatus::Unreadable(reason),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,6 +863,16 @@ mod tests {
         assert!(err.contains("pdf header missing"));
         assert!(err.contains("80"));
         assert!(FileStatus::SkippedArchive.message(12).contains("archives"));
+    }
+
+    #[test]
+    fn test_file_status_with_unreadable_returns_own_label_and_parser_message() {
+        let status = FileStatus::Unreadable("invalid file header".into());
+        assert_eq!(status.as_str(), "unreadable");
+        let msg = status.message(17);
+        assert!(msg.contains("17-byte"), "{msg}");
+        assert!(msg.contains("one-line note"), "{msg}");
+        assert!(msg.ends_with("invalid file header"), "{msg}");
     }
 
     #[test]
@@ -939,8 +977,16 @@ mod tests {
             .iter()
             .find(|f| f.relative == "paper.pdf")
             .unwrap();
-        assert_eq!(pdf_file.status, FileStatus::Extracted);
-        assert!(pdf_file.text.contains("unreadable"), "{}", pdf_file.text);
+        assert!(
+            matches!(pdf_file.status, FileStatus::Unreadable(_)),
+            "{:?}",
+            pdf_file.status
+        );
+        assert!(
+            pdf_file.text.starts_with("[pdf unreadable: "),
+            "{}",
+            pdf_file.text
+        );
         let rels: Vec<&str> = packed.files.iter().map(|f| f.relative.as_str()).collect();
         assert!(!rels.iter().any(|r| r.contains(".next")), "{rels:?}");
         assert!(!rels.iter().any(|r| r.starts_with("out/")), "{rels:?}");

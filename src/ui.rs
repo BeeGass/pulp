@@ -1328,6 +1328,39 @@ mod tests {
         assert!(html.contains("/api/artifact/"));
     }
 
+    #[tokio::test]
+    async fn test_pack_with_corrupt_pdf_returns_unreadable_outcome_and_note() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("paper.pdf"), b"%PDF-1.4 garbage").unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        let (status, json) = post_json(
+            "/api/pack",
+            serde_json::json!({
+                "path": dir.path().display().to_string(),
+                "format": "txt",
+                "selected": ["paper.pdf", "a.rs"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let pdf = json["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["relative"] == "paper.pdf")
+            .unwrap_or_else(|| panic!("no paper.pdf outcome in {json}"));
+        assert_eq!(pdf["status"], "unreadable", "{pdf}");
+        let message = pdf["message"].as_str().unwrap();
+        let (_, reason) = message
+            .rsplit_once("too large to unpack. ")
+            .unwrap_or_else(|| panic!("no parser message in {message}"));
+        assert!(!reason.is_empty(), "{message}");
+        let note = format!("[pdf unreadable: {reason}]");
+        assert!(json["dump"].as_str().unwrap().contains(&note), "{json}");
+        assert_eq!(json["files_extracted"], 1);
+        assert_eq!(json["files_skipped"], 1);
+    }
+
     #[test]
     fn test_origin_matches_with_exact_origin_returns_true() {
         assert!(origin_matches(

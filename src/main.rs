@@ -234,7 +234,7 @@ fn main() -> anyhow::Result<()> {
         w.flush()?;
     }
     if !opts.quiet {
-        print_summary(&packed.stats, opts.tokens);
+        print_summary(&packed, opts.tokens);
     }
     Ok(())
 }
@@ -250,26 +250,42 @@ fn resolve_format(cli: &Cli) -> anyhow::Result<OutputFormat> {
     }
 }
 
-fn print_summary(stats: &pulp::Stats, show_tokens: bool) {
+fn print_summary(packed: &pulp::Packed, show_tokens: bool) {
     let _ = show_tokens;
+    eprintln!("{}", summary_line(packed));
+}
+
+/// The stderr summary. Unreadable files are counted apart from the skipped
+/// ones: pulp tried them, and the dump holds a note for each.
+fn summary_line(packed: &pulp::Packed) -> String {
+    let stats = &packed.stats;
+    let unreadable = packed
+        .files
+        .iter()
+        .filter(|file| matches!(file.status, pulp::FileStatus::Unreadable(_)))
+        .count();
+    let skipped = stats.files_skipped.saturating_sub(unreadable);
     let ms = duration_ms(stats.elapsed);
-    eprint!(
+    let mut line = format!(
         "pulped {} files ({} read, {} chars, ~{} tokens) in {ms}ms",
         stats.files_extracted,
         human_bytes(stats.bytes_read),
         stats.chars_emitted,
         stats.tokens_est
     );
-    if stats.files_skipped > 0 {
-        eprint!(", {} skipped", stats.files_skipped);
+    if unreadable > 0 {
+        line.push_str(&format!(", {unreadable} unreadable"));
+    }
+    if skipped > 0 {
+        line.push_str(&format!(", {skipped} skipped"));
     }
     if stats.truncated {
-        eprint!(", truncated");
+        line.push_str(", truncated");
     }
     if stats.cancelled {
-        eprint!(", cancelled");
+        line.push_str(", cancelled");
     }
-    eprintln!();
+    line
 }
 
 fn duration_ms(d: Duration) -> u128 {
@@ -311,6 +327,39 @@ mod tests {
     fn test_resolve_format_with_xml_flag_returns_xml() {
         let cli = Cli::parse_from(["pulp", "-f", "xml"]);
         assert_eq!(resolve_format(&cli).unwrap(), OutputFormat::Xml);
+    }
+
+    #[test]
+    fn test_summary_line_with_unreadable_file_returns_it_apart_from_skipped() {
+        let file = |name: &str, status: pulp::FileStatus| pulp::PackedFile {
+            id: name.into(),
+            relative: name.into(),
+            kind: pulp::Kind::Text,
+            size: 4,
+            text: String::new(),
+            status,
+        };
+        let mut packed = pulp::Packed {
+            files: vec![
+                file("a.rs", pulp::FileStatus::Extracted),
+                file("paper.pdf", pulp::FileStatus::Unreadable("bad".into())),
+                file("logo.png", pulp::FileStatus::SkippedBinary),
+            ],
+            tree: String::new(),
+            stats: pulp::Stats {
+                files_extracted: 1,
+                files_skipped: 2,
+                ..pulp::Stats::default()
+            },
+        };
+        let line = summary_line(&packed);
+        assert!(line.starts_with("pulped 1 files ("), "{line}");
+        assert!(line.ends_with(" in 0ms, 1 unreadable, 1 skipped"), "{line}");
+
+        packed.files.remove(1);
+        packed.stats.files_skipped = 1;
+        let line = summary_line(&packed);
+        assert!(line.ends_with(" in 0ms, 1 skipped"), "{line}");
     }
 
     #[test]

@@ -91,6 +91,8 @@ Unless `--quiet`, stderr looks like:
 pulped 12 files (48.2 KiB read, 12100 chars, ~12100 tokens) in 35ms
 ```
 
+When some files do not make it in, the line ends with counts such as `, 1 unreadable, 2 skipped`. An unreadable file (a damaged or encrypted PDF, say) keeps a one-line note in the dump in place of its text; it is not counted as pulped and is left out of the directory map.
+
 ---
 
 ## What gets pulped

@@ -37,17 +37,16 @@ impl ExtractOpts {
 /// Convert one file's bytes into LLM-readable text.
 ///
 /// Archives are not expanded here; call [`expand_archive`] first.
-/// A parser failure becomes a short note so one odd file does not fail the pack.
+/// A parser failure comes back as [`Error::Unreadable`] with the parser's
+/// message. Packing keeps a short note in the file's place, so one odd file
+/// does not fail the pack, and flags the file.
 pub fn extract(
     relative: &str,
     bytes: &[u8],
     kind: Kind,
     opts: &ExtractOpts,
 ) -> Result<String, Error> {
-    match extract_kind(relative, bytes, kind, opts) {
-        Ok(text) => Ok(text),
-        Err(err) => Ok(format!("[{} unreadable: {err}]", kind.as_str())),
-    }
+    extract_kind(relative, bytes, kind, opts).map_err(|err| Error::Unreadable(err.to_string()))
 }
 
 fn extract_kind(
@@ -130,13 +129,16 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_with_garbage_pdf_returns_note() {
+    fn test_extract_with_garbage_pdf_returns_unreadable_error() {
         let opts = ExtractOpts {
             max_file_size: 8 * 1024 * 1024,
             notebook_outputs: false,
             source_mode: false,
         };
-        let got = extract("paper.pdf", b"not a pdf", Kind::Pdf, &opts).unwrap();
-        assert!(got.contains("unreadable"), "{got}");
+        let err = extract("paper.pdf", b"%PDF-1.4 garbage", Kind::Pdf, &opts).unwrap_err();
+        match err {
+            Error::Unreadable(reason) => assert!(!reason.trim().is_empty()),
+            other => panic!("expected an unreadable error, got {other:?}"),
+        }
     }
 }
