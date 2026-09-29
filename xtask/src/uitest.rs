@@ -40,6 +40,8 @@ const TEST_DIR: &str = "web/test";
 const PAGE_BUDGET: Duration = Duration::from_secs(120);
 /// Time on top of the budget for Chrome to start and print the page.
 const CHROME_GRACE: Duration = Duration::from_secs(30);
+/// Time Chrome gets to close its helper processes after SIGTERM.
+const CHROME_STOP_GRACE: Duration = Duration::from_secs(3);
 const HOLD_PATH: &str = "/__ui-test/hold";
 const DONE_PATH: &str = "/__ui-test/done";
 const MAC_CHROME: &str = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -488,11 +490,20 @@ fn chrome_args(url: &str, profile: &Path) -> Vec<OsString> {
 
 /// Load `url` in headless Chrome and return the DOM it prints.
 fn dump_dom(chrome: &Path, url: &str, profile: &Path, timeout: Duration) -> anyhow::Result<String> {
-    let mut child = Command::new(chrome)
+    let mut command = Command::new(chrome);
+    command
         .args(chrome_args(url, profile))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // A process group of its own, so stopping Chrome reaches every helper
+        // it started. The harness stops it on Ctrl-C itself.
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("start {}", chrome.display()))?;
     let stdout = child.stdout.take().context("capture Chrome's stdout")?;
@@ -506,7 +517,7 @@ fn dump_dom(chrome: &Path, url: &str, profile: &Path, timeout: Duration) -> anyh
     let deadline = Instant::now() + timeout;
     let dom = loop {
         if INTERRUPTED.load(Ordering::SeqCst) {
-            stop(&mut child);
+            stop_group(&mut child, CHROME_STOP_GRACE);
             bail!("interrupted");
         }
         match dom_rx.recv_timeout(Duration::from_millis(100)) {
@@ -514,7 +525,7 @@ fn dump_dom(chrome: &Path, url: &str, profile: &Path, timeout: Duration) -> anyh
             other => break other,
         }
     };
-    stop(&mut child);
+    stop_group(&mut child, CHROME_STOP_GRACE);
     match dom {
         Ok(dom) if !dom.trim().is_empty() => Ok(dom),
         Ok(_) => {
@@ -527,26 +538,43 @@ fn dump_dom(chrome: &Path, url: &str, profile: &Path, timeout: Duration) -> anyh
     }
 }
 
-/// Stop Chrome. SIGTERM makes it close its helper processes too; a kill leaves
-/// them running for several seconds, so it is only the fallback.
-fn stop(child: &mut Child) {
+/// Stop a child that leads its own process group, and every process in it.
+/// SIGTERM lets Chrome close its helpers; once it has exited, or `grace` has
+/// run out, SIGKILL goes to the whole group, since a helper busy with a page
+/// can outlive the browser by many seconds. The group is killed before the
+/// child is reaped, while its pid, and so the group id, cannot be reused.
+fn stop_group(child: &mut Child, grace: Duration) {
     #[cfg(unix)]
-    {
-        let asked = Command::new("kill")
-            .args(["-TERM", &child.id().to_string()])
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while asked && Instant::now() < deadline {
-            if let Ok(Some(_)) = child.try_wait() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(50));
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: kill(2) takes two integers and touches no memory of ours.
+        let asked = unsafe { libc::kill(pid, libc::SIGTERM) } == 0;
+        let deadline = Instant::now() + grace;
+        while asked && !has_exited(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
         }
+        // SAFETY: as above; a negative pid names the process group.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
     }
+    #[cfg(not(unix))]
+    let _ = grace;
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Whether the child `pid` has exited. An exited child is left unreaped, so
+/// its pid and the process group it leads stay reserved.
+#[cfg(unix)]
+fn has_exited(pid: libc::pid_t) -> bool {
+    let Ok(id) = libc::id_t::try_from(pid) else {
+        return true;
+    };
+    // SAFETY: siginfo_t is plain data, for which all zeroes is a valid value.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    // SAFETY: waitid writes only to `info`, which outlives the call.
+    let found = unsafe { libc::waitid(libc::P_PID, id, &mut info, flags) };
+    // A child still running leaves `info` zeroed; an error means no such child.
+    found != 0 || info.si_signo != 0
 }
 
 /// Read Chrome's output until the document ends; Chrome may not exit after it.
@@ -993,6 +1021,48 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stop_group_with_stubborn_helper_kills_the_whole_group() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        let dir = private_scratch_dir().unwrap();
+        // A browser that ignores SIGTERM, with a helper that does too.
+        let browser = dir.join("browser");
+        let helper_pid = dir.join("helper.pid");
+        let script = format!(
+            "#!/bin/sh\ntrap '' TERM\nsleep 30 &\necho $! > '{}'\nexec sleep 30\n",
+            helper_pid.display()
+        );
+        std::fs::write(&browser, script).unwrap();
+        std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = Command::new(&browser).process_group(0).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let helper = loop {
+            let pid = std::fs::read_to_string(&helper_pid).unwrap_or_default();
+            if let Ok(pid) = pid.trim().parse::<libc::pid_t>() {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "the helper never started");
+            thread::sleep(Duration::from_millis(20));
+        };
+
+        let started = Instant::now();
+        stop_group(&mut child, Duration::from_millis(300));
+        let stopped = started.elapsed();
+        // The orphaned helper is reaped by init soon after it dies.
+        let gone = (0..100).any(|_| {
+            thread::sleep(Duration::from_millis(20));
+            // SAFETY: kill(2) with signal 0 only checks that the process exists.
+            let alive = unsafe { libc::kill(helper, 0) } == 0;
+            !alive
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(gone, "the helper outlived the stop");
+        assert!(stopped < Duration::from_secs(5), "{stopped:?}");
     }
 
     #[test]
