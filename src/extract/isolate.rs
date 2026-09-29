@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,12 @@ const MAX_CHILD_STDERR: usize = 256 * 1024;
 /// Exit code of a child whose parser rejected the file. Its stderr holds the
 /// parser's message.
 const UNREADABLE_EXIT: i32 = 3;
+/// Exit code of a child that ran past its own deadline.
+#[cfg(not(target_arch = "wasm32"))]
+const WATCHDOG_EXIT: i32 = 4;
+/// Time a child allows beyond the parent's timeout before exiting itself.
+#[cfg(not(target_arch = "wasm32"))]
+const WATCHDOG_GRACE: Duration = Duration::from_secs(2);
 
 /// Kinds whose parsers can hang in native code.
 #[must_use]
@@ -37,8 +44,20 @@ pub fn needs_isolation(kind: Kind) -> bool {
     )
 }
 
-/// Isolation is on when `PULP_ISOLATE` is `1`/`true`, off when `0`/`false`.
-/// Otherwise it follows [`running_as_pulp_bin`].
+/// Isolation the host program chose: 0 none yet, 1 on, 2 off.
+static ISOLATION: AtomicU8 = AtomicU8::new(0);
+
+/// Choose whether this process runs heavy extractors in a child.
+///
+/// The `pulp` binary turns isolation on at startup, so it holds whatever the
+/// executable is named. `PULP_ISOLATE` still overrides this choice.
+pub fn set_isolation(enabled: bool) {
+    ISOLATION.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
+}
+
+/// Isolation is on when `PULP_ISOLATE` is `1`/`true`, off when it is set to
+/// anything else. Otherwise it follows [`set_isolation`] and, when that was
+/// never called, [`running_as_pulp_bin`].
 #[must_use]
 pub fn should_isolate() -> bool {
     match std::env::var("PULP_ISOLATE") {
@@ -46,7 +65,11 @@ pub fn should_isolate() -> bool {
             let v = value.trim();
             v == "1" || v.eq_ignore_ascii_case("true")
         }
-        Err(_) => running_as_pulp_bin(),
+        Err(_) => match ISOLATION.load(Ordering::Relaxed) {
+            1 => true,
+            2 => false,
+            _ => running_as_pulp_bin(),
+        },
     }
 }
 
@@ -72,8 +95,9 @@ pub fn running_as_pulp_bin() -> bool {
 
 /// Extract a heavy format, spawning a child when isolation is enabled.
 ///
-/// Always hands the child the parent-validated bytes via a temp file so the
-/// child cannot reread a different filesystem path.
+/// The child gets the parent-validated bytes on its stdin, so it cannot
+/// reread a different filesystem path, and no copy of the document is left
+/// in a shared temp directory.
 pub fn extract_heavy(
     path: Option<&Path>,
     bytes: &[u8],
@@ -97,37 +121,22 @@ pub fn extract_heavy(
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let tmp = temp_extract_path();
-        std::fs::write(&tmp, bytes)?;
-        let result = spawn_extract(&tmp, kind, opts);
-        let _ = std::fs::remove_file(&tmp);
-        result
+        spawn_extract(bytes, kind, opts)
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn temp_extract_path() -> std::path::PathBuf {
-    let mut buf = [0u8; 8];
-    let _ = getrandom::fill(&mut buf);
-    let name = buf.iter().fold(String::from("pulp-x-"), |mut s, b| {
-        s.push_str(&format!("{b:02x}"));
-        s
-    });
-    std::env::temp_dir().join(name)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn spawn_extract(path: &Path, kind: Kind, opts: &ExtractOpts) -> Result<String, Error> {
+fn spawn_extract(bytes: &[u8], kind: Kind, opts: &ExtractOpts) -> Result<String, Error> {
     let exe = std::env::current_exe().map_err(|err| Error::msg(err.to_string()))?;
     let timeout = extract_timeout();
     let mut cmd = Command::new(exe);
     cmd.arg("__extract")
-        .arg("--path")
-        .arg(path)
+        .arg("--stdin")
         .arg("--kind")
         .arg(kind.as_str())
         .arg("--max-file-size")
         .arg(opts.max_file_size.to_string())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if opts.source_mode {
@@ -137,8 +146,25 @@ fn spawn_extract(path: &Path, kind: Kind, opts: &ExtractOpts) -> Result<String, 
         cmd.arg("--notebook-outputs");
     }
     let mut child = cmd.spawn().map_err(|err| Error::msg(err.to_string()))?;
-    let (out, err, status) =
-        wait_with_drain(&mut child, timeout, MAX_CHILD_STDOUT, MAX_CHILD_STDERR)?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| Error::msg("extractor stdin not piped"))?;
+    let drained = std::thread::scope(|scope| {
+        // Feed the bytes beside the drain. A child that stops reading gets
+        // killed by the timeout, which ends this write with a broken pipe.
+        scope.spawn(move || {
+            let mut stdin = stdin;
+            let _ = stdin.write_all(bytes);
+        });
+        let drained = wait_with_drain(&mut child, timeout, MAX_CHILD_STDOUT, MAX_CHILD_STDERR);
+        if drained.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        drained
+    });
+    let (out, err, status) = drained?;
     child_result(out, &err, status)
 }
 
@@ -239,6 +265,26 @@ fn read_capped<R: Read>(mut reader: R, max: usize) -> Result<Vec<u8>, Error> {
     Ok(buf)
 }
 
+/// Make this child process exit once the extraction timeout, plus a short
+/// grace, has passed.
+///
+/// The parent kills a child that runs over, but a parent that is itself
+/// killed cannot, and a parser stuck in a loop never notices. This keeps
+/// such a child from outliving the run that started it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_child_watchdog() {
+    let deadline = extract_timeout().saturating_add(WATCHDOG_GRACE);
+    std::thread::spawn(move || {
+        std::thread::sleep(deadline);
+        let _ = writeln!(
+            std::io::stderr(),
+            "extractor ran past its {}ms deadline",
+            deadline.as_millis()
+        );
+        std::process::exit(WATCHDOG_EXIT);
+    });
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn extract_timeout() -> Duration {
     std::env::var("PULP_EXTRACT_TIMEOUT_MS")
@@ -248,7 +294,7 @@ fn extract_timeout() -> Duration {
         .unwrap_or(DEFAULT_TIMEOUT)
 }
 
-/// Child-process entry used by [`spawn_extract`].
+/// Child-process entry for a file named on the command line.
 pub fn run_child(path: &Path, kind: Kind, opts: &ExtractOpts) -> Result<(), i32> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -257,8 +303,22 @@ pub fn run_child(path: &Path, kind: Kind, opts: &ExtractOpts) -> Result<(), i32>
             return Err(2);
         }
     };
+    run_child_reader(file, &path.to_string_lossy(), kind, opts)
+}
+
+/// Child-process entry used by [`spawn_extract`]: extract the bytes read
+/// from `input` and print the text on stdout.
+///
+/// Exits with [`UNREADABLE_EXIT`] when the parser rejects the bytes, and 2
+/// for any other failure; stderr holds the message.
+pub fn run_child_reader<R: Read>(
+    input: R,
+    name: &str,
+    kind: Kind,
+    opts: &ExtractOpts,
+) -> Result<(), i32> {
     let mut bytes = Vec::new();
-    let n = match file
+    let n = match input
         .take(opts.max_file_size.saturating_add(1))
         .read_to_end(&mut bytes)
     {
@@ -276,7 +336,7 @@ pub fn run_child(path: &Path, kind: Kind, opts: &ExtractOpts) -> Result<(), i32>
         );
         return Err(2);
     }
-    match crate::extract::extract(&path.to_string_lossy(), &bytes, kind, opts) {
+    match crate::extract::extract(name, &bytes, kind, opts) {
         Ok(text) => {
             if let Err(err) = std::io::stdout().write_all(text.as_bytes()) {
                 let _ = writeln!(std::io::stderr(), "{err}");

@@ -102,6 +102,126 @@ fn test_pulp_extract_child_with_hello_rs_prints_source() {
     assert!(stdout.contains("fn hello"), "{stdout}");
 }
 
+fn tiny_docx(text: &str) -> Vec<u8> {
+    use std::io::{Cursor, Write};
+    let xml = format!(
+        "<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"
+    );
+    let mut zw = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zw.start_file(
+        "word/document.xml",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zw.write_all(xml.as_bytes()).unwrap();
+    zw.finish().unwrap().into_inner()
+}
+
+#[test]
+fn test_pulp_extract_child_with_stdin_prints_extracted_text() {
+    use std::io::Write;
+    let exe = env!("CARGO_BIN_EXE_pulp");
+    let mut child = Command::new(exe)
+        .args(["__extract", "--stdin", "--kind", "docx"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pulp __extract");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&tiny_docx("from stdin"))
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "from stdin");
+}
+
+/// `TMPDIR` names the temp directory on Unix only; Windows reads `TMP`.
+#[cfg(unix)]
+#[test]
+fn test_pulp_cli_isolated_with_unusable_temp_dir_still_extracts() {
+    let exe = env!("CARGO_BIN_EXE_pulp");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("docs");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("memo.docx"), tiny_docx("quarterly tides")).unwrap();
+    let output = Command::new(exe)
+        .env("PULP_ISOLATE", "1")
+        .env("TMPDIR", dir.path().join("no-such-temp-dir"))
+        .arg(&root)
+        .output()
+        .expect("spawn pulp");
+    assert!(output.status.success(), "{output:?}");
+    let dump = String::from_utf8_lossy(&output.stdout);
+    assert!(dump.contains("quarterly tides"), "{dump}");
+}
+
+/// Run `cmd`, retrying while the executable is busy: a binary copied a
+/// moment ago can still be open for writing in a child that another test
+/// forked meanwhile, and Linux refuses to run it until that child execs.
+fn output_retrying_busy(cmd: &mut Command) -> std::process::Output {
+    for _ in 0..50 {
+        match cmd.output() {
+            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            other => return other.expect("spawn pulp"),
+        }
+    }
+    panic!("the executable stayed busy");
+}
+
+#[test]
+fn test_pulp_cli_with_renamed_binary_still_isolates_heavy_extractors() {
+    let dir = tempfile::tempdir().unwrap();
+    let renamed = dir
+        .path()
+        .join(format!("pulp-renamed{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(env!("CARGO_BIN_EXE_pulp"), &renamed).unwrap();
+    let root = dir.path().join("docs");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("memo.docx"), tiny_docx("isolated text")).unwrap();
+    // With a zero timeout an isolated extractor always times out, so the
+    // note shows the child really ran.
+    let output = output_retrying_busy(
+        Command::new(&renamed)
+            .env_remove("PULP_ISOLATE")
+            .env("PULP_EXTRACT_TIMEOUT_MS", "0")
+            .arg(&root),
+    );
+    assert!(output.status.success(), "{output:?}");
+    let dump = String::from_utf8_lossy(&output.stdout);
+    assert!(dump.contains("extractor timed out"), "{dump}");
+    assert!(!dump.contains("isolated text"), "{dump}");
+}
+
+#[test]
+fn test_pulp_extract_child_with_no_parent_watching_exits_on_its_own_deadline() {
+    let exe = env!("CARGO_BIN_EXE_pulp");
+    // Stdin stays open and empty, so the child waits the way a stuck parser
+    // would, and no parent is watching the clock.
+    let mut child = Command::new(exe)
+        .env("PULP_EXTRACT_TIMEOUT_MS", "100")
+        .args(["__extract", "--stdin", "--kind", "pdf"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pulp __extract");
+    let (out, err, status) = wait_with_drain(&mut child, Duration::from_secs(20), 1024, 64 * 1024)
+        .expect("child must exit by itself");
+    assert_eq!(status.code(), Some(4), "{status}");
+    assert!(out.is_empty());
+    assert!(
+        String::from_utf8_lossy(&err).contains("past its 2100ms deadline"),
+        "{}",
+        String::from_utf8_lossy(&err)
+    );
+}
+
 #[test]
 fn test_wait_with_drain_with_dd_stdout_completes() {
     let mut child = Command::new("sh")

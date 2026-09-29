@@ -118,8 +118,12 @@ enum Command {
     /// Internal: extract one heavy file in a child process.
     #[command(name = "__extract", hide = true)]
     Extract {
+        /// Read the file here.
+        #[arg(long, required_unless_present = "stdin", conflicts_with = "stdin")]
+        path: Option<PathBuf>,
+        /// Read the file's bytes from stdin.
         #[arg(long)]
-        path: PathBuf,
+        stdin: bool,
         #[arg(long)]
         kind: String,
         #[arg(long, default_value_t = 8 * 1024 * 1024)]
@@ -140,6 +144,8 @@ enum TreeCli {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Heavy parsers run in a child `pulp` whatever this executable is named.
+    pulp::extract::isolate::set_isolation(true);
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Ui { port, no_open }) => {
@@ -155,11 +161,13 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Extract {
             path,
+            stdin,
             kind,
             max_file_size,
             source,
             notebook_outputs,
         }) => {
+            pulp::extract::isolate::start_child_watchdog();
             let kind = pulp::kind_from_label(&kind)
                 .ok_or_else(|| anyhow::anyhow!("unknown kind {kind}"))?;
             let opts = pulp::extract::ExtractOpts {
@@ -167,7 +175,16 @@ fn main() -> anyhow::Result<()> {
                 notebook_outputs,
                 source_mode: source,
             };
-            match pulp::extract::isolate::run_child(&path, kind, &opts) {
+            let result = match path {
+                Some(path) if !stdin => pulp::extract::isolate::run_child(&path, kind, &opts),
+                _ => pulp::extract::isolate::run_child_reader(
+                    io::stdin().lock(),
+                    "file",
+                    kind,
+                    &opts,
+                ),
+            };
+            match result {
                 Ok(()) => return Ok(()),
                 Err(code) => std::process::exit(code),
             }
@@ -365,6 +382,19 @@ mod tests {
         packed.stats.files_skipped = 1;
         let line = summary_line(&packed);
         assert!(line.ends_with(" in 0ms, 1 skipped"), "{line}");
+    }
+
+    #[test]
+    fn test_cli_with_extract_stdin_flag_returns_no_path() {
+        let cli = Cli::parse_from(["pulp", "__extract", "--stdin", "--kind", "pdf"]);
+        match cli.command {
+            Some(Command::Extract { path, stdin, .. }) => {
+                assert!(stdin);
+                assert!(path.is_none());
+            }
+            other => panic!("expected __extract, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["pulp", "__extract", "--kind", "pdf"]).is_err());
     }
 
     #[test]
