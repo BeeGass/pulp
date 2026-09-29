@@ -43,6 +43,29 @@ pub fn display_path(path: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Name bytes as text, with each byte that is not valid UTF-8 written as a
+/// `\xNN` escape.
+///
+/// A lossy conversion would turn every bad byte into U+FFFD, so two names
+/// that differ only there (`a\xff.txt`, `a\xfe.txt`) would share one path
+/// and one id. Valid UTF-8 comes back unchanged. The escape is not lossless:
+/// a name holding a literal `\xff` prints the same. The walk still gives the
+/// two files different ids.
+#[must_use]
+pub fn escape_invalid_utf8(bytes: &[u8]) -> Cow<'_, str> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(bytes.len() + 8);
+    for chunk in bytes.utf8_chunks() {
+        out.push_str(chunk.valid());
+        for byte in chunk.invalid() {
+            out.push_str(&format!("\\x{byte:02x}"));
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Whether [`display_path`] escapes `c`; its doc lists the characters.
 fn needs_display_escape(c: char) -> bool {
     c.is_control()
@@ -157,9 +180,10 @@ enum Node {
 const MAX_TREE_DEPTH: usize = 64;
 
 fn insert_path(root: &mut Dir, path: &str) {
-    let normalized = path.replace('\\', "/");
-    let last_is_dir = normalized.ends_with('/');
-    let mut parts: Vec<Cow<'_, str>> = normalized
+    // Paths arrive `/`-separated. A `\` is part of a name (legal on Unix, or
+    // an escape for a byte that is not UTF-8), never a separator.
+    let last_is_dir = path.ends_with('/');
+    let mut parts: Vec<Cow<'_, str>> = path
         .split('/')
         .filter(|part| !part.is_empty() && *part != "." && *part != "..")
         .map(Cow::Borrowed)
@@ -354,6 +378,36 @@ pulp/
             let name = format!("a{kept}b");
             assert_eq!(display_path(&name), name, "U+{:04X}", u32::from(kept));
         }
+    }
+
+    #[test]
+    fn test_escape_invalid_utf8_with_bad_bytes_returns_distinct_escapes() {
+        assert!(matches!(
+            escape_invalid_utf8(b"ok.txt"),
+            Cow::Borrowed("ok.txt")
+        ));
+        assert_eq!(escape_invalid_utf8(b"a\xff.txt"), "a\\xff.txt");
+        assert_eq!(escape_invalid_utf8(b"a\xfe.txt"), "a\\xfe.txt");
+        assert_eq!(
+            escape_invalid_utf8("caf\u{e9}\u{0}".as_bytes()),
+            "café\u{0}"
+        );
+        assert_eq!(escape_invalid_utf8(b"\xe2\x82 x"), "\\xe2\\x82 x");
+    }
+
+    #[test]
+    fn test_render_tree_with_backslash_in_name_keeps_one_entry() {
+        let rendered = render_tree(
+            "root",
+            &["a\\xff.txt".to_string(), "dir/b\\c.txt".to_string()],
+        );
+        let expected = "\
+root/
+├── a\\xff.txt
+└── dir/
+    └── b\\c.txt
+";
+        assert_eq!(rendered, expected);
     }
 
     #[test]

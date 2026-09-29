@@ -71,14 +71,18 @@ fn collect_tar<R: Read>(
         if !entry.header().entry_type().is_file() {
             continue;
         }
-        let raw_name = match entry.path() {
-            Ok(path) => path.to_string_lossy().into_owned(),
-            Err(_) => continue,
-        };
-        if is_rejected_member_name(&raw_name) {
+        // Work from the raw bytes, so names that differ only in bytes that
+        // are not UTF-8 stay apart. Separators are normalized first, then
+        // those bytes are escaped, so an escape's `\` is never a separator.
+        let raw: Vec<u8> = entry
+            .path_bytes()
+            .iter()
+            .map(|&b| if b == b'\\' { b'/' } else { b })
+            .collect();
+        if is_rejected_member_name(&String::from_utf8_lossy(&raw)) {
             continue;
         }
-        let name = normalize_member_name(&raw_name);
+        let name = crate::tree::escape_invalid_utf8(&raw).into_owned();
         let claimed = entry.size();
         if !can_copy_member(claimed, opts, total) {
             continue;
@@ -231,6 +235,30 @@ mod tests {
         };
         let out = expand_zip(&bytes, &small).unwrap();
         assert_eq!(out, vec![("ok.txt".to_string(), b"ok".to_vec())]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_expand_tar_with_non_utf8_names_returns_distinct_names() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut builder = Builder::new(Vec::new());
+        for name in [&b"a\xff.txt"[..], &b"a\xfe.txt"[..], &b"\xffstart.txt"[..]] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(2);
+            header.set_mode(0o644);
+            header
+                .set_path(std::path::Path::new(std::ffi::OsStr::from_bytes(name)))
+                .unwrap();
+            header.set_cksum();
+            builder.append(&header, &b"x\n"[..]).unwrap();
+        }
+        let bytes = builder.into_inner().unwrap();
+        let names: Vec<String> = expand_tar(&bytes, &opts(), false)
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, ["a\\xff.txt", "a\\xfe.txt", "\\xffstart.txt"]);
     }
 
     #[test]

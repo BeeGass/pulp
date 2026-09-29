@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 #[cfg(feature = "native")]
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -646,6 +647,7 @@ fn take_archive_members(
     globs: &ScopedGlobs,
 ) -> Vec<PackedFile> {
     let mut out = Vec::new();
+    let mut ids: HashSet<String> = HashSet::new();
     let mut total = 0u64;
     for (name, mem_bytes) in members {
         if is_unsafe_entry(&name) {
@@ -667,9 +669,17 @@ fn take_archive_members(
             continue;
         }
         total = total.saturating_add(n);
+        // A tar may hold one name twice; each copy still needs its own id.
+        let base = format!("{}!{child}", parent.id);
+        let mut id = base.clone();
+        let mut n = 2usize;
+        while !ids.insert(id.clone()) {
+            id = format!("{base}#{n}");
+            n += 1;
+        }
         out.extend(process_item(
             WorkItem {
-                id: format!("{}!{child}", parent.id),
+                id,
                 relative: child,
                 root_relative: child_under_root,
                 absolute: None,
@@ -813,25 +823,21 @@ fn is_input_root(path: &Path, roots: &[PathBuf]) -> bool {
     })
 }
 
+/// True when an archive member name could climb out of its archive.
+///
+/// Names reach here with `/` separators already (see
+/// [`crate::extract::expand_archive`]); a `\` left in a name is a character,
+/// such as the start of a `\xNN` escape for a byte that is not UTF-8.
 fn is_unsafe_entry(name: &str) -> bool {
-    let n = name.replace('\\', "/");
-    let n = n.trim();
-    if n.is_empty() {
-        return true;
-    }
-    if n.starts_with('/') || n.starts_with('\\') {
+    let n = name.trim();
+    if n.is_empty() || n.starts_with('/') {
         return true;
     }
     let bytes = n.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' {
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         return true;
     }
-    Path::new(n).components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    })
+    n.split('/').any(|part| part == "..")
 }
 
 fn join_rel(parent: &str, child: &str) -> String {
@@ -846,7 +852,6 @@ fn join_rel(parent: &str, child: &str) -> String {
 }
 
 fn normalize_rel(path: &str) -> String {
-    let path = path.replace('\\', "/");
     let mut parts = Vec::new();
     for part in path.split('/') {
         if part.is_empty() || part == "." {
@@ -1413,6 +1418,7 @@ mod tests {
         assert!(is_unsafe_entry("C:/Windows/system32"));
         assert!(!is_unsafe_entry("foo/bar.txt"));
         assert!(!is_unsafe_entry("dir/file.rs"));
+        assert!(!is_unsafe_entry("\\xffstart.txt"));
     }
 
     fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -1425,6 +1431,36 @@ mod tests {
             zw.write_all(data).unwrap();
         }
         zw.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn test_pack_entries_with_repeated_tar_member_returns_distinct_ids() {
+        let mut builder = tar::Builder::new(Vec::new());
+        for body in [&b"first\n"[..], &b"second\n"[..]] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, "same.txt", body).unwrap();
+        }
+        let tar = builder.into_inner().unwrap();
+        let entries = [MemoryFile {
+            id: "logs.tar",
+            relative: "logs.tar",
+            bytes: &tar,
+        }];
+        let opts = Options {
+            follow_archives: true,
+            ..Options::default()
+        };
+        let packed = pack_entries(&entries, &opts, None).unwrap();
+        let ids: Vec<&str> = packed.files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["logs.tar!logs.tar/same.txt", "logs.tar!logs.tar/same.txt#2"]
+        );
+        assert_eq!(packed.files[0].text, "first\n");
+        assert_eq!(packed.files[1].text, "second\n");
     }
 
     #[test]

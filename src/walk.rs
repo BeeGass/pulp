@@ -118,13 +118,15 @@ impl RootKind {
 
 /// Files the walk keeps, in the order it finds them.
 ///
-/// Each file found must pass the selection, the skip paths, and the
-/// budgets, in that order: a file left out spends no budget.
+/// Each file found gets an id no earlier file has, then must pass the
+/// selection, the skip paths, and the budgets, in that order: ids never
+/// depend on what is selected, and a file left out spends no budget.
 struct Found<'a> {
     /// Selected names; `None` selects every file.
     selection: Option<HashSet<&'a str>>,
     skip_paths: Vec<PathBuf>,
     budget: Budget,
+    ids: HashSet<String>,
     files: Vec<WalkedFile>,
 }
 
@@ -138,13 +140,15 @@ impl<'a> Found<'a> {
             selection,
             skip_paths: normalize_skip_paths(&opts.skip_paths),
             budget: Budget::new(opts),
+            ids: HashSet::new(),
             files: Vec::new(),
         }
     }
 
     /// Take the next file the walk found. Returns `false` once a file does
     /// not fit the budgets: the walk stops there.
-    fn offer(&mut self, file: WalkedFile) -> bool {
+    fn offer(&mut self, mut file: WalkedFile) -> bool {
+        file.id = self.unique_id(std::mem::take(&mut file.id));
         if !self.is_selected(&file) || self.is_skipped(&file) {
             return true;
         }
@@ -153,6 +157,24 @@ impl<'a> Found<'a> {
         }
         self.files.push(file);
         true
+    }
+
+    /// `id`, or when an earlier file has it, `id#2`, `id#3`, and so on.
+    ///
+    /// Names that are the same once turned into text (bytes that are not
+    /// UTF-8 against a literal `\xNN`, say) would otherwise share an id.
+    fn unique_id(&mut self, id: String) -> String {
+        if self.ids.insert(id.clone()) {
+            return id;
+        }
+        let mut n = 2usize;
+        loop {
+            let candidate = format!("{id}#{n}");
+            if self.ids.insert(candidate.clone()) {
+                return candidate;
+            }
+            n += 1;
+        }
     }
 
     /// Whether the selection names `file`, by id or by relative path.
@@ -356,28 +378,42 @@ fn looks_like_archive(relative: &str) -> bool {
     n.ends_with(".zip") || n.ends_with(".tar") || n.ends_with(".tgz") || n.ends_with(".tar.gz")
 }
 
-/// `path` under `root`, with `/` separators and no `.` parts.
+/// `path` under `root`, as `/`-separated normal components.
+///
+/// Built from path components rather than by rewriting `\` so a Unix file
+/// name that holds a backslash stays one name.
 fn rel_under(root: &Path, path: &Path) -> String {
     let stripped = path.strip_prefix(root).unwrap_or(path);
-    normalize_rel(&stripped.to_string_lossy())
+    let parts: Vec<String> = stripped
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(os_text(part)),
+            _ => None,
+        })
+        .collect();
+    parts.join("/")
 }
 
-fn normalize_rel(path: &str) -> String {
-    let path = path.replace('\\', "/");
-    let mut parts = Vec::new();
-    for part in path.split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        parts.push(part);
+/// A file name as text. On Unix, bytes that are not UTF-8 become `\xNN`
+/// escapes. Different names still get different ids (see
+/// [`Found::unique_id`]), but a name holding a literal `\xNN` prints like
+/// one whose byte was escaped.
+fn os_text(name: &OsStr) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        crate::tree::escape_invalid_utf8(name.as_bytes()).into_owned()
     }
-    parts.join("/")
+    #[cfg(not(unix))]
+    {
+        name.to_string_lossy().into_owned()
+    }
 }
 
 /// The last normal component of `path`, if it has one.
 fn file_name_label(path: &Path) -> Option<String> {
     path.file_name()
-        .map(|name| name.to_string_lossy().replace('\\', "/"))
+        .map(os_text)
         .filter(|name| !name.is_empty())
 }
 
@@ -468,7 +504,7 @@ fn named_components(path: &Path) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     for component in absolute.components() {
         match component {
-            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::Normal(part) => parts.push(os_text(part)),
             Component::ParentDir => {
                 parts.pop();
             }
@@ -984,6 +1020,59 @@ mod tests {
         assert_eq!(rels(&files), ["link.rs"]);
         assert!(files[0].is_symlink);
         assert_eq!(files[0].size, 13);
+    }
+
+    fn walked(relative: &str) -> WalkedFile {
+        WalkedFile {
+            id: relative.into(),
+            absolute: PathBuf::from(relative),
+            relative: relative.into(),
+            root_relative: relative.into(),
+            size: 0,
+            is_symlink: false,
+            modified: None,
+        }
+    }
+
+    #[test]
+    fn test_found_with_shared_ids_returns_unique_ids_in_walk_order() {
+        let opts = Options::default();
+        let mut found = Found::new(&opts);
+        for relative in ["a.txt", "a.txt", "a.txt#2", "a.txt", "b.txt"] {
+            assert!(found.offer(walked(relative)));
+        }
+        let files = found.finish().files;
+        let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, ["a.txt", "a.txt#2", "a.txt#2#2", "a.txt#3", "b.txt"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_collect_with_non_utf8_names_returns_distinct_paths_and_ids() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            &b"a\xff.txt"[..],
+            &b"a\xfe.txt"[..],
+            &b"a\xef\xbf\xbd.txt"[..],
+        ] {
+            write(&dir.path().join(OsStr::from_bytes(name)), b"x\n");
+        }
+        let files = collect(&opts_for(dir.path().to_path_buf())).unwrap();
+        let mut rels = rels(&files);
+        rels.sort_unstable();
+        assert_eq!(rels, ["a\\xfe.txt", "a\\xff.txt", "a\u{fffd}.txt"]);
+        let ids: HashSet<&str> = files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_with_backslash_in_file_name_keeps_one_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a\\b.txt"), b"one file\n");
+        let files = collect(&opts_for(dir.path().to_path_buf())).unwrap();
+        assert_eq!(rels(&files), ["a\\b.txt"]);
     }
 
     #[test]
