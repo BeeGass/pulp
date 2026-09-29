@@ -146,7 +146,12 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             let preferred = port.unwrap_or(8747);
             let try_next = port.is_none();
-            return rt.block_on(pulp::ui::serve(preferred, try_next, !no_open));
+            let served = rt.block_on(pulp::ui::serve(preferred, try_next, !no_open));
+            // A pack still finishing its current file, or an open folder
+            // picker, holds a blocking thread; the mill has stopped, so the
+            // process does not wait on it.
+            rt.shutdown_timeout(std::time::Duration::from_secs(1));
+            return served;
         }
         Some(Command::Extract {
             path,

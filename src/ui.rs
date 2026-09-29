@@ -78,23 +78,47 @@ pub async fn serve(preferred: u16, try_next: bool, open_browser: bool) -> anyhow
     }
     eprintln!("localhost only. nothing is uploaded.");
     let sample: Arc<crate::sample::Scratch> = Arc::default();
+    let mill = Arc::new(Mill::new());
     let state = AppState {
         pick: pick::pick_folder,
         token: Arc::from(new_session_token()?),
         origin: Arc::from(url.as_str()),
-        mill: Arc::new(Mill::new()),
+        mill: Arc::clone(&mill),
         sample: Arc::clone(&sample),
     };
     if open_browser {
         let _ = opener::open(&url);
     }
-    let served = axum::serve(listener, router_with(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let stopping = Arc::new(tokio::sync::Notify::new());
+    let graceful = {
+        let (mill, stopping) = (Arc::clone(&mill), Arc::clone(&stopping));
+        async move {
+            shutdown_signal().await;
+            // A running pack stops between files instead of holding the exit.
+            mill.request_cancel();
+            stopping.notify_one();
+        }
+    };
+    let server = axum::serve(listener, router_with(state)).with_graceful_shutdown(graceful);
+    // Open requests get a short grace to finish; a second signal ends it early.
+    let deadline = async {
+        stopping.notified().await;
+        tokio::select! {
+            () = tokio::time::sleep(SHUTDOWN_GRACE) => {}
+            () = shutdown_signal() => {}
+        }
+    };
+    let served = tokio::select! {
+        served = server.into_future() => served,
+        () = deadline => Ok(()),
+    };
     sample.remove();
     served?;
     Ok(())
 }
+
+/// How long open requests get to finish after a stop signal.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Resolve on Ctrl-C, and on SIGTERM or SIGHUP where they exist, so the mill
 /// stops cleanly (and removes its sample folder) however its terminal ends.
