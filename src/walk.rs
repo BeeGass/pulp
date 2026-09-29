@@ -27,6 +27,9 @@ pub struct WalkedFile {
     pub size: u64,
     pub is_symlink: bool,
     pub modified: Option<SystemTime>,
+    /// Device and inode when found (Unix only), so the walk can leave out a
+    /// file it must skip whatever path names it.
+    pub identity: Option<(u64, u64)>,
 }
 
 /// Walked files plus whether discovery stopped at a budget.
@@ -145,12 +148,12 @@ impl RootKind {
 /// Files the walk keeps, in the order it finds them.
 ///
 /// Each file found gets an id no earlier file has, then must pass the
-/// selection, the skip paths, and the budgets, in that order: ids never
-/// depend on what is selected, and a file left out spends no budget.
+/// selection, the skip set, and the budgets, in that order: ids never depend
+/// on what is selected, and a file left out spends no budget.
 struct Found<'a> {
     /// Selected names; `None` selects every file.
     selection: Option<HashSet<&'a str>>,
-    skip_paths: Vec<PathBuf>,
+    skip: SkipSet,
     budget: Budget,
     ids: HashSet<String>,
     files: Vec<WalkedFile>,
@@ -165,7 +168,7 @@ impl<'a> Found<'a> {
         };
         Self {
             selection,
-            skip_paths: normalize_skip_paths(&opts.skip_paths),
+            skip: SkipSet::new(opts),
             budget: Budget::new(opts),
             ids: HashSet::new(),
             files: Vec::new(),
@@ -177,7 +180,7 @@ impl<'a> Found<'a> {
     /// not fit the budgets: the walk stops there.
     fn offer(&mut self, mut file: WalkedFile) -> bool {
         file.id = self.unique_id(std::mem::take(&mut file.id));
-        if !self.is_selected(&file) || self.is_skipped(&file) {
+        if !self.is_selected(&file) || self.skip.contains(&file) {
             return true;
         }
         if !self.budget.take(file.size) {
@@ -217,10 +220,6 @@ impl<'a> Found<'a> {
             || (names.contains(file.relative.as_str()) && !self.ids.contains(&file.relative))
     }
 
-    fn is_skipped(&self, file: &WalkedFile) -> bool {
-        !self.skip_paths.is_empty() && is_skipped_path(&file.absolute, &self.skip_paths)
-    }
-
     fn finish(mut self) -> WalkOutcome {
         self.files.sort_by(|a, b| a.id.cmp(&b.id));
         WalkOutcome {
@@ -245,18 +244,62 @@ pub fn normalize_skip_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-fn is_skipped_path(path: &Path, skip: &[PathBuf]) -> bool {
-    skip.iter().any(|other| paths_equal(path, other))
+/// Files the walk must leave out, such as the dump being written.
+///
+/// Matched by path, and on Unix by device and inode: those of each skip
+/// path when the set is made, and those the caller took from open
+/// descriptors ([`Options::skip_identities`]), which name a file where a
+/// path such as `/dev/stdout` cannot. A walked file carries its own
+/// identity, so a match costs no system call.
+struct SkipSet {
+    paths: Vec<PathBuf>,
+    ids: Vec<(u64, u64)>,
 }
 
-fn paths_equal(a: &Path, b: &Path) -> bool {
-    if a == b {
-        return true;
+impl SkipSet {
+    fn new(opts: &Options) -> Self {
+        let paths = normalize_skip_paths(&opts.skip_paths);
+        let mut ids: Vec<(u64, u64)> = paths
+            .iter()
+            .filter_map(|path| fs::metadata(path).ok())
+            .filter_map(|meta| file_identity(&meta))
+            .collect();
+        ids.extend_from_slice(&opts.skip_identities);
+        Self { paths, ids }
     }
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => false,
+
+    fn contains(&self, file: &WalkedFile) -> bool {
+        self.paths.contains(&file.absolute)
+            || file.identity.is_some_and(|id| self.ids.contains(&id))
+            || self.names_another_way(&file.absolute)
     }
+
+    /// Without device and inode numbers, a file that a skip path names
+    /// another way is found by canonicalizing its path.
+    #[cfg(not(unix))]
+    fn names_another_way(&self, path: &Path) -> bool {
+        !self.paths.is_empty()
+            && path
+                .canonicalize()
+                .is_ok_and(|canonical| self.paths.contains(&canonical))
+    }
+
+    #[cfg(unix)]
+    fn names_another_way(&self, _path: &Path) -> bool {
+        false
+    }
+}
+
+/// Device and inode of a file, where the platform has them.
+#[cfg(unix)]
+pub(crate) fn file_identity(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn file_identity(_meta: &fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 /// Open `path` for reading without blocking and, unless `follow`, without
@@ -496,6 +539,7 @@ impl RootScope<'_> {
             size: meta.len(),
             is_symlink,
             modified: meta.modified().ok(),
+            identity: file_identity(meta),
         }
     }
 }
@@ -583,6 +627,7 @@ fn walk_dir(
             size: meta.len(),
             is_symlink,
             modified: meta.modified().ok(),
+            identity: file_identity(&meta),
         };
         if !found.offer(file) {
             return Ok(false);
@@ -1429,6 +1474,44 @@ mod tests {
         assert_eq!(files[0].size, 13);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_with_skip_path_hard_linked_to_file_skips_it() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("keep.rs"), b"fn keep() {}\n");
+        write(&dir.path().join("dump.txt"), b"old dump\n");
+        // A hard link has a path of its own that canonicalizes to itself,
+        // so only the device and inode can tie it to `dump.txt`.
+        let other = tempfile::tempdir().unwrap();
+        let alias = other.path().join("alias");
+        fs::hard_link(dir.path().join("dump.txt"), &alias).unwrap();
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            skip_paths: vec![alias],
+            ..Options::default()
+        };
+        assert_eq!(rels(&collect(&opts).unwrap()), ["keep.rs"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_with_skip_identity_skips_that_file_before_budgets() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("0dump.txt"), b"");
+        write(&dir.path().join("a.rs"), b"fn a() {}\n");
+        let meta = fs::metadata(dir.path().join("0dump.txt")).unwrap();
+        let outcome = collect_detailed(&Options {
+            roots: vec![dir.path().to_path_buf()],
+            skip_identities: vec![(meta.dev(), meta.ino())],
+            max_entries: 1,
+            ..Options::default()
+        })
+        .unwrap();
+        assert_eq!(rels(&outcome.files), ["a.rs"]);
+        assert!(!outcome.truncated);
+    }
+
     fn walked(relative: &str) -> WalkedFile {
         WalkedFile {
             id: relative.into(),
@@ -1438,6 +1521,7 @@ mod tests {
             size: 0,
             is_symlink: false,
             modified: None,
+            identity: None,
         }
     }
 

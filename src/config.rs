@@ -97,6 +97,10 @@ pub struct Options {
     pub selection: Selection,
     /// Skip these filesystem paths (canonical or as given), e.g. the output file.
     pub skip_paths: Vec<PathBuf>,
+    /// Skip files with these device and inode numbers (Unix), such as a
+    /// redirected stdout. Taken from open descriptors, they name a file
+    /// that a path like `/dev/stdout` cannot on every platform.
+    pub skip_identities: Vec<(u64, u64)>,
     /// Preserve HTML/XML/JSON as source instead of converting to readable text.
     pub source_mode: bool,
     /// Cap on discovered file entries. `0` means no cap.
@@ -207,6 +211,7 @@ impl Default for Options {
             tokens: false,
             selection: Selection::AllEligible,
             skip_paths: Vec::new(),
+            skip_identities: Vec::new(),
             source_mode: false,
             max_entries: 0,
             max_total_bytes: 1 << 30,
