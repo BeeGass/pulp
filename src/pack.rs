@@ -528,6 +528,13 @@ fn pack_one(
     if size > opts.max_file_size {
         return packed_too_large(id, relative, kind, size, opts.max_file_size);
     }
+    // A name says text but the bytes are binary: an MPEG-TS `.ts`, a binary
+    // `.dat`. Treat it as the binary it is rather than dump it as mojibake.
+    let kind = if is_text_like(kind) && looks_binary(bytes) {
+        Kind::Binary
+    } else {
+        kind
+    };
     if should_skip_binary(kind, bytes, opts.skip_binaries) {
         return PackedFile {
             text: format!("[binary file, {size} bytes]"),
@@ -664,6 +671,14 @@ fn list_only_file(entry: &ManifestEntry, opts: &Options) -> PackedFile {
         text: String::new(),
         status,
     }
+}
+
+/// Kinds whose extractors read the bytes as text.
+fn is_text_like(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Text | Kind::Html | Kind::Xml | Kind::Json | Kind::Csv | Kind::Tsv | Kind::Unknown
+    )
 }
 
 fn should_skip_binary(kind: Kind, bytes: &[u8], skip_binaries: bool) -> bool {
@@ -1305,5 +1320,55 @@ mod tests {
         assert!(is_unsafe_entry("C:/Windows/system32"));
         assert!(!is_unsafe_entry("foo/bar.txt"));
         assert!(!is_unsafe_entry("dir/file.rs"));
+    }
+
+    #[test]
+    fn test_pack_entries_with_binary_bytes_under_text_names_skips_them() {
+        let ts: Vec<u8> = [0x47, 0x40, 0x00, 0x10, 0x00, 0x00, 0xb0, 0x0d]
+            .into_iter()
+            .chain((0..=255u8).cycle().take(1024))
+            .collect();
+        let utf16: Vec<u8> = "hello from utf-16\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let entries = [
+            MemoryFile {
+                id: "clip.ts",
+                relative: "clip.ts",
+                bytes: &ts,
+            },
+            MemoryFile {
+                id: "table.dat",
+                relative: "table.dat",
+                bytes: &[0, 1, 2, 3, 255, 254],
+            },
+            MemoryFile {
+                id: "notes.txt",
+                relative: "notes.txt",
+                bytes: &utf16,
+            },
+        ];
+        let packed = pack_entries(&entries, &Options::default(), None).unwrap();
+        let by = |rel: &str| packed.files.iter().find(|f| f.relative == rel).unwrap();
+        for rel in ["clip.ts", "table.dat"] {
+            assert_eq!(by(rel).status, FileStatus::SkippedBinary, "{rel}");
+            assert_eq!(by(rel).kind, Kind::Binary, "{rel}");
+        }
+        assert_eq!(by("notes.txt").status, FileStatus::Extracted);
+        assert_eq!(by("notes.txt").text, "hello from utf-16\n");
+
+        let keep = Options {
+            skip_binaries: false,
+            ..Options::default()
+        };
+        let packed = pack_entries(&entries, &keep, None).unwrap();
+        let clip = packed
+            .files
+            .iter()
+            .find(|f| f.relative == "clip.ts")
+            .unwrap();
+        assert_eq!(clip.status, FileStatus::Extracted);
+        assert_eq!(clip.text, format!("[binary file, {} bytes]", ts.len()));
     }
 }

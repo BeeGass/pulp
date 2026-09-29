@@ -98,6 +98,7 @@ pub fn expand_archive(
     }
 }
 
+pub(crate) use text::sniff_wide_text;
 pub use text::{decode_bytes, extract as extract_text};
 
 #[cfg(test)]
