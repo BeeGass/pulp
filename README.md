@@ -30,7 +30,8 @@ Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is
 - Changing format or the directory map redraws the last extraction. Other changes mark the dump out of date, and Copy and Download stay off until you pulp again.
 - Files that could not be extracted are flagged in the tree. Select one to see why, untick it, or open a GitHub issue with the error text.
 - A scan that could not read some folders (no read permission, say) names the first few and counts the rest.
-- A file that changes, disappears, or is swapped for a link between the scan and the pack is flagged as changed rather than read; scan again to pick up its new contents.
+- Pulping reads each ticked file as it is now, so a file edited since the scan goes in as edited. One that has disappeared or been swapped for a link, a folder, or a device is flagged as changed rather than read; scan again to pick up the folder as it is now.
+- Pulping again reuses what the last pulp extracted from each file whose size and modification time have not changed since, so after an edit only the edited files are read and extracted again. A change of content, archives, or notebook outputs extracts every file afresh.
 - One pack job at a time. Cancel (or Esc) asks it to stop between files. File previews run beside a pack and read only the chosen file from the last scan.
 - Lockfiles, images, and virtualenv trees (`.venv/`, `venv/`) start unticked.
 - The mill follows your OS light or dark setting and works on a phone.
@@ -101,7 +102,7 @@ Unless `--quiet`, stderr looks like:
 pulped 12 files (48.2 KiB read, 12100 chars, ~12100 tokens) in 35ms
 ```
 
-When some files do not make it in, the line ends with counts such as `, 1 unreadable, 2 skipped`. An unreadable file (a damaged or encrypted PDF, say) keeps a one-line note in the dump in place of its text; it is not counted as pulped and is left out of the directory map. So does an archive member that cannot be read out: unsupported compression, encryption, damage, or data shared with another member. Skipped binary media gets no section at all; a file over `--max-file-size` keeps a one-line note.
+When some files do not make it in, the line ends with counts such as `, 1 unreadable, 2 skipped`. An unreadable file (a damaged or encrypted PDF, say) keeps a one-line note in the dump in place of its text; it is not counted as pulped and is left out of the directory map. So does an archive member that cannot be read out: unsupported compression, encryption, damage, or data shared with another member. A document whose bytes are not what its name says is unreadable too, and its note says what the file holds instead, such as the web page a failed download leaves: `[pdf unreadable: not a PDF: it holds an HTML page ("Preparing to download ...")]`. Skipped binary media gets no section at all; a file over `--max-file-size` keeps a one-line note.
 
 Folders pulp cannot open, such as one without read permission or a symlink loop, print a `warning:` line each before the summary (the first ten, then a count); the rest of the tree is still pulped. `--list` ends with `listed N files` instead. `-q` hides the summary but not the warnings, and with `--tokens` prints the estimate alone.
 
@@ -121,7 +122,7 @@ Names with control, bidi, or invisible format characters appear escaped (`\n`, `
 | Jupyter | Cells; `--notebook-outputs` keeps outputs |
 | Zip / tar | A root archive always expands; nested members need `--archives` |
 
-Binary media (images, audio, wasm, …) is skipped unless `--binaries`, and so is a file whose name says text but whose bytes are binary. `--list` leaves binaries out too, except such a file, since listing reads no file.
+Binary media (images, audio, wasm, …) is skipped unless `--binaries`, and so is a file whose name says text but whose bytes are binary: more than 1 in 32 of its first 8 KiB are NULs or control characters that text does not use. A few, as text copied out of a PDF often holds, do not make a file binary. `--list` leaves binaries out too, except such a file, since listing reads no file.
 
 Noisy trees stay out even when they are tracked: `node_modules/`, `.next/`, `out/`, `runs/`, `target/`, `dist/`, `build/`, `toolchains/`, virtualenvs, `__pycache__/`, VCS dirs, lockfiles, `.env`, keys, object files, and similar. Rust `.rs`, Lean `.lean`, and NumPy arrays next to a skipped `target/` are still included. Generated paths that do show up start unchecked.
 
@@ -174,7 +175,7 @@ let opts = Options {
 let packed = pack(&opts)?;
 ```
 
-`Selection::Only(vec![])` matches nothing; it never becomes “all files”, and an id is matched before a path. `Options::exclude` holds your own globs; the built-in list applies while `default_excludes` is on, and `exclude_globs()` gives both. Render with `pulp::render::write_all`, which leaves skipped binaries out. `scan_manifest` is the shared discovery step for scan, tree, and pack; `scan_manifest_with_warnings` also returns the paths the walk could not read. `apply_budgets` and `cmp_path_order` apply the same budgets in the same order to any file list.
+`Selection::Only(vec![])` matches nothing; it never becomes “all files”, and an id is matched before a path. `Options::exclude` holds your own globs; the built-in list applies while `default_excludes` is on, and `exclude_globs()` gives both. Render with `pulp::render::write_all`, which leaves skipped binaries out. `scan_manifest` is the shared discovery step for scan, tree, and pack; `scan_manifest_with_warnings` also returns the paths the walk could not read. `pack_manifest` reads each file as it is now; `pack_manifest_cached` also takes the `ExtractCache` an earlier pack returned and reuses what it extracted from files whose path, size, and modification time are unchanged, for the same dump. The local mill keeps the cache of its last pack; the CLI reads every file. `apply_budgets` and `cmp_path_order` apply the same budgets in the same order to any file list.
 
 ---
 
