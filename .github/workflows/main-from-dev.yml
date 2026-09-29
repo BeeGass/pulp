@@ -1,0 +1,19 @@
+name: main-from-dev
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  from-dev:
+    name: PR must come from dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check source branch
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "$HEAD_REF" != "dev" ]; then
+            echo "main only accepts pull requests from the dev branch (got ${HEAD_REF})"
+            exit 1
+          fi
