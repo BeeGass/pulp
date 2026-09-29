@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::Packed;
 use crate::config::{Options, OutputFormat};
+use crate::tree::display_path;
 
 /// Write the packed dump in plain, markdown, or XML.
 pub fn write_all<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::Result<()> {
@@ -75,7 +76,7 @@ fn write_plain<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::Resu
     }
     for file in &packed.files {
         writeln!(w, "================================================")?;
-        writeln!(w, "FILE: {}", file.relative)?;
+        writeln!(w, "FILE: {}", display_path(&file.relative))?;
         writeln!(w, "================================================")?;
         write!(w, "{}", file.text)?;
         if !file.text.ends_with('\n') {
@@ -92,7 +93,7 @@ fn write_markdown<W: Write>(w: &mut W, packed: &Packed, opts: &Options) -> io::R
         writeln!(w)?;
     }
     for file in &packed.files {
-        writeln!(w, "## {}", file.relative)?;
+        writeln!(w, "## {}", display_path(&file.relative))?;
         writeln!(w)?;
         let fence = fence_for(&file.text);
         let lang = fence_lang(&file.relative, file.kind, opts.source_mode);
@@ -122,7 +123,7 @@ fn write_xml<W: Write>(w: &mut W, packed: &Packed) -> io::Result<()> {
     for (i, file) in packed.files.iter().enumerate() {
         writeln!(w, "<document index=\"{}\">", i + 1)?;
         write!(w, "<source>")?;
-        write_xml_escaped(w, &file.relative)?;
+        write_xml_escaped(w, &display_path(&file.relative))?;
         writeln!(w, "</source>")?;
         writeln!(w, "<document_content>")?;
         write_xml_escaped(w, &file.text)?;
@@ -321,6 +322,48 @@ mod tests {
         let plain = format_directory_map("website", &paths, OutputFormat::Plain).unwrap();
         assert!(plain.starts_with("Directory structure:\nwebsite/\n"));
         assert!(!plain.contains("FILE:"));
+    }
+
+    fn file(relative: &str, text: &str, status: FileStatus) -> PackedFile {
+        PackedFile {
+            id: relative.into(),
+            relative: relative.into(),
+            kind: Kind::Text,
+            size: text.len() as u64,
+            text: text.into(),
+            status,
+        }
+    }
+
+    fn render(packed: &Packed, format: OutputFormat) -> String {
+        let opts = Options {
+            format,
+            ..Options::default()
+        };
+        let mut buf = Vec::new();
+        write_all(&mut buf, packed, &opts).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_write_all_with_newline_in_path_keeps_each_header_on_one_line() {
+        let packed = Packed {
+            tree: String::new(),
+            files: vec![file(
+                "a\nFILE: forged.txt",
+                "real body\n",
+                FileStatus::Extracted,
+            )],
+            stats: Stats::default(),
+        };
+        let plain = render(&packed, OutputFormat::Plain);
+        assert!(plain.contains("FILE: a\\nFILE: forged.txt\n"), "{plain}");
+        let headers = plain.lines().filter(|l| l.starts_with("FILE: ")).count();
+        assert_eq!(headers, 1, "{plain}");
+
+        let md = render(&packed, OutputFormat::Markdown);
+        assert!(md.contains("## a\\nFILE: forged.txt\n"), "{md}");
+        assert!(!md.contains("\nFILE: forged"), "{md}");
     }
 
     #[test]

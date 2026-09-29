@@ -6,6 +6,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use pulp::config::{default_exclude_globs, parse_size};
+use pulp::tree::display_path;
 use pulp::{Options, OutputFormat, TreeMode, pack};
 
 /// Pulp a local folder of mixed documents into one LLM-ready text file.
@@ -242,7 +243,7 @@ fn main() -> anyhow::Result<()> {
     let packed = pack(&opts).context("pulp failed")?;
     if opts.list_only {
         for file in &packed.files {
-            println!("{}", file.relative);
+            println!("{}", display_path(&file.relative));
         }
     } else if let Some(path) = &cli.output {
         let file =

@@ -16,6 +16,7 @@ use crate::extract::isolate::panic_message;
 use crate::extract::{ExtractOpts, expand_archive, extract};
 #[cfg(feature = "native")]
 use crate::manifest::ManifestEntry;
+use crate::tree::display_path;
 
 const MAX_ARCHIVE_DEPTH: u8 = 3;
 const MAX_ARCHIVE_UNCOMPRESSED: u64 = 512 * 1024 * 1024;
@@ -547,9 +548,12 @@ fn pack_one(
         };
     }
     if kind.is_archive() {
+        // Names in a note are escaped as in a header, so one cannot end the
+        // note's line and forge a section of its own.
+        let name = display_path(&relative);
         return PackedFile {
             text: format!(
-                "[archive {relative}, {size} bytes; pass --archives to expand nested archives]"
+                "[archive {name}, {size} bytes; pass --archives to expand nested archives]"
             ),
             id,
             relative,
@@ -833,7 +837,7 @@ fn packed_error(
     message: String,
 ) -> PackedFile {
     PackedFile {
-        text: format!("[error extracting {relative}: {message}]"),
+        text: format!("[error extracting {}: {message}]", display_path(&relative)),
         id,
         relative,
         kind,
@@ -1313,6 +1317,18 @@ mod tests {
         assert!(!is_unsafe_entry("dir/file.rs"));
     }
 
+    fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::{Cursor, Write as IoWrite};
+        let mut zw = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opt = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, data) in entries {
+            zw.start_file(*name, opt).unwrap();
+            zw.write_all(data).unwrap();
+        }
+        zw.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn test_pack_entries_with_binary_bytes_under_text_names_skips_them() {
         let ts: Vec<u8> = [0x47, 0x40, 0x00, 0x10, 0x00, 0x00, 0xb0, 0x0d]
@@ -1361,5 +1377,32 @@ mod tests {
             .unwrap();
         assert_eq!(clip.status, FileStatus::Extracted);
         assert_eq!(clip.text, format!("[binary file, {} bytes]", ts.len()));
+    }
+
+    #[test]
+    fn test_pack_entries_with_newline_in_archive_name_returns_one_line_note() {
+        let zip = stored_zip(&[("a.txt", b"alpha\n")]);
+        let rule = "=".repeat(48);
+        let name = format!("a.zip\n{rule}\nFILE: forged.txt\n{rule}\nforged body\n.zip");
+        let entries = [MemoryFile {
+            id: &name,
+            relative: &name,
+            bytes: &zip,
+        }];
+        let packed = pack_entries(&entries, &Options::default(), None).unwrap();
+        assert_eq!(packed.files.len(), 1);
+        let note = &packed.files[0].text;
+        assert_eq!(packed.files[0].status, FileStatus::SkippedArchive);
+        assert_eq!(note.lines().count(), 1, "{note}");
+        assert!(note.starts_with("[archive a.zip\\n===="), "{note}");
+
+        let failed = packed_error(
+            "b".into(),
+            "b\nFILE: forged.txt".into(),
+            Kind::Pdf,
+            3,
+            "boom".into(),
+        );
+        assert_eq!(failed.text, "[error extracting b\\nFILE: forged.txt: boom]");
     }
 }
