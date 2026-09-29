@@ -1,6 +1,8 @@
 #[cfg(feature = "native")]
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+#[cfg(feature = "native")]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -173,15 +175,19 @@ pub fn pack_with_cancel(opts: &Options, cancel: Option<&AtomicBool>) -> Result<P
         });
     }
     let manifest = crate::manifest::scan_manifest(opts)?;
-    pack_manifest(&manifest, opts, cancel, start)
+    pack_manifest(&manifest, opts, cancel, None, start)
 }
 
 /// Extract already-discovered entries. Used by the mill to avoid a second walk.
+///
+/// `progress` counts entries as they finish, so another thread can report how
+/// far the pack has got.
 #[cfg(feature = "native")]
 pub fn pack_manifest(
     manifest: &crate::manifest::ScanManifest,
     opts: &Options,
     cancel: Option<&AtomicBool>,
+    progress: Option<&AtomicUsize>,
     start: Option<Instant>,
 ) -> Result<Packed, Error> {
     let extract_opts = ExtractOpts::from_options(opts);
@@ -191,7 +197,13 @@ pub fn pack_manifest(
         manifest
             .entries
             .par_iter()
-            .flat_map(|entry| process_entry(entry, opts, &extract_opts, &bytes_read, cancel))
+            .flat_map(|entry| {
+                let files = process_entry(entry, opts, &extract_opts, &bytes_read, cancel);
+                if let Some(done) = progress {
+                    done.fetch_add(1, Ordering::SeqCst);
+                }
+                files
+            })
             .collect::<Vec<PackedFile>>()
     })?;
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
@@ -886,6 +898,23 @@ mod tests {
         assert!(msg.contains("17-byte"), "{msg}");
         assert!(msg.contains("one-line note"), "{msg}");
         assert!(msg.ends_with("invalid file header"), "{msg}");
+    }
+
+    #[test]
+    fn test_pack_manifest_with_progress_returns_one_count_per_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.rs"), b"fn a() {}\n");
+        write(&dir.path().join("b.rs"), b"fn b() {}\n");
+        write(&dir.path().join("paper.pdf"), b"%PDF-1.4 garbage");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            ..Options::default()
+        };
+        let manifest = crate::manifest::scan_manifest(&opts).unwrap();
+        let done = AtomicUsize::new(0);
+        let packed = pack_manifest(&manifest, &opts, None, Some(&done), None).unwrap();
+        assert_eq!(packed.files.len(), 3);
+        assert_eq!(done.load(Ordering::SeqCst), 3);
     }
 
     #[test]

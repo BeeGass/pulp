@@ -1,10 +1,12 @@
 //! Local mill: a localhost-only web UI over [`crate::pack`].
 
+use std::collections::HashSet;
 use std::io::{Cursor, ErrorKind};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use axum::extract::State;
@@ -20,7 +22,7 @@ use crate::config::{
 use crate::manifest::{self, ManifestEntry};
 use crate::pack;
 use crate::pick;
-use crate::store::{self, JobGuard, Mill, StoredResult};
+use crate::store::{self, JobGuard, Mill, PackJob, StoredResult};
 
 const INDEX: &str = include_str!("../web/index.html");
 
@@ -58,6 +60,7 @@ fn router_with(state: AppState) -> Router {
         .route("/api/preview", post(preview))
         .route("/api/render", post(render_dump))
         .route("/api/cancel", post(cancel_pack))
+        .route("/api/progress", get(progress))
         .route("/api/artifact/{id}", get(artifact))
         .route("/api/browse", post(browse))
         .route("/api/sample", post(sample))
@@ -439,6 +442,14 @@ struct BrowseResponse {
     cancelled: bool,
 }
 
+/// How far the running pack has got, in selected entries.
+#[derive(Debug, Serialize)]
+struct ProgressResponse {
+    running: bool,
+    done: usize,
+    total: usize,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
@@ -535,15 +546,33 @@ async fn pack_dump(
     let mill = Arc::clone(&state.mill);
     let job_worker = Arc::clone(&job);
     let result = tokio::task::spawn_blocking(move || {
-        let _guard = JobGuard {
+        let guard = JobGuard {
             mill: Arc::clone(&mill),
             job: job_worker,
         };
-        pack_sync(req, &mill)
+        pack_sync(req, &mill, &guard.job)
     })
     .await
     .map_err(|err| ApiError::bad(err.to_string()))?;
     result.map(Json)
+}
+
+/// Entries the running pack has finished, for a determinate progress rule.
+async fn progress(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
+    authorize(&state, &headers)?;
+    let body = match state.mill.pack_progress() {
+        Some((done, total)) => ProgressResponse {
+            running: true,
+            done,
+            total,
+        },
+        None => ProgressResponse {
+            running: false,
+            done: 0,
+            total: 0,
+        },
+    };
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response())
 }
 
 async fn render_dump(
@@ -641,7 +670,7 @@ fn scan_sync(req: ScanRequest, mill: &Mill) -> Result<ScanResponse, ApiError> {
     })
 }
 
-fn pack_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> {
+fn pack_sync(req: PackRequest, mill: &Mill, job: &PackJob) -> Result<PackResponse, ApiError> {
     if req.selected.is_empty() {
         return Err(ApiError::bad("tick at least one file"));
     }
@@ -651,15 +680,16 @@ fn pack_sync(req: PackRequest, mill: &Mill) -> Result<PackResponse, ApiError> {
     if let Some(hit) = mill.find_result(&manifest_id, &extract_key) {
         return finish_pack(hit, &opts, true);
     }
-    snapshot.entries.retain(|entry| {
-        req.selected
-            .iter()
-            .any(|id| id == &entry.id || id == &entry.relative)
-    });
-    let job = mill.current_job();
-    let cancel = job.as_ref().map(|j| &j.cancel);
-    let packed = pack::pack_manifest(&snapshot, &opts, cancel, Some(Instant::now()))
-        .map_err(|err| ApiError::bad(err.to_string()))?;
+    retain_selected(&mut snapshot.entries, &req.selected);
+    job.total.store(snapshot.entries.len(), Ordering::SeqCst);
+    let packed = pack::pack_manifest(
+        &snapshot,
+        &opts,
+        Some(&job.cancel),
+        Some(&job.done),
+        Some(Instant::now()),
+    )
+    .map_err(|err| ApiError::bad(err.to_string()))?;
     let stored = mill.put_result(StoredResult {
         id: store::new_id(),
         manifest_id,
@@ -741,6 +771,13 @@ fn load_or_scan_manifest(
     let manifest = manifest::scan_manifest(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
     let id = mill.put_manifest(discovery_key_pack(req), manifest.clone());
     Ok((id, manifest))
+}
+
+/// Keep the entries whose id or relative path the request ticked.
+fn retain_selected(entries: &mut Vec<ManifestEntry>, selected: &[String]) {
+    let want: HashSet<&str> = selected.iter().map(String::as_str).collect();
+    entries
+        .retain(|entry| want.contains(entry.id.as_str()) || want.contains(entry.relative.as_str()));
 }
 
 fn finish_pack(
@@ -990,11 +1027,7 @@ fn tree_sync(req: PackRequest, mill: &Mill) -> Result<TreeResponse, ApiError> {
     }
     let opts = options_from_pack(req.clone(), true, true)?;
     let (_, mut manifest) = load_or_scan_manifest(&req, mill)?;
-    manifest.entries.retain(|entry| {
-        req.selected
-            .iter()
-            .any(|id| id == &entry.id || id == &entry.relative)
-    });
+    retain_selected(&mut manifest.entries, &req.selected);
     let paths: Vec<String> = manifest
         .entries
         .iter()
@@ -1152,6 +1185,33 @@ mod tests {
             mill,
             sample: Arc::default(),
         })
+    }
+
+    async fn get(uri: &str) -> Response {
+        router()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn body_text(response: Response) -> String {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// GET with the session token, as the mill shell sends it.
+    async fn get_authorized(app: &Router, uri: &str) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::HOST, "127.0.0.1:8747")
+                    .header("x-pulp-token", TEST_TOKEN)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -1832,6 +1892,59 @@ mod tests {
         assert!(html.contains("/api/render"));
         assert!(html.contains("/api/cancel"));
         assert!(html.contains("/api/artifact/"));
+    }
+
+    #[tokio::test]
+    async fn test_progress_with_missing_token_returns_unauthorized() {
+        let response = get("/api/progress").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_progress_with_idle_mill_returns_not_running() {
+        let response = get_authorized(&router(), "/api/progress").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "running": false, "done": 0, "total": 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_progress_with_running_job_returns_done_and_total() {
+        let mill = Arc::new(Mill::new());
+        let job = mill.try_begin_pack().expect("pack slot");
+        job.total.store(41, Ordering::SeqCst);
+        job.done.store(23, Ordering::SeqCst);
+        let response = get_authorized(&router_with_mill(mill), "/api/progress").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "running": true, "done": 23, "total": 41 })
+        );
+    }
+
+    #[test]
+    fn test_pack_sync_with_two_files_returns_done_and_total_of_two() {
+        let mill = Mill::new();
+        let job = mill.try_begin_pack().expect("pack slot");
+        let req: PackRequest = serde_json::from_value(serde_json::json!({
+            "path": testdata().display().to_string(),
+            "gitignore": false,
+            "selected": ["hello.rs", "Hello.lean"]
+        }))
+        .unwrap();
+        let packed = pack_sync(req, &mill, &job).unwrap_or_else(|err| panic!("{}", err.message));
+        assert_eq!(packed.files_extracted, 2);
+        assert_eq!(job.total.load(Ordering::SeqCst), 2);
+        assert_eq!(job.done.load(Ordering::SeqCst), 2);
+        mill.end_pack(&job);
     }
 
     #[tokio::test]

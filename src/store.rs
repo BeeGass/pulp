@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::manifest::ScanManifest;
@@ -24,10 +24,14 @@ pub struct Mill {
     results: Mutex<Lru<Arc<StoredResult>>>,
 }
 
-/// One admitted pack job with its own cancel flag.
+/// One admitted pack job with its own cancel flag and progress.
 pub struct PackJob {
     pub id: u64,
     pub cancel: AtomicBool,
+    /// Selected entries this job has finished extracting.
+    pub done: AtomicUsize,
+    /// Selected entries this job extracts. Zero until extraction starts.
+    pub total: AtomicUsize,
 }
 
 /// Discovery snapshot keyed by [`StoredManifest::id`].
@@ -96,6 +100,8 @@ impl Mill {
         let job = Arc::new(PackJob {
             id: self.job_seq.fetch_add(1, Ordering::SeqCst),
             cancel: AtomicBool::new(false),
+            done: AtomicUsize::new(0),
+            total: AtomicUsize::new(0),
         });
         *self.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&job));
         Some(job)
@@ -125,6 +131,15 @@ impl Mill {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// `(done, total)` entries of the running pack job; `None` while idle.
+    pub fn pack_progress(&self) -> Option<(usize, usize)> {
+        let job = self.current_job()?;
+        // `total` is set before the first entry finishes, so reading `done`
+        // first never yields more done than total.
+        let done = job.done.load(Ordering::SeqCst);
+        Some((done, job.total.load(Ordering::SeqCst)))
     }
 
     /// Admit one preview. Previews have their own slot, so one runs beside a
@@ -291,6 +306,26 @@ mod tests {
         assert!(mill.try_begin_pack().is_none());
         assert!(job.cancel.load(Ordering::SeqCst));
         mill.end_pack(&job);
+    }
+
+    #[test]
+    fn test_pack_progress_with_running_job_returns_done_and_total() {
+        let mill = Mill::new();
+        assert_eq!(mill.pack_progress(), None);
+        let job = mill.try_begin_pack().expect("first");
+        assert_eq!(mill.pack_progress(), Some((0, 0)));
+        job.total.store(41, Ordering::SeqCst);
+        job.done.store(23, Ordering::SeqCst);
+        assert_eq!(mill.pack_progress(), Some((23, 41)));
+        mill.end_pack(&job);
+        assert_eq!(mill.pack_progress(), None);
+        let next = mill.try_begin_pack().expect("second");
+        assert_eq!(
+            mill.pack_progress(),
+            Some((0, 0)),
+            "a new job starts at zero"
+        );
+        mill.end_pack(&next);
     }
 
     #[test]
