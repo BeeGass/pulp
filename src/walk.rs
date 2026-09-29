@@ -1263,7 +1263,16 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let labels = root_labels(&[PathBuf::from("."), PathBuf::from("..")]);
         let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(labels, [name(&cwd), name(cwd.parent().unwrap())]);
+        let (here, up) = (name(&cwd), name(cwd.parent().unwrap()));
+        if here == up {
+            // A checkout in a folder of its own name, as CI's `pulp/pulp` is:
+            // both labels take a parent, and still end in the resolved names.
+            assert_ne!(labels[0], labels[1]);
+            assert!(labels[0].ends_with(&here), "{labels:?}");
+            assert!(labels[1].ends_with(&up), "{labels:?}");
+        } else {
+            assert_eq!(labels, [here, up]);
+        }
     }
 
     #[test]
