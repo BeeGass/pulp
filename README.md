@@ -67,7 +67,7 @@ cargo xtask site      # copy the shared mill UI from web/ into site/
 cargo xtask ui-test   # mill browser tests; needs Chrome or Chromium
 ```
 
-The mill's interface lives in `web/` (`pulp.css`, `mill.css`, `mill.js`, and the sample project). `pulp ui` embeds it; `cargo xtask site` copies it into `site/` for the browser mill, and `cargo xtask test` fails if the copies drift. Its browser tests live in `web/test/`: `cargo xtask ui-test` runs them, along with the landing page and the browser mill from `site/`, in headless Chrome or Chromium (`PULP_CHROME` picks the binary; `--serve` serves the pages to your own browser instead).
+The mill's interface lives in `web/` (`pulp.css`, `mill.css`, `mill.js`, and the sample project). `pulp ui` embeds it; `cargo xtask site` copies it into `site/` for the browser mill, and `cargo xtask test` fails if the copies drift. Its browser tests live in `web/test/`: `cargo xtask ui-test` runs them, along with the landing page and the browser mill from `site/`, in headless Chrome or Chromium (`PULP_CHROME` picks the binary; `--serve` serves the pages to your own browser instead). It also builds pulp and runs `web/test/local.test.html` against a real `pulp ui`, which it starts on a free port and stops afterwards.
 
 ---
 

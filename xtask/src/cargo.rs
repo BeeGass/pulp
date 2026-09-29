@@ -24,6 +24,13 @@ pub fn run(host: &Host, args: &[String]) -> anyhow::Result<()> {
 }
 
 pub fn status(host: &Host, args: &[String]) -> anyhow::Result<ExitStatus> {
+    command(host, args)
+        .status()
+        .with_context(|| format!("spawn cargo {}", args.join(" ")))
+}
+
+/// `cargo <args>` in the workspace root with this host's jobs and compiler env.
+pub fn command(host: &Host, args: &[String]) -> Command {
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     cmd.current_dir(workspace_root());
     cmd.args(args);
@@ -39,6 +46,5 @@ pub fn status(host: &Host, args: &[String]) -> anyhow::Result<ExitStatus> {
         };
         cmd.env("RUSTFLAGS", merged);
     }
-    cmd.status()
-        .with_context(|| format!("spawn cargo {}", args.join(" ")))
+    cmd
 }

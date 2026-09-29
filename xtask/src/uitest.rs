@@ -9,6 +9,12 @@
 //! A directory serves its `index.html`, so `/` is the landing page and `/mill/`
 //! the browser mill, both unmodified.
 //!
+//! A page that declares `<meta name="ui-test-server" content="pulp-ui">` runs on
+//! a second server instead, the mill origin: it serves `/web/` the same way and
+//! forwards every other path to a real `pulp ui` built from this checkout, so
+//! the page can open the local mill from the link pulp printed and drive it
+//! same-origin (see [`mill`]).
+//!
 //! Every `web/test/*.test.html` page runs in its own headless Chrome with a
 //! fresh profile. A page reports through `<pre id="results" data-status="…">`:
 //! one `PASS name` or `FAIL name` line per test, failure detail indented by two
@@ -20,6 +26,10 @@
 //! Chrome's virtual time is not used: it stalls the worker the browser mill
 //! packs in. Chrome can also stay up after printing, so it is stopped here as
 //! soon as the dump is complete.
+//!
+//! Chrome, `pulp ui`, and the run's scratch folder (Chrome profiles, the mill
+//! fixtures, pulp's temp files) are cleaned up when the run passes, fails, or
+//! is stopped by Ctrl-C or SIGTERM.
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
@@ -34,6 +44,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 
+use crate::host::Host;
+
+mod mill;
+
 /// Test pages live here, relative to the workspace root.
 const TEST_DIR: &str = "web/test";
 /// Longest a page may run before the server lets its load event fire.
@@ -44,6 +58,15 @@ const CHROME_GRACE: Duration = Duration::from_secs(30);
 const CHROME_STOP_GRACE: Duration = Duration::from_secs(3);
 const HOLD_PATH: &str = "/__ui-test/hold";
 const DONE_PATH: &str = "/__ui-test/done";
+/// The mill origin's folders for its test page, as JSON.
+const ENV_PATH: &str = "/__ui-test/env";
+/// Restarts `pulp ui` behind the mill origin.
+const RESTART_PATH: &str = "/__ui-test/restart";
+/// Holds the mill's progress polls, and lets them go.
+const HOLD_POLLS_PATH: &str = "/__ui-test/hold-polls";
+const RELEASE_POLLS_PATH: &str = "/__ui-test/release-polls";
+/// A page's `<meta name=…>` that picks its server.
+const SERVER_META: &str = "ui-test-server";
 const MAC_CHROME: &str = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 /// Browser names tried on `PATH`, in order.
 const PATH_CHROMES: &[&str] = &[
@@ -54,65 +77,113 @@ const PATH_CHROMES: &[&str] = &[
 ];
 /// Request line plus headers; anything longer is not a browser request.
 const MAX_HEAD: u64 = 64 * 1024;
+/// Largest request body read; the mill's largest is a pack of many file ids.
+const MAX_BODY: u64 = 16 * 1024 * 1024;
 
-/// Set by Ctrl-C or SIGTERM during a run, so Chrome and its profile are cleaned
-/// up instead of left running: headless Chrome does not exit on SIGINT.
+/// Set by Ctrl-C or SIGTERM during a run, so Chrome, `pulp ui`, and the scratch
+/// folder are cleaned up instead of left behind: headless Chrome does not exit
+/// on SIGINT, and `pulp ui` does not see a SIGTERM sent to this process.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
 /// Run every test page, or with `serve_only` keep serving for a browser.
-pub fn run(root: &Path, serve_only: bool) -> anyhow::Result<()> {
-    let pages = test_pages(root)?;
-    let server = Server::start(root)?;
-    if serve_only {
-        serve_forever(&server, &pages);
-    }
-    let chrome = find_chrome(
-        std::env::var_os("PULP_CHROME"),
-        std::env::var_os("PATH"),
-        cfg!(target_os = "macos"),
-    )?;
-    eprintln!("xtask ui-test: {} on {}", chrome.display(), server.url("/"));
+pub fn run(root: &Path, host: &Host, serve_only: bool) -> anyhow::Result<()> {
     catch_interrupts();
+    let pages = test_pages(root)?;
+    // Look for Chrome before building pulp, so a missing browser fails fast.
+    let chrome = if serve_only {
+        None
+    } else {
+        Some(find_chrome(
+            std::env::var_os("PULP_CHROME"),
+            std::env::var_os("PATH"),
+            cfg!(target_os = "macos"),
+        )?)
+    };
+
+    // Guards drop in reverse order: `pulp ui` stops before the scratch folder
+    // that holds its temp files is removed.
+    let scratch = Scratch::create()?;
+    let gate = Arc::new(Gate::default());
+    let site = Server::start(root, None, &gate)?;
+    let mill = if pages.iter().any(|page| page.behind == Behind::PulpUi) {
+        let running = mill::Mill::start(root, host, scratch.path())?;
+        let server = Server::start(root, Some(Arc::clone(running.mill())), &gate)?;
+        eprintln!(
+            "xtask ui-test: pulp ui on http://{}, behind {}",
+            running.mill().upstream(),
+            server.url("/")
+        );
+        Some((server, running))
+    } else {
+        None
+    };
+    let server_for = |page: &Page| match page.behind {
+        Behind::Site => Some(&site),
+        Behind::PulpUi => mill.as_ref().map(|(server, _)| server),
+    };
+
+    let Some(chrome) = chrome else {
+        let mill = mill
+            .as_ref()
+            .map(|(server, running)| (server, running.mill().as_ref()));
+        serve_until_interrupted(&pages, &site, mill);
+        return Ok(());
+    };
+    eprintln!("xtask ui-test: {} on {}", chrome.display(), site.url("/"));
 
     let started = Instant::now();
-    let scratch = private_scratch_dir()?;
     let (mut passed, mut failed, mut broken) = (0, 0, 0);
     for (index, page) in pages.iter().enumerate() {
-        println!("{TEST_DIR}/{page}");
-        server.gate.set(false);
-        let url = server.url(&format!("/{TEST_DIR}/{page}"));
+        let server = server_for(page).context("no server for a pulp ui page")?;
+        match page.behind {
+            Behind::Site => println!("{TEST_DIR}/{}", page.name),
+            Behind::PulpUi => println!("{TEST_DIR}/{} (real pulp ui)", page.name),
+        }
+        gate.set(false);
+        let url = server.url(&format!("/{TEST_DIR}/{}", page.name));
         let dom = dump_dom(
             &chrome,
             &url,
-            &scratch.join(index.to_string()),
+            &scratch.path().join(index.to_string()),
             PAGE_BUDGET + CHROME_GRACE,
         );
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            remove_dir_eventually(&scratch);
-            bail!("ui-test interrupted; Chrome stopped and its profile removed");
+        if interrupted() {
+            bail!("ui-test interrupted; Chrome and pulp ui stopped, scratch files removed");
         }
-        let results = match dom {
-            Ok(dom) => parse_results(&dom),
+        let clean = match dom.map(|dom| parse_results(&dom)) {
             Err(err) => {
                 broken += 1;
                 println!("  FAIL {err:#}");
-                continue;
+                false
+            }
+            Ok(None) => {
+                broken += 1;
+                println!("  FAIL no results block; the test page failed before it could report");
+                false
+            }
+            Ok(Some(results)) => {
+                print_results(&results);
+                passed += results.passed();
+                failed += results.failed();
+                let problem = page_problem(&results);
+                if let Some(problem) = &problem {
+                    broken += 1;
+                    println!("  FAIL {problem}");
+                }
+                results.is_pass() && problem.is_none()
             }
         };
-        let Some(results) = results else {
-            broken += 1;
-            println!("  FAIL no results block; the test page failed before it could report");
-            continue;
-        };
-        print_results(&results);
-        passed += results.passed();
-        failed += results.failed();
-        if let Some(problem) = page_problem(&results) {
-            broken += 1;
-            println!("  FAIL {problem}");
+        if !clean && let (Behind::PulpUi, Some((_, running))) = (page.behind, &mill) {
+            println!("  pulp ui log:");
+            for line in running.mill().log().lines() {
+                println!("    {line}");
+            }
         }
     }
-    remove_dir_eventually(&scratch);
 
     let secs = started.elapsed().as_secs_f64();
     eprintln!("xtask ui-test: {passed} passed, {failed} failed in {secs:.1}s");
@@ -122,9 +193,9 @@ pub fn run(root: &Path, serve_only: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Turn Ctrl-C and SIGTERM into a flag the run loop checks, so it can stop
-/// Chrome and remove the profile before exiting. Without a handler the process
-/// would die at once and leave Chrome running.
+/// Turn Ctrl-C and SIGTERM into a flag the run checks, so it can stop Chrome
+/// and `pulp ui` and remove the scratch folder before exiting. Without a
+/// handler the process would die at once and leave them behind.
 fn catch_interrupts() {
     for signal in [libc::SIGINT, libc::SIGTERM] {
         // SAFETY: the action only stores to an atomic, which is async-signal-safe.
@@ -134,6 +205,25 @@ fn catch_interrupts() {
         if let Err(err) = registered {
             eprintln!("xtask ui-test: cannot catch signal {signal}: {err}");
         }
+    }
+}
+
+/// The run's private scratch folder, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn create() -> anyhow::Result<Self> {
+        private_scratch_dir().map(Self)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        remove_dir_eventually(&self.0);
     }
 }
 
@@ -164,67 +254,127 @@ pub(crate) fn private_scratch_dir() -> anyhow::Result<PathBuf> {
     bail!("could not create a scratch folder in {}", temp.display())
 }
 
-fn serve_forever(server: &Server, pages: &[String]) -> ! {
+/// Serve until Ctrl-C or SIGTERM, then return so the caller cleans up.
+fn serve_until_interrupted(pages: &[Page], site: &Server, mill: Option<(&Server, &mill::Mill)>) {
     // Nobody reads the dump here, so pages load without waiting on the gate.
-    server.gate.set(true);
-    eprintln!(
-        "xtask ui-test: serving web/ and site/ at {}",
-        server.url("/")
-    );
+    site.gate.set(true);
+    eprintln!("xtask ui-test: serving web/ and site/ at {}", site.url("/"));
     for page in pages {
-        eprintln!("  {}", server.url(&format!("/{TEST_DIR}/{page}")));
+        match (page.behind, mill) {
+            (Behind::PulpUi, Some((mill, _))) => eprintln!(
+                "  {}  against pulp ui",
+                mill.url(&format!("/{TEST_DIR}/{}", page.name))
+            ),
+            _ => eprintln!("  {}", site.url(&format!("/{TEST_DIR}/{}", page.name))),
+        }
     }
-    eprintln!("  {}  landing page", server.url("/"));
-    eprintln!("  {}  browser mill", server.url("/mill/"));
-    eprintln!("Ctrl-C stops the server.");
-    loop {
-        thread::park();
+    eprintln!("  {}  landing page", site.url("/"));
+    eprintln!("  {}  browser mill", site.url("/mill/"));
+    if let Some((server, mill)) = mill {
+        eprintln!("  {}  local mill, a real pulp ui", server.url(&mill.page()));
+    }
+    eprintln!("Ctrl-C stops the servers.");
+    while !interrupted() {
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// `*.test.html` file names under `web/test/`, sorted.
-fn test_pages(root: &Path) -> anyhow::Result<Vec<String>> {
+/// A test page and the server it runs on.
+#[derive(Debug, PartialEq, Eq)]
+struct Page {
+    /// File name under `web/test/`.
+    name: String,
+    behind: Behind,
+}
+
+/// `*.test.html` pages under `web/test/`, sorted by name.
+fn test_pages(root: &Path) -> anyhow::Result<Vec<Page>> {
     let dir = root.join(TEST_DIR);
     let entries = std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))?;
-    let mut pages: Vec<String> = entries
+    let mut names: Vec<String> = entries
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| name.ends_with(".test.html"))
         .collect();
-    pages.sort();
-    if pages.is_empty() {
+    names.sort();
+    if names.is_empty() {
         bail!("no *.test.html pages in {}", dir.display());
     }
-    Ok(pages)
+    names
+        .into_iter()
+        .map(|name| {
+            let path = dir.join(&name);
+            let html = std::fs::read_to_string(&path)
+                .with_context(|| format!("read {}", path.display()))?;
+            let behind = page_server(&html).with_context(|| format!("{TEST_DIR}/{name}"))?;
+            Ok(Page { name, behind })
+        })
+        .collect()
 }
 
-/* ---------- static server ---------- */
+/// The server a page asks for with `<meta name="ui-test-server" content="…">`,
+/// written with double quotes; the static site server when it asks for none.
+fn page_server(html: &str) -> anyhow::Result<Behind> {
+    let mut from = 0;
+    while let Some(found) = html[from..].find("<meta") {
+        let start = from + found;
+        let Some(len) = html[start..].find('>') else {
+            break;
+        };
+        let tag = &html[start..start + len];
+        from = start + len;
+        if attr(tag, "name").as_deref() != Some(SERVER_META) {
+            continue;
+        }
+        return match attr(tag, "content").as_deref() {
+            Some("pulp-ui") => Ok(Behind::PulpUi),
+            other => bail!("unknown {SERVER_META} {other:?}; the one choice is \"pulp-ui\""),
+        };
+    }
+    Ok(Behind::Site)
+}
 
-/// Serves `web/` and `site/` on an ephemeral 127.0.0.1 port until the process exits.
+/* ---------- server ---------- */
+
+/// What answers the requests a server does not handle itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Behind {
+    /// Files from `site/`, laid out as the site deploys.
+    Site,
+    /// A running `pulp ui`, reached through [`mill::Mill::forward`].
+    PulpUi,
+}
+
+/// Serves `web/`, and `site/` or a forward to `pulp ui`, on an ephemeral
+/// 127.0.0.1 port until the process exits.
 struct Server {
     addr: SocketAddr,
     gate: Arc<Gate>,
 }
 
 impl Server {
-    fn start(root: &Path) -> anyhow::Result<Self> {
+    /// Start a server; with a `mill` it forwards to `pulp ui` instead of serving `site/`.
+    fn start(root: &Path, mill: Option<Arc<mill::Mill>>, gate: &Arc<Gate>) -> anyhow::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").context("bind the ui-test server")?;
         let addr = listener.local_addr()?;
-        let gate = Arc::new(Gate::default());
         let root = root.to_path_buf();
-        let shared = Arc::clone(&gate);
+        let shared = Arc::clone(gate);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let root = root.clone();
                 let gate = Arc::clone(&shared);
+                let mill = mill.clone();
                 thread::spawn(move || {
                     // A browser that drops a connection early is not a test failure.
-                    let _ = handle(stream, &root, &gate);
+                    let _ = handle(stream, &root, &gate, mill.as_deref(), addr);
                 });
             }
         });
-        Ok(Self { addr, gate })
+        Ok(Self {
+            addr,
+            gate: Arc::clone(gate),
+        })
     }
 
     fn url(&self, path: &str) -> String {
@@ -260,14 +410,30 @@ enum Reply {
     File(PathBuf),
     Hold,
     Done,
+    /// The mill origin's fixtures, as JSON.
+    Env,
+    /// Restart `pulp ui`.
+    Restart,
+    /// Hold progress polls until one is held.
+    HoldPolls,
+    /// Let progress polls through.
+    ReleasePolls,
+    /// Send the request on to `pulp ui`.
+    Forward,
     Status(u16),
 }
 
-fn route(root: &Path, method: &str, target: &str) -> Reply {
+fn route(root: &Path, behind: Behind, method: &str, target: &str) -> Reply {
     let path = target.split(['?', '#']).next().unwrap_or_default();
+    let harness = path == "/web" || path.starts_with("/web/") || path.starts_with("/__ui-test/");
     match (method, path) {
         ("GET", HOLD_PATH) => Reply::Hold,
         ("POST", DONE_PATH) => Reply::Done,
+        ("GET", ENV_PATH) if behind == Behind::PulpUi => Reply::Env,
+        ("POST", RESTART_PATH) if behind == Behind::PulpUi => Reply::Restart,
+        ("POST", HOLD_POLLS_PATH) if behind == Behind::PulpUi => Reply::HoldPolls,
+        ("POST", RELEASE_POLLS_PATH) if behind == Behind::PulpUi => Reply::ReleasePolls,
+        _ if behind == Behind::PulpUi && !harness => Reply::Forward,
         ("GET" | "HEAD", _) => match resolve(root, target) {
             Some(file) if file.is_dir() => Reply::File(file.join("index.html")),
             Some(file) => Reply::File(file),
@@ -335,83 +501,196 @@ fn content_type(path: &Path) -> &'static str {
     }
 }
 
-fn handle(stream: TcpStream, root: &Path, gate: &Gate) -> io::Result<()> {
+/// Answer one request. `mill` is set on the mill origin, whose own address is `own`.
+fn handle(
+    stream: TcpStream,
+    root: &Path,
+    gate: &Gate,
+    mill: Option<&mill::Mill>,
+    own: SocketAddr,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
-    let (method, target, body_len) = {
-        let mut head = (&mut reader).take(MAX_HEAD);
-        let mut line = String::new();
-        head.read_line(&mut line)?;
-        let mut parts = line.split_whitespace();
-        let method = parts.next().unwrap_or_default().to_string();
-        let target = parts.next().unwrap_or_default().to_string();
-        (method, target, read_headers(&mut head)?)
-    };
-    // Read any body so closing the socket does not reset the browser's request.
-    io::copy(&mut (&mut reader).take(body_len), &mut io::sink())?;
+    let head = read_head(&mut (&mut reader).take(MAX_HEAD))?;
+    let head_only = head.method == "HEAD";
+    if head.header("transfer-encoding").is_some() {
+        return respond(stream, 501, "text/plain", b"send a Content-Length\n", false);
+    }
+    if head.content_length() > MAX_BODY {
+        return respond(stream, 413, "text/plain", b"request too large\n", false);
+    }
+    // Read the whole body, so it can be forwarded and so closing the socket
+    // does not reset the browser's request.
+    let mut body = Vec::new();
+    (&mut reader)
+        .take(head.content_length())
+        .read_to_end(&mut body)?;
 
-    let head_only = method == "HEAD";
-    match route(root, &method, &target) {
-        Reply::File(file) => match std::fs::read(&file) {
-            Ok(body) => respond(stream, 200, content_type(&file), &body, head_only),
-            Err(_) => respond(stream, 404, "text/plain", b"not found\n", head_only),
+    let behind = if mill.is_some() {
+        Behind::PulpUi
+    } else {
+        Behind::Site
+    };
+    // The mill origin's own pages carry pulp's opener policy, so a test page
+    // keeps its handle on the mill window it opens.
+    let extra = mill
+        .and_then(mill::Mill::opener_policy)
+        .map(|policy| format!("Cross-Origin-Opener-Policy: {policy}\r\n"))
+        .unwrap_or_default();
+    let answer = |stream, status, content_type: &str, body: &[u8], head_only| {
+        respond_with(stream, status, content_type, body, head_only, &extra)
+    };
+    match (route(root, behind, &head.method, &head.target), mill) {
+        (Reply::File(file), _) => match std::fs::read(&file) {
+            Ok(body) => answer(stream, 200, content_type(&file), &body, head_only),
+            Err(_) => answer(stream, 404, "text/plain", b"not found\n", head_only),
         },
-        Reply::Hold => {
+        (Reply::Hold, _) => {
             gate.wait(PAGE_BUDGET);
-            respond(stream, 200, "text/html; charset=utf-8", b"", false)
+            answer(stream, 200, "text/html; charset=utf-8", b"", false)
         }
-        Reply::Done => {
+        (Reply::Done, _) => {
             gate.set(true);
-            respond(stream, 200, "text/plain", b"done\n", false)
+            answer(stream, 200, "text/plain", b"done\n", false)
         }
-        Reply::Status(code) => {
+        (Reply::Env, Some(mill)) => answer(
+            stream,
+            200,
+            "application/json",
+            mill.env().as_bytes(),
+            false,
+        ),
+        (Reply::Restart, Some(mill)) => match mill.restart() {
+            Ok(()) => answer(
+                stream,
+                200,
+                "application/json",
+                b"{\"restarted\":true}",
+                false,
+            ),
+            Err(err) => answer(
+                stream,
+                500,
+                "text/plain; charset=utf-8",
+                format!("{err:#}\n").as_bytes(),
+                false,
+            ),
+        },
+        (Reply::HoldPolls, Some(mill)) => {
+            let held = mill.hold_polls(Duration::from_secs(10));
+            let json = format!("{{\"held\":{held}}}");
+            answer(stream, 200, "application/json", json.as_bytes(), false)
+        }
+        (Reply::ReleasePolls, Some(mill)) => {
+            mill.release_polls();
+            answer(
+                stream,
+                200,
+                "application/json",
+                b"{\"released\":true}",
+                false,
+            )
+        }
+        (Reply::Forward, Some(mill)) => mill.forward(stream, &head, &body, own),
+        (
+            Reply::Env | Reply::Restart | Reply::HoldPolls | Reply::ReleasePolls | Reply::Forward,
+            None,
+        ) => answer(stream, 404, "text/plain", b"not found\n", head_only),
+        (Reply::Status(code), _) => {
             let body: &[u8] = if code == 404 {
                 b"not found\n"
             } else {
                 b"method not allowed\n"
             };
-            respond(stream, code, "text/plain", body, head_only)
+            answer(stream, code, "text/plain", body, head_only)
         }
     }
 }
 
-/// Consume header lines and return the request's `Content-Length`.
-fn read_headers(head: &mut impl BufRead) -> io::Result<u64> {
-    let mut body_len = 0;
+/// A request's first line and headers.
+#[derive(Debug)]
+struct Head {
+    method: String,
+    target: String,
+    /// Header names and values in the order sent, names as the client wrote them.
+    headers: Vec<(String, String)>,
+}
+
+impl Head {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn content_length(&self) -> u64 {
+        self.header("content-length")
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0)
+    }
+}
+
+/// Read the request line and headers, up to the blank line that ends them.
+fn read_head(head: &mut impl BufRead) -> io::Result<Head> {
+    let mut line = String::new();
+    head.read_line(&mut line)?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let target = parts.next().unwrap_or_default().to_string();
+    let mut headers = Vec::new();
     loop {
         let mut line = String::new();
         if head.read_line(&mut line)? == 0 {
-            return Ok(body_len);
+            break;
         }
         let line = line.trim_end();
         if line.is_empty() {
-            return Ok(body_len);
+            break;
         }
-        let length = line
-            .split_once(':')
-            .filter(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"));
-        if let Some((_, value)) = length {
-            body_len = value.trim().parse().unwrap_or(0);
+        if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_string(), value.trim().to_string()));
         }
     }
+    Ok(Head {
+        method,
+        target,
+        headers,
+    })
 }
 
 fn respond(
-    mut stream: TcpStream,
+    stream: TcpStream,
     status: u16,
     content_type: &str,
     body: &[u8],
     head_only: bool,
 ) -> io::Result<()> {
+    respond_with(stream, status, content_type, body, head_only, "")
+}
+
+/// [`respond`] with `extra` header lines, each ending in CRLF.
+fn respond_with(
+    mut stream: TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+    extra: &str,
+) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Content Too Large",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
         _ => "Error",
     };
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
-         Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+         Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{extra}Connection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes())?;
@@ -473,6 +752,12 @@ fn chrome_args(url: &str, profile: &Path) -> Vec<OsString> {
         "--disable-component-update",
         "--use-mock-keychain",
         "--window-size=1440,1000",
+        // The local mill page opens the shell in windows of its own; neither
+        // those windows nor the page behind them get slowed timers.
+        "--disable-popup-blocking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
     ]
     .into_iter()
     .map(OsString::from)
@@ -516,7 +801,7 @@ fn dump_dom(chrome: &Path, url: &str, profile: &Path, timeout: Duration) -> anyh
     // Wait in short slices so an interrupt stops Chrome promptly.
     let deadline = Instant::now() + timeout;
     let dom = loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
+        if interrupted() {
             stop_group(&mut child, CHROME_STOP_GRACE);
             bail!("interrupted");
         }
@@ -536,6 +821,29 @@ fn dump_dom(chrome: &Path, url: &str, profile: &Path, timeout: Duration) -> anyh
         }
         Err(_) => bail!("Chrome printed nothing within {}s", timeout.as_secs()),
     }
+}
+
+/// Stop a child process: SIGTERM, then a kill once `grace` runs out. SIGTERM
+/// lets `pulp ui` finish open requests and remove its sample folder.
+fn stop(child: &mut Child, grace: Duration) {
+    #[cfg(unix)]
+    {
+        // The child is not reaped before this, so its pid is still its own.
+        let asked = libc::pid_t::try_from(child.id())
+            // SAFETY: kill(2) takes two integers and touches no memory of ours.
+            .is_ok_and(|pid| unsafe { libc::kill(pid, libc::SIGTERM) } == 0);
+        let deadline = Instant::now() + grace;
+        while asked && Instant::now() < deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = grace;
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Stop a child that leads its own process group, and every process in it.
@@ -771,6 +1079,14 @@ fn unescape(text: &str) -> String {
     out
 }
 
+/// Serializes the tests that run code which checks [`INTERRUPTED`], since one
+/// of them sets it.
+#[cfg(test)]
+fn interrupt_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,20 +1175,134 @@ mod tests {
     fn test_route_with_directory_serves_its_index() {
         let root = root();
         let file = |rel| Reply::File(under(&root, rel));
-        assert_eq!(route(&root, "GET", "/"), file("site/index.html"));
-        assert_eq!(route(&root, "GET", "/mill"), file("site/mill/index.html"));
-        assert_eq!(route(&root, "GET", "/mill/"), file("site/mill/index.html"));
-        assert_eq!(route(&root, "HEAD", "/web/mill.js"), file("web/mill.js"));
+        assert_eq!(
+            route(&root, Behind::Site, "GET", "/"),
+            file("site/index.html")
+        );
+        assert_eq!(
+            route(&root, Behind::Site, "GET", "/mill"),
+            file("site/mill/index.html")
+        );
+        assert_eq!(
+            route(&root, Behind::Site, "GET", "/mill/"),
+            file("site/mill/index.html")
+        );
+        assert_eq!(
+            route(&root, Behind::Site, "HEAD", "/web/mill.js"),
+            file("web/mill.js")
+        );
     }
 
     #[test]
     fn test_route_with_gate_and_bad_requests_returns_matching_replies() {
         let root = root();
-        assert_eq!(route(&root, "GET", "/__ui-test/hold"), Reply::Hold);
-        assert_eq!(route(&root, "POST", "/__ui-test/done"), Reply::Done);
-        assert_eq!(route(&root, "POST", "/pulp.css"), Reply::Status(405));
-        assert_eq!(route(&root, "DELETE", "/"), Reply::Status(405));
-        assert_eq!(route(&root, "GET", "/../Cargo.toml"), Reply::Status(404));
+        assert_eq!(
+            route(&root, Behind::Site, "GET", "/__ui-test/hold"),
+            Reply::Hold
+        );
+        assert_eq!(
+            route(&root, Behind::Site, "POST", "/__ui-test/done"),
+            Reply::Done
+        );
+        assert_eq!(
+            route(&root, Behind::Site, "POST", "/pulp.css"),
+            Reply::Status(405)
+        );
+        assert_eq!(
+            route(&root, Behind::Site, "DELETE", "/"),
+            Reply::Status(405)
+        );
+        assert_eq!(
+            route(&root, Behind::Site, "GET", "/../Cargo.toml"),
+            Reply::Status(404)
+        );
+    }
+
+    #[test]
+    fn test_route_behind_pulp_ui_serves_web_and_gate_and_forwards_the_rest() {
+        let root = root();
+        let pulp = |method, target| route(&root, Behind::PulpUi, method, target);
+        let file = |rel| Reply::File(under(&root, rel));
+        assert_eq!(pulp("GET", "/"), Reply::Forward);
+        assert_eq!(pulp("GET", "/mill.js?v=1"), Reply::Forward);
+        assert_eq!(pulp("POST", "/api/scan"), Reply::Forward);
+        assert_eq!(pulp("GET", "/api/artifact/r1?format=xml"), Reply::Forward);
+        assert_eq!(pulp("DELETE", "/api/pack"), Reply::Forward);
+        assert_eq!(pulp("GET", "/webfonts/a.css"), Reply::Forward);
+        assert_eq!(
+            pulp("GET", "/web/test/harness.js"),
+            file("web/test/harness.js")
+        );
+        assert_eq!(pulp("GET", "/__ui-test/hold"), Reply::Hold);
+        assert_eq!(pulp("POST", "/__ui-test/done"), Reply::Done);
+        assert_eq!(pulp("GET", "/__ui-test/env"), Reply::Env);
+        assert_eq!(pulp("POST", "/__ui-test/restart"), Reply::Restart);
+        assert_eq!(pulp("POST", "/__ui-test/hold-polls"), Reply::HoldPolls);
+        assert_eq!(
+            pulp("POST", "/__ui-test/release-polls"),
+            Reply::ReleasePolls
+        );
+        assert_eq!(
+            pulp("GET", "/__ui-test/restart"),
+            file("site/__ui-test/restart")
+        );
+        assert_eq!(pulp("POST", "/web/mill.js"), Reply::Status(405));
+        // The site server knows nothing of pulp ui.
+        let site = |method, target| route(&root, Behind::Site, method, target);
+        assert_eq!(site("GET", "/__ui-test/env"), file("site/__ui-test/env"));
+        assert_eq!(site("POST", "/__ui-test/restart"), Reply::Status(405));
+        assert_eq!(site("POST", "/api/scan"), Reply::Status(405));
+    }
+
+    #[test]
+    fn test_read_head_with_headers_keeps_names_values_and_length() {
+        let raw = "POST /api/pack HTTP/1.1\r\nHost: 127.0.0.1:1\r\nX-Pulp-Token:  abc \r\n\
+                   content-length: 13\r\nbroken line\r\n\r\n{\"body\":true}";
+        let mut reader = BufReader::new(raw.as_bytes());
+        let head = read_head(&mut reader).unwrap();
+        assert_eq!(
+            (head.method.as_str(), head.target.as_str()),
+            ("POST", "/api/pack")
+        );
+        assert_eq!(head.header("x-pulp-token"), Some("abc"));
+        assert_eq!(head.header("HOST"), Some("127.0.0.1:1"));
+        assert_eq!(head.content_length(), 13);
+        assert_eq!(head.headers.len(), 3, "a line without a colon is dropped");
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        assert_eq!(body, "{\"body\":true}", "the body is left unread");
+    }
+
+    #[test]
+    fn test_page_server_with_meta_tags_picks_the_server() {
+        let pulp =
+            r#"<head><meta charset="utf-8"><meta name="ui-test-server" content="pulp-ui"></head>"#;
+        assert_eq!(page_server(pulp).unwrap(), Behind::PulpUi);
+        assert_eq!(
+            page_server(r#"<meta name="viewport" content="width=device-width">"#).unwrap(),
+            Behind::Site
+        );
+        assert_eq!(page_server("<html></html>").unwrap(), Behind::Site);
+        let unknown = page_server(r#"<meta name="ui-test-server" content="nginx">"#);
+        assert!(unknown.unwrap_err().to_string().contains("pulp-ui"));
+    }
+
+    #[test]
+    fn test_test_pages_with_web_test_finds_each_page_and_its_server() {
+        let pages = test_pages(&root()).unwrap();
+        let find = |name: &str| {
+            pages
+                .iter()
+                .find(|page| page.name == name)
+                .map(|page| page.behind)
+        };
+        assert_eq!(find("mill.test.html"), Some(Behind::Site));
+        assert_eq!(find("pages.test.html"), Some(Behind::Site));
+        assert_eq!(find("local.test.html"), Some(Behind::PulpUi));
+        let names: Vec<&str> = pages.iter().map(|page| page.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
     }
 
     #[test]
@@ -904,7 +1334,7 @@ mod tests {
 
     #[test]
     fn test_server_with_real_requests_serves_files_and_refuses_traversal() {
-        let server = Server::start(&root()).unwrap();
+        let server = Server::start(&root(), None, &Arc::default()).unwrap();
         let page = get(&server, "GET /web/mill.js HTTP/1.1\r\nHost: t\r\n\r\n");
         assert!(page.starts_with("HTTP/1.1 200 OK\r\n"), "{page:.80}");
         assert!(page.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
@@ -930,7 +1360,7 @@ mod tests {
 
     #[test]
     fn test_server_with_hold_waits_until_the_page_is_done() {
-        let server = Server::start(&root()).unwrap();
+        let server = Server::start(&root(), None, &Arc::default()).unwrap();
         server.gate.set(false);
         let addr = server.addr;
         let (tx, rx) = mpsc::channel();
@@ -1000,6 +1430,7 @@ mod tests {
     #[test]
     fn test_dump_dom_when_interrupted_stops_the_browser_promptly() {
         use std::os::unix::fs::PermissionsExt;
+        let _serial = interrupt_lock();
         let dir = private_scratch_dir().unwrap();
         // A stand-in browser that never prints and ignores SIGINT, as headless Chrome does.
         let fake = dir.join("fake-chrome");

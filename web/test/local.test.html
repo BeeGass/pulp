@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- This page runs against a real pulp ui: cargo xtask ui-test serves it from
+       the mill origin, which forwards every path outside /web/ and /__ui-test/
+       to pulp. The tests open the mill in windows of their own, from the link
+       pulp printed, as a person does. -->
+  <meta name="ui-test-server" content="pulp-ui">
+  <title>local mill tests</title>
+  <link rel="icon" href="data:,">
+  <style>
+    body { margin: 16px; }
+    #results { margin: 0 0 16px; font: 12px/1.5 monospace; white-space: pre-wrap; }
+    #results[data-status="fail"] { color: #b3261e; }
+  </style>
+</head>
+<body>
+  <!-- Run with `cargo xtask ui-test`, or open by hand from `cargo xtask ui-test --serve`. -->
+  <pre id="results" data-status="running"></pre>
+  <!-- Headless Chrome prints this page when its load event fires; the server
+       answers this frame once the tests post /__ui-test/done. -->
+  <iframe src="/__ui-test/hold" hidden title="test gate"></iframe>
+  <script type="module" src="/web/test/harness.js"></script>
+  <script type="module" src="/web/test/local.test.js"></script>
+</body>
+</html>

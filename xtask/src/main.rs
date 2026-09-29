@@ -48,9 +48,11 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// Run the mill's browser tests (web/test/) in headless Chrome or Chromium.
+    /// Run the mill's browser tests (web/test/) in headless Chrome or Chromium,
+    /// including the local mill's tests against a real `pulp ui`.
     UiTest {
-        /// Serve web/ and site/ for a browser of your own instead of running Chrome.
+        /// Serve web/, site/, and the local mill for a browser of your own
+        /// instead of running Chrome.
         #[arg(long)]
         serve: bool,
     },
@@ -72,7 +74,7 @@ fn main() -> anyhow::Result<()> {
         Command::Fmt { check } => fmt(&host, check),
         Command::Ui { port, no_open } => ui(&host, port, no_open),
         Command::Site { check } => sync_site(check),
-        Command::UiTest { serve } => uitest::run(&cargo::workspace_root(), serve),
+        Command::UiTest { serve } => uitest::run(&cargo::workspace_root(), &host, serve),
         Command::Run { args } => run_bin(&host, &args),
     }
 }
