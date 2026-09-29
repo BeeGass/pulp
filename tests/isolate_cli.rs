@@ -79,6 +79,57 @@ fn test_pulp_cli_with_corrupt_pdf_and_docx_returns_notes_and_unreadable_count() 
     assert!(summary.trim_end().ends_with(", 2 unreadable"), "{summary}");
 }
 
+const DOWNLOAD_PAGE: &[u8] = b"<html><head><title>Preparing to download ...</title></head>\
+    <body><p>Your download will start in a moment.</p></body></html>\n";
+
+const DOWNLOAD_NOTE: &str = "not a PDF: it holds an HTML page (\"Preparing to download ...\")";
+
+#[test]
+fn test_pulp_extract_child_with_html_page_named_pdf_returns_unreadable_exit_and_note() {
+    use std::io::Write;
+    let exe = env!("CARGO_BIN_EXE_pulp");
+    let mut child = Command::new(exe)
+        .args(["__extract", "--stdin", "--kind", "pdf"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pulp __extract");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(DOWNLOAD_PAGE)
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        DOWNLOAD_NOTE
+    );
+}
+
+#[test]
+fn test_pulp_cli_isolated_with_html_page_named_pdf_returns_note_saying_so() {
+    let exe = env!("CARGO_BIN_EXE_pulp");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("downloads");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("report.pdf"), DOWNLOAD_PAGE).unwrap();
+    let out = dir.path().join("dump.txt");
+    let output = Command::new(exe)
+        .env("PULP_ISOLATE", "1")
+        .args(["-o", out.to_str().unwrap(), root.to_str().unwrap()])
+        .output()
+        .expect("spawn pulp");
+    assert!(output.status.success(), "{output:?}");
+    let dump = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        dump.contains(&format!("[pdf unreadable: {DOWNLOAD_NOTE}]")),
+        "{dump}"
+    );
+}
+
 #[test]
 fn test_pulp_extract_child_with_hello_rs_prints_source() {
     let exe = env!("CARGO_BIN_EXE_pulp");
