@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::io::{Cursor, ErrorKind};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -510,7 +510,7 @@ async fn browse(
         .map_err(ApiError::bad)?;
     match chosen {
         Some(path) => Ok(Json(BrowseResponse {
-            path: Some(path.display().to_string()),
+            path: Some(shorten_home(&path, home_dir().as_deref())),
             cancelled: false,
         })),
         None => Ok(Json(BrowseResponse {
@@ -1132,6 +1132,20 @@ fn expand_tilde(raw: &str) -> PathBuf {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// `path` with `home` written as `~`, the form [`expand_tilde`] reads back.
+/// A path outside `home`, or any path when `home` is unknown or the filesystem
+/// root, comes back unchanged.
+fn shorten_home(path: &Path, home: Option<&Path>) -> String {
+    let rest = home
+        .filter(|home| home.parent().is_some())
+        .and_then(|home| path.strip_prefix(home).ok());
+    match rest {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -1892,6 +1906,146 @@ mod tests {
         assert!(html.contains("/api/render"));
         assert!(html.contains("/api/cancel"));
         assert!(html.contains("/api/artifact/"));
+    }
+
+    #[cfg(unix)]
+    fn stub_pick_in_home() -> Result<Option<PathBuf>, String> {
+        Ok(home_dir().map(|home| home.join("Projects").join("pulp")))
+    }
+
+    // These two need a home folder and `/` separators.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_browse_with_folder_in_home_returns_tilde_path() {
+        if home_dir().is_none() {
+            return;
+        }
+        let app = router_with(AppState {
+            pick: stub_pick_in_home,
+            token: Arc::from(TEST_TOKEN),
+            origin: Arc::from(TEST_ORIGIN),
+            mill: Arc::new(Mill::new()),
+            sample: Arc::default(),
+        });
+        let (status, json) = post_to(&app, "/api/browse", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["path"].as_str(), Some("~/Projects/pulp"), "{json}");
+    }
+
+    #[test]
+    fn test_shorten_home_with_path_inside_home_returns_tilde_path() {
+        let home = Path::new("/Users/bee");
+        assert_eq!(
+            shorten_home(Path::new("/Users/bee/Projects/pulp"), Some(home)),
+            "~/Projects/pulp"
+        );
+        // The macOS picker ends a folder with a slash.
+        assert_eq!(
+            shorten_home(Path::new("/Users/bee/Projects/pulp/"), Some(home)),
+            "~/Projects/pulp"
+        );
+    }
+
+    #[test]
+    fn test_shorten_home_with_home_itself_returns_tilde() {
+        let home = Path::new("/Users/bee");
+        assert_eq!(shorten_home(Path::new("/Users/bee"), Some(home)), "~");
+        assert_eq!(shorten_home(Path::new("/Users/bee/"), Some(home)), "~");
+    }
+
+    #[test]
+    fn test_shorten_home_with_path_outside_home_returns_path_unchanged() {
+        let home = Path::new("/Users/bee");
+        assert_eq!(
+            shorten_home(Path::new("/Volumes/data/pulp"), Some(home)),
+            "/Volumes/data/pulp"
+        );
+        // A shared name prefix is not a parent folder.
+        assert_eq!(
+            shorten_home(Path::new("/Users/beegass/pulp"), Some(home)),
+            "/Users/beegass/pulp"
+        );
+        assert_eq!(
+            shorten_home(Path::new("/srv/pulp"), Some(Path::new("/"))),
+            "/srv/pulp"
+        );
+    }
+
+    #[test]
+    fn test_shorten_home_with_home_unset_returns_path_unchanged() {
+        assert_eq!(
+            shorten_home(Path::new("/Users/bee/Projects/pulp"), None),
+            "/Users/bee/Projects/pulp"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_expand_tilde_with_shortened_path_returns_original_path() {
+        let Some(home) = home_dir() else {
+            return;
+        };
+        let path = home.join("Projects").join("pulp");
+        let short = shorten_home(&path, Some(&home));
+        assert_eq!(short, "~/Projects/pulp");
+        assert_eq!(expand_tilde(&short), path);
+        assert_eq!(expand_tilde(&shorten_home(&home, Some(&home))), home);
+    }
+
+    /// The mill sends back whatever path browse showed. With the checkout under
+    /// the home folder, that is the `~` form.
+    #[tokio::test]
+    async fn test_mill_with_home_relative_path_returns_dump_preview_and_tree() {
+        let app = router();
+        let path = shorten_home(&testdata(), home_dir().as_deref());
+        let (status, scan) = post_to(
+            &app,
+            "/api/scan",
+            serde_json::json!({ "path": path, "gitignore": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path}: {scan}");
+        let body = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "path": path,
+                "gitignore": false,
+                "manifest_id": scan["manifest_id"],
+                "selected": ["hello.rs"]
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            body
+        };
+
+        let (status, packed) = post_to(&app, "/api/pack", body(serde_json::json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{packed}");
+        assert!(packed["dump"].as_str().unwrap().contains("fn hello"));
+
+        let (status, preview) = post_to(&app, "/api/preview", body(serde_json::json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert!(preview["text"].as_str().unwrap().contains("fn hello"));
+
+        let (status, tree) = post_to(&app, "/api/tree", body(serde_json::json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{tree}");
+        assert!(
+            tree["tree"].as_str().unwrap().contains("testdata/"),
+            "{tree}"
+        );
+
+        let result_id = packed["result_id"].as_str().unwrap();
+        let (status, redrawn) = post_to(
+            &app,
+            "/api/render",
+            body(serde_json::json!({ "format": "md", "result_id": result_id })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{redrawn}");
+        assert!(redrawn["dump"].as_str().unwrap().contains("## hello.rs"));
+
+        let response = get_authorized(&app, &format!("/api/artifact/{result_id}")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("fn hello"));
     }
 
     #[tokio::test]
