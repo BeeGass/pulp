@@ -98,6 +98,26 @@ pub fn expand_archive(
     }
 }
 
+/// Expand a zip/tar into members, drawing on a budget shared by every
+/// archive nested under one top-level input. `want` judges each member by
+/// name before it is read. Oversized members come back named and sized,
+/// without their bytes, and members that cannot be read come back as notes.
+pub(crate) fn expand_archive_members(
+    bytes: &[u8],
+    kind: Kind,
+    opts: &ExtractOpts,
+    budget: &mut ArchiveBudget,
+    want: &dyn Fn(&str) -> Want,
+) -> Result<Vec<Member>, Error> {
+    match kind {
+        Kind::Zip => archive::expand_zip_members(bytes, opts, budget, want),
+        Kind::Tar => archive::expand_tar_members(bytes, opts, false, budget, want),
+        Kind::TarGz => archive::expand_tar_members(bytes, opts, true, budget, want),
+        _ => Ok(Vec::new()),
+    }
+}
+
+pub(crate) use archive::{ArchiveBudget, Member, Want};
 pub(crate) use text::sniff_wide_text;
 pub use text::{decode_bytes, extract as extract_text};
 

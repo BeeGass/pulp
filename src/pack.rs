@@ -11,18 +11,17 @@ use globset::GlobSet;
 #[cfg(feature = "native")]
 use rayon::prelude::*;
 
-use crate::classify::{Kind, classify, looks_binary};
+use crate::classify::{Kind, classify, kind_from_name, looks_binary};
 use crate::config::{Options, TreeMode, apply_budgets, cmp_path_order, default_exclude_globs};
 use crate::error::Error;
 use crate::extract::isolate::panic_message;
-use crate::extract::{ExtractOpts, expand_archive, extract};
+use crate::extract::{ArchiveBudget, ExtractOpts, Member, Want, expand_archive_members, extract};
 use crate::filter::{build_globset, glob_matches, is_hidden_rel};
 #[cfg(feature = "native")]
 use crate::manifest::ManifestEntry;
 use crate::tree::display_path;
 
 const MAX_ARCHIVE_DEPTH: u8 = 3;
-const MAX_ARCHIVE_UNCOMPRESSED: u64 = 512 * 1024 * 1024;
 
 /// Include and exclude globs for a path that has a place under its root
 /// and, with several roots, a labelled path that the dump prints.
@@ -249,13 +248,17 @@ pub fn pack_manifest(
 ) -> Result<Packed, Error> {
     let extract_opts = ExtractOpts::from_options(opts);
     let bytes_read = AtomicU64::new(0);
+    let archive_cut = AtomicBool::new(false);
 
     let mut files = run_parallel(opts.jobs, || {
         manifest
             .entries
             .par_iter()
             .flat_map(|entry| {
-                let files = process_entry(entry, opts, &extract_opts, &bytes_read, cancel);
+                let (files, cut) = process_entry(entry, opts, &extract_opts, &bytes_read, cancel);
+                if cut {
+                    archive_cut.store(true, Ordering::Relaxed);
+                }
                 if let Some(done) = progress {
                     done.fetch_add(1, Ordering::SeqCst);
                 }
@@ -265,6 +268,7 @@ pub fn pack_manifest(
     })?;
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
     let cancelled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+    let archive_cut = archive_cut.load(Ordering::Relaxed);
 
     let tree = render_pack_tree(opts, &files);
     let files_extracted = files
@@ -291,7 +295,7 @@ pub fn pack_manifest(
             chars_emitted,
             tokens_est,
             elapsed: pack_clock_elapsed(start),
-            truncated: manifest.truncated || cancelled,
+            truncated: manifest.truncated || cancelled || archive_cut,
             cancelled,
         },
     })
@@ -305,7 +309,7 @@ pub fn pack_manifest(
 #[cfg(feature = "native")]
 pub(crate) fn pack_manifest_entry(entry: &ManifestEntry, opts: &Options) -> Vec<PackedFile> {
     let extract_opts = ExtractOpts::from_options(opts);
-    let mut files = process_entry(entry, opts, &extract_opts, &AtomicU64::new(0), None);
+    let (mut files, _) = process_entry(entry, opts, &extract_opts, &AtomicU64::new(0), None);
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
     files
 }
@@ -343,7 +347,7 @@ pub fn pack_entries(
         })
         .collect();
     chosen.sort_by(|a, b| cmp_path_order(a.relative, b.relative).then_with(|| a.id.cmp(b.id)));
-    let truncated = apply_budgets(&mut chosen, opts, |entry| entry.bytes.len() as u64);
+    let mut truncated = apply_budgets(&mut chosen, opts, |entry| entry.bytes.len() as u64);
     let mut files: Vec<PackedFile> = Vec::new();
     for entry in chosen {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
@@ -361,6 +365,7 @@ pub fn pack_entries(
             continue;
         }
         bytes_read.fetch_add(size, Ordering::Relaxed);
+        let mut budget = ArchiveBudget::default();
         files.extend(process_item(
             WorkItem {
                 id: entry.id.to_string(),
@@ -372,7 +377,9 @@ pub fn pack_entries(
             },
             opts,
             &extract_opts,
+            &mut budget,
         ));
+        truncated |= budget.cut();
     }
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
     let cancelled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
@@ -438,49 +445,53 @@ fn process_entry(
     extract_opts: &ExtractOpts,
     bytes_read: &AtomicU64,
     cancel: Option<&AtomicBool>,
-) -> Vec<PackedFile> {
+) -> (Vec<PackedFile>, bool) {
     if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     if opts.list_only {
-        return vec![list_only_file(entry, opts)];
+        return (vec![list_only_file(entry, opts)], false);
     }
     if let Some(msg) = changed_since_scan(entry) {
-        return vec![packed_changed(entry, msg)];
+        return (vec![packed_changed(entry, msg)], false);
     }
     if entry.size > opts.max_file_size {
-        return vec![packed_too_large(
+        let too_large = packed_too_large(
             entry.id.clone(),
             entry.relative.clone(),
             entry.kind,
             entry.size,
             opts.max_file_size,
-        )];
+        );
+        return (vec![too_large], false);
     }
     let bytes = match read_limited(entry, opts.follow_links, opts.max_file_size) {
         Ok(EntryRead::Bytes(bytes)) => bytes,
         Ok(EntryRead::TooLarge(size)) => {
-            return vec![packed_too_large(
+            let too_large = packed_too_large(
                 entry.id.clone(),
                 entry.relative.clone(),
                 entry.kind,
                 size,
                 opts.max_file_size,
-            )];
+            );
+            return (vec![too_large], false);
         }
-        Ok(EntryRead::Changed(msg)) => return vec![packed_changed(entry, msg)],
+        Ok(EntryRead::Changed(msg)) => return (vec![packed_changed(entry, msg)], false),
         Err(err) => {
-            return vec![packed_error(
+            let failed = packed_error(
                 entry.id.clone(),
                 entry.relative.clone(),
                 entry.kind,
                 entry.size,
                 err.to_string(),
-            )];
+            );
+            return (vec![failed], false);
         }
     };
     bytes_read.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-    process_item(
+    let mut budget = ArchiveBudget::default();
+    let files = process_item(
         WorkItem {
             id: entry.id.clone(),
             relative: entry.relative.clone(),
@@ -491,7 +502,9 @@ fn process_entry(
         },
         opts,
         extract_opts,
-    )
+        &mut budget,
+    );
+    (files, budget.cut())
 }
 
 /// What reading a scanned entry found.
@@ -569,7 +582,14 @@ fn open_entry(
     }
 }
 
-fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> Vec<PackedFile> {
+/// Pack one input or archive member. Archives expand in place, drawing on
+/// `budget`, which every archive nested under one top-level input shares.
+fn process_item(
+    item: WorkItem,
+    opts: &Options,
+    extract_opts: &ExtractOpts,
+    budget: &mut ArchiveBudget,
+) -> Vec<PackedFile> {
     let kind = classify(class_path(&item), Some(&item.bytes));
     let size = item.bytes.len() as u64;
     let should_expand = kind.is_archive()
@@ -581,7 +601,7 @@ fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> V
                 .as_ref()
                 .is_some_and(|path| is_input_root(path, &opts.roots)));
     if should_expand {
-        return expand_item(&item, kind, opts, extract_opts);
+        return expand_item(&item, kind, opts, extract_opts, budget);
     }
     vec![pack_one(
         item.id,
@@ -676,23 +696,21 @@ fn pack_one(
         kind
     };
     if should_skip_binary(kind, bytes, opts.skip_binaries) {
-        return PackedFile {
-            text: format!("[binary file, {size} bytes]"),
-            id,
-            relative,
-            kind,
-            size,
-            status: FileStatus::SkippedBinary,
-        };
+        return packed_binary(id, relative, kind, size);
     }
     if kind.is_archive() {
         // Names in a note are escaped as in a header, so one cannot end the
         // note's line and forge a section of its own.
         let name = display_path(&relative);
+        let text = if opts.follow_archives {
+            format!(
+                "[archive {name}, {size} bytes; not expanded: nested more than {MAX_ARCHIVE_DEPTH} archives deep]"
+            )
+        } else {
+            format!("[archive {name}, {size} bytes; pass --archives to expand nested archives]")
+        };
         return PackedFile {
-            text: format!(
-                "[archive {name}, {size} bytes; pass --archives to expand nested archives]"
-            ),
+            text,
             id,
             relative,
             kind,
@@ -715,18 +733,22 @@ fn pack_one(
     }
 }
 
+/// Expand an archive into packed members. An archive its parser rejects
+/// keeps a one-line note in its place, like any other unreadable file.
 fn expand_item(
     item: &WorkItem,
     kind: Kind,
     opts: &Options,
     extract_opts: &ExtractOpts,
+    budget: &mut ArchiveBudget,
 ) -> Vec<PackedFile> {
     let Ok(globs) = ScopedGlobs::new(opts) else {
         return Vec::new();
     };
-    match expand_archive(&item.bytes, kind, extract_opts) {
-        Ok(members) => take_archive_members(item, members, opts, extract_opts, &globs),
-        Err(err) => vec![packed_error(
+    let want = |name: &str| member_want(item, name, opts, &globs);
+    match expand_archive_members(&item.bytes, kind, extract_opts, budget, &want) {
+        Ok(members) => take_archive_members(item, members, opts, extract_opts, budget, &globs),
+        Err(err) => vec![packed_unreadable(
             item.id.clone(),
             item.relative.clone(),
             kind,
@@ -736,36 +758,63 @@ fn expand_item(
     }
 }
 
+/// What to take from an archive member, judged by its name alone the way
+/// [`take_archive_members`] judges it once read, so a member the filters
+/// drop is never read or charged to the budget.
+fn member_want(parent: &WorkItem, name: &str, opts: &Options, globs: &ScopedGlobs) -> Want {
+    if is_unsafe_entry(name) {
+        return Want::Nothing;
+    }
+    let child = join_rel(&parent.relative, name);
+    let child_under_root = join_rel(&parent.root_relative, name);
+    if !opts.hidden && is_hidden_rel(&child_under_root) {
+        return Want::Nothing;
+    }
+    // A name that leaves the kind to the bytes may hold an archive, which
+    // the include globs let through.
+    let named = kind_from_name(Path::new(&child));
+    if !globs.keep(
+        &child_under_root,
+        &child,
+        named.is_none_or(Kind::is_archive),
+    ) {
+        return Want::Nothing;
+    }
+    if named == Some(Kind::Binary) && opts.skip_binaries {
+        return Want::Size;
+    }
+    Want::Bytes
+}
+
 fn take_archive_members(
     parent: &WorkItem,
-    members: Vec<(String, Vec<u8>)>,
+    members: Vec<Member>,
     opts: &Options,
     extract_opts: &ExtractOpts,
+    budget: &mut ArchiveBudget,
     globs: &ScopedGlobs,
 ) -> Vec<PackedFile> {
     let mut out = Vec::new();
     let mut ids: HashSet<String> = HashSet::new();
-    let mut total = 0u64;
-    for (name, mem_bytes) in members {
-        if is_unsafe_entry(&name) {
+    for member in members {
+        if is_unsafe_entry(member.name()) {
             continue;
         }
-        let child = join_rel(&parent.relative, &name);
+        let child = join_rel(&parent.relative, member.name());
         // Judged by its path under the root, as the walk judges files, so a
         // root named `runs` or `.dotfiles` keeps its archives' members.
-        let child_under_root = join_rel(&parent.root_relative, &name);
+        let child_under_root = join_rel(&parent.root_relative, member.name());
         if !opts.hidden && is_hidden_rel(&child_under_root) {
             continue;
         }
-        let n = mem_bytes.len() as u64;
-        if total.saturating_add(n) > MAX_ARCHIVE_UNCOMPRESSED {
-            break;
-        }
-        let kind = classify(Path::new(&child), Some(&mem_bytes));
+        let sniff = match &member {
+            Member::File { bytes, .. } => Some(bytes.as_slice()),
+            _ => None,
+        };
+        let kind = classify(Path::new(&child), sniff);
         if !globs.keep(&child_under_root, &child, kind.is_archive()) {
             continue;
         }
-        total = total.saturating_add(n);
         // A tar may hold one name twice; each copy still needs its own id.
         let base = format!("{}!{child}", parent.id);
         let mut id = base.clone();
@@ -774,18 +823,28 @@ fn take_archive_members(
             id = format!("{base}#{n}");
             n += 1;
         }
-        out.extend(process_item(
-            WorkItem {
-                id,
-                relative: child,
-                root_relative: child_under_root,
-                absolute: None,
-                bytes: mem_bytes,
-                depth: parent.depth + 1,
-            },
-            opts,
-            extract_opts,
-        ));
+        match member {
+            Member::TooLarge { size, .. } => {
+                out.push(packed_too_large(id, child, kind, size, opts.max_file_size));
+            }
+            Member::Unread { size, .. } => out.push(packed_binary(id, child, kind, size)),
+            Member::Unreadable { size, reason, .. } => {
+                out.push(packed_unreadable(id, child, kind, size, reason));
+            }
+            Member::File { bytes, .. } => out.extend(process_item(
+                WorkItem {
+                    id,
+                    relative: child,
+                    root_relative: child_under_root,
+                    absolute: None,
+                    bytes,
+                    depth: parent.depth + 1,
+                },
+                opts,
+                extract_opts,
+                budget,
+            )),
+        }
     }
     out
 }
@@ -983,6 +1042,18 @@ fn extract_contained(
             "extractor panicked: {}",
             panic_message(payload.as_ref())
         ))),
+    }
+}
+
+/// The note for a binary file left out, like `--skip-binaries` leaves them.
+fn packed_binary(id: String, relative: String, kind: Kind, size: u64) -> PackedFile {
+    PackedFile {
+        text: format!("[binary file, {size} bytes]"),
+        id,
+        relative,
+        kind,
+        size,
+        status: FileStatus::SkippedBinary,
     }
 }
 
@@ -1516,6 +1587,7 @@ mod tests {
         assert!(!is_unsafe_entry("foo/bar.txt"));
         assert!(!is_unsafe_entry("dir/file.rs"));
         assert!(!is_unsafe_entry("\\xffstart.txt"));
+        assert!(!is_unsafe_entry("notes..v2.txt"));
     }
 
     fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -1528,6 +1600,17 @@ mod tests {
             zw.write_all(data).unwrap();
         }
         zw.finish().unwrap().into_inner()
+    }
+
+    fn mem_item(relative: &str, bytes: Vec<u8>) -> WorkItem {
+        WorkItem {
+            id: relative.to_string(),
+            relative: relative.to_string(),
+            root_relative: relative.to_string(),
+            absolute: None,
+            bytes,
+            depth: 0,
+        }
     }
 
     /// A manifest entry the scan made for a regular file at `path`, with
@@ -1833,6 +1916,148 @@ mod tests {
         assert_eq!(packed.tree, "proj/\n└── main.rs\n");
     }
 
+    fn deflated_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::{Cursor, Write as IoWrite};
+        let mut zw = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opt = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in entries {
+            zw.start_file(*name, opt).unwrap();
+            zw.write_all(data).unwrap();
+        }
+        zw.finish().unwrap().into_inner()
+    }
+
+    /// Offset of the local header that names `name` in `zip`.
+    fn local_header_of(zip: &[u8], name: &str) -> usize {
+        let at = zip
+            .windows(name.len())
+            .position(|window| window == name.as_bytes())
+            .unwrap();
+        at - 30
+    }
+
+    fn follow_archives() -> Options {
+        Options {
+            follow_archives: true,
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn test_process_item_with_excluded_members_first_keeps_later_included_member() {
+        // `*.bin` is excluded by default, so reading it first would spend the
+        // budget on bytes that are thrown away.
+        let zip = stored_zip(&[("model.bin", &[b'b'; 600]), ("notes.txt", &[b'n'; 600])]);
+        let opts = follow_archives();
+        let mut budget = ArchiveBudget::new(1000, 1 << 30);
+        let files = process_item(
+            mem_item("bundle.zip", zip),
+            &opts,
+            &ExtractOpts::from_options(&opts),
+            &mut budget,
+        );
+        let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
+        assert_eq!(rels, ["bundle.zip/notes.txt"]);
+        assert!(!budget.cut());
+    }
+
+    #[test]
+    fn test_process_item_with_binary_member_names_it_without_reading_it() {
+        let zip = stored_zip(&[("photo.png", &[7u8; 600]), ("notes.txt", &[b'n'; 600])]);
+        let opts = follow_archives();
+        let mut budget = ArchiveBudget::new(1000, 1 << 30);
+        let files = process_item(
+            mem_item("bundle.zip", zip),
+            &opts,
+            &ExtractOpts::from_options(&opts),
+            &mut budget,
+        );
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert_eq!(files[0].relative, "bundle.zip/photo.png");
+        assert_eq!(files[0].status, FileStatus::SkippedBinary);
+        assert_eq!(files[0].text, "[binary file, 600 bytes]");
+        assert_eq!(files[0].size, 600);
+        assert_eq!(files[1].status, FileStatus::Extracted);
+        assert!(!budget.cut());
+    }
+
+    #[test]
+    fn test_process_item_with_corrupt_and_unsupported_zip_members_notes_them() {
+        let mut zip = deflated_zip(&[
+            ("a_good.txt", &[b'a'; 4000]),
+            ("b_bad.txt", &[b'b'; 4000]),
+            ("c_bzip2.txt", &[b'c'; 4000]),
+            ("d_good.txt", &[b'd'; 4000]),
+        ]);
+        let bad = local_header_of(&zip, "b_bad.txt");
+        let extra = usize::from(u16::from_le_bytes([zip[bad + 28], zip[bad + 29]]));
+        let data = bad + 30 + "b_bad.txt".len() + extra;
+        for byte in &mut zip[data..data + 6] {
+            *byte ^= 0xFF;
+        }
+        // Method 12 is bzip2, which this build cannot read. The central
+        // directory entry comes after every local header.
+        let local = local_header_of(&zip, "c_bzip2.txt");
+        let central = zip
+            .windows("c_bzip2.txt".len())
+            .rposition(|window| window == b"c_bzip2.txt")
+            .unwrap()
+            - 46;
+        for at in [local + 8, central + 10] {
+            zip[at..at + 2].copy_from_slice(&12u16.to_le_bytes());
+        }
+        let opts = follow_archives();
+        let files = process_item(
+            mem_item("bundle.zip", zip),
+            &opts,
+            &ExtractOpts::from_options(&opts),
+            &mut ArchiveBudget::default(),
+        );
+        let status: Vec<(&str, &str)> = files
+            .iter()
+            .map(|f| (f.relative.as_str(), f.status.as_str()))
+            .collect();
+        assert_eq!(
+            status,
+            [
+                ("bundle.zip/a_good.txt", "extracted"),
+                ("bundle.zip/b_bad.txt", "unreadable"),
+                ("bundle.zip/c_bzip2.txt", "unreadable"),
+                ("bundle.zip/d_good.txt", "extracted"),
+            ]
+        );
+        assert!(
+            files[1].text.starts_with("[text unreadable: "),
+            "{}",
+            files[1].text
+        );
+        assert!(files[2].text.contains("ompression"), "{}", files[2].text);
+        assert_eq!(files[3].text, "d".repeat(4000));
+    }
+
+    #[test]
+    fn test_process_item_with_nested_archives_shares_one_budget() {
+        let inner = stored_zip(&[("x.txt", &[b'x'; 1000])]);
+        let outer = stored_zip(&[("one.zip", &inner), ("two.zip", &inner)]);
+        let opts = Options {
+            follow_archives: true,
+            ..Options::default()
+        };
+        let extract_opts = ExtractOpts::from_options(&opts);
+        let copied_inner = 2 * inner.len() as u64;
+        let mut budget = ArchiveBudget::new(copied_inner + 1500, 1 << 30);
+        let files = process_item(
+            mem_item("outer.zip", outer),
+            &opts,
+            &extract_opts,
+            &mut budget,
+        );
+        let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
+        assert_eq!(rels, ["outer.zip/one.zip/x.txt"], "{rels:?}");
+        assert!(budget.cut());
+    }
+
     #[test]
     fn test_pack_entries_with_binary_bytes_under_text_names_skips_them() {
         let ts: Vec<u8> = [0x47, 0x40, 0x00, 0x10, 0x00, 0x00, 0xb0, 0x0d]
@@ -1908,5 +2133,90 @@ mod tests {
             "boom".into(),
         );
         assert_eq!(failed.text, "[error extracting b\\nFILE: forged.txt: boom]");
+    }
+
+    #[test]
+    fn test_pack_entries_with_corrupt_zip_returns_unreadable_note() {
+        let entries = [MemoryFile {
+            id: "bundle.zip",
+            relative: "bundle.zip",
+            bytes: b"PK\x03\x04 truncated",
+        }];
+        let opts = Options {
+            follow_archives: true,
+            ..Options::default()
+        };
+        let packed = pack_entries(&entries, &opts, None).unwrap();
+        assert_eq!(packed.files.len(), 1);
+        let file = &packed.files[0];
+        assert!(
+            matches!(file.status, FileStatus::Unreadable(_)),
+            "{:?}",
+            file.status
+        );
+        assert!(file.text.starts_with("[zip unreadable: "), "{}", file.text);
+    }
+
+    #[test]
+    fn test_pack_entries_with_archive_past_depth_limit_says_why_it_stays_packed() {
+        let mut nested = stored_zip(&[("deep.txt", b"deepest")]);
+        for level in (1..=3).rev() {
+            let name = format!("l{level}.zip");
+            nested = stored_zip(&[(name.as_str(), &nested)]);
+        }
+        let entries = [MemoryFile {
+            id: "top.zip",
+            relative: "top.zip",
+            bytes: &nested,
+        }];
+        let opts = Options {
+            follow_archives: true,
+            ..Options::default()
+        };
+        let packed = pack_entries(&entries, &opts, None).unwrap();
+        let skipped: Vec<&PackedFile> = packed
+            .files
+            .iter()
+            .filter(|f| f.status == FileStatus::SkippedArchive)
+            .collect();
+        assert_eq!(skipped.len(), 1, "{:?}", packed.files);
+        assert!(
+            skipped[0].text.contains("nested more than 3 archives deep"),
+            "{}",
+            skipped[0].text
+        );
+        assert!(!skipped[0].text.contains("pass --archives"));
+    }
+
+    #[test]
+    fn test_pack_entries_with_oversized_archive_member_returns_too_large_entry() {
+        use std::io::{Cursor, Write as IoWrite};
+        let mut zw = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opt = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zw.start_file("big.log", opt).unwrap();
+        zw.write_all(&[b'x'; 64 * 1024]).unwrap();
+        zw.start_file("small.txt", opt).unwrap();
+        zw.write_all(b"ok\n").unwrap();
+        let zip = zw.finish().unwrap().into_inner();
+        assert!(zip.len() < 1024, "{} bytes", zip.len());
+        let entries = [MemoryFile {
+            id: "logs.zip",
+            relative: "logs.zip",
+            bytes: &zip,
+        }];
+        let opts = Options {
+            follow_archives: true,
+            max_file_size: 1024,
+            tree: TreeMode::Full,
+            ..Options::default()
+        };
+        let packed = pack_entries(&entries, &opts, None).unwrap();
+        let rels: Vec<&str> = packed.files.iter().map(|f| f.relative.as_str()).collect();
+        assert_eq!(rels, ["logs.zip/big.log", "logs.zip/small.txt"]);
+        let big = &packed.files[0];
+        assert_eq!(big.status, FileStatus::TooLarge(1024));
+        assert_eq!(big.size, 64 * 1024);
+        assert!(packed.tree.contains("big.log"), "{}", packed.tree);
     }
 }
