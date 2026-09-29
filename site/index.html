@@ -3,7 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#120f0c">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ebe9e3" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111214" media="(prefers-color-scheme: dark)">
   <title>pulp — LLM-ready dumps from local folders</title>
   <meta name="description" content="Pulp grinds a local folder into one LLM-ready text file. Runs on your machine. Browser mill at /mill — files stay in the tab.">
   <meta name="robots" content="index,follow,max-image-preview:large">
@@ -20,70 +22,292 @@
   <meta name="twitter:title" content="pulp — LLM-ready dumps from local folders">
   <meta name="twitter:description" content="Pulp grinds a local folder into one LLM-ready text file. Runs on your machine. Browser mill at /mill — files stay in the tab.">
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Pulp","applicationCategory":"DeveloperApplication","operatingSystem":"Linux, macOS, Windows","url":"https://pulp.onlygass.dev","downloadUrl":"https://github.com/BeeGass/pulp","author":{"@type":"Person","name":"Bryan Gass","alternateName":"BeeGass","url":"https://onlygass.dev"},"description":"Pulp grinds a local folder into one LLM-ready text file. Runs on your machine. Browser mill packs in-tab — nothing is uploaded.","license":"https://github.com/BeeGass/pulp/blob/main/LICENSE"}</script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='none' stroke='%238f8d87' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='6.5' fill='none' stroke='%23b8461f' stroke-width='4'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/pulp.css">
+  <link rel="stylesheet" href="/mill/mill.css">
   <link rel="stylesheet" href="/styles.css">
+  <link rel="modulepreload" href="/mill/mill.js">
 </head>
 <body>
-  <div class="wrap">
-    <header class="top">
-      <a class="mark" href="/">pulp</a>
-      <nav class="nav">
+  <header class="lp-top">
+    <div class="lp lp-nav">
+      <a class="lp-brand" href="/" aria-label="pulp home"><span class="p-mark" aria-hidden="true"></span><span class="p-word">pulp</span></a>
+      <nav class="lp-links" aria-label="Sections">
+        <a href="/mill">Mill</a>
+        <a href="#formats">Formats</a>
         <a href="#install">Install</a>
-        <a href="/mill/">Browser mill</a>
-        <a href="https://github.com/BeeGass/pulp">GitHub</a>
+        <a class="lp-keep" href="https://github.com/BeeGass/pulp">GitHub</a>
       </nav>
-    </header>
+      <a class="p-key is-primary is-sm" href="/mill" aria-label="Open the mill">Open <span class="lp-key-long">the mill</span><svg class="p-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3 8h10M9 4l4 4-4 4"/></svg></a>
+    </div>
+  </header>
 
-    <main class="hero">
-      <h1>Grind a folder into one LLM-ready dump.</h1>
-      <p class="lede">Pulp walks a tree in parallel, pulls text out of mixed documents, and writes one file you can hand a model. Paper pulp. Juice. Disposable reading.</p>
-      <div class="privacy"><strong>Local first.</strong> Files never leave the machine. The mill binds localhost only. Try the browser mill — still no upload.</div>
-      <div class="actions">
-        <a class="btn btn-primary" href="#install">Install</a>
-        <a class="btn btn-ghost" href="https://github.com/BeeGass/pulp">View on GitHub</a>
-        <a class="btn btn-ghost" href="/mill/">Browser mill</a>
+  <main class="lp">
+    <section class="lp-hero">
+      <p class="p-label">Local-first · written in Rust · MIT</p>
+      <h1>Grind a folder into one <span class="lp-nowrap">LLM-ready</span> dump.</h1>
+      <p class="lp-lede">Pulp walks a tree in parallel, pulls text out of code, PDFs, Office files, and notebooks, and writes one file you can hand a model.</p>
+      <div class="lp-install">
+        <span class="dollar" aria-hidden="true">$</span>
+        <code tabindex="0">cargo install --git https://github.com/BeeGass/pulp --locked</code>
+        <button type="button" class="p-key is-sm is-sq" data-copy="cargo install --git https://github.com/BeeGass/pulp --locked" aria-label="Copy the install command" title="Copy"><svg class="p-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/></svg></button>
       </div>
-    </main>
-
-    <section>
-      <h2>What it does</h2>
-      <div class="grid">
-        <article class="card">
-          <h3>Mixed documents</h3>
-          <p>Code, Markdown, HTML, JSON/CSV, PDF, Office, notebooks, archives — extracted into one dump.</p>
-        </article>
-        <article class="card">
-          <h3>Formats you pick</h3>
-          <p>Plain text, Markdown, or Claude-style XML. Layout follows <code>-f</code> or the <code>-o</code> extension.</p>
-        </article>
-        <article class="card">
-          <h3>Quiet by default</h3>
-          <p>Skips <code>node_modules</code>, <code>target</code>, venvs, secrets, and other noisy trees unless you say otherwise.</p>
-        </article>
-        <article class="card">
-          <h3>Local mill</h3>
-          <p><code>pulp ui</code> opens a localhost mill at <code>127.0.0.1:8747</code>. Nothing is uploaded.</p>
-        </article>
+      <div class="lp-ctas">
+        <a class="p-key is-primary is-lg" href="/mill"><svg class="p-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c1.8 1.8 1.8 10.2 0 12M8 2c-1.8 1.8-1.8 10.2 0 12"/></svg>Open the browser mill<svg class="p-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3 8h10M9 4l4 4-4 4"/></svg></a>
+        <a class="p-key is-lg" href="#install"><svg class="p-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5"/><path d="m4.5 6 2 2-2 2M8 10.5h3"/></svg>Install the CLI</a>
       </div>
     </section>
 
-    <section id="install">
-      <h2>Install</h2>
-      <pre><code>cargo install --git https://github.com/BeeGass/pulp --locked</code></pre>
-      <p class="note">Requires Rust 1.85+. The GitHub repo must be public (or you need access) for <code>--git</code> install to work.</p>
-      <pre style="margin-top:16px"><code>pulp -o dump.xml .
-pulp ui</code></pre>
+    <section class="lp-shot" aria-label="The pulp mill">
+      <div class="lp-window">
+        <div class="lp-window-bar" aria-hidden="true"><i></i><i></i><i></i><span>127.0.0.1:8747</span></div>
+        <div class="lp-stage"><div id="shot" inert aria-hidden="true"></div></div>
+      </div>
+      <p class="lp-caption">The mill after pulping its built-in sample. Nothing is uploaded: <a href="/mill">open the browser mill</a> and press Try a sample to run it in your tab.</p>
     </section>
 
-    <section>
-      <h2>Browser mill</h2>
-      <p>In-browser mill: <a href="/mill/">/mill</a>. Same privacy story as localhost: packing runs in WebAssembly inside your tab. No server-side upload/packer.</p>
-      <p class="note">Full extract path in WASM: text, code, PDF, Office sheets, zip, HTML, JSON, notebooks, and more. Local <code>pulp ui</code> still wins for gitignore walks and hang isolation. Design: <code>docs/wasm-mill.md</code>.</p>
+    <section class="lp-sec" id="reference">
+      <p class="p-label">Reference</p>
+      <h2>What goes in, what comes out.</h2>
+      <div class="lp-table-wrap">
+        <table class="lp-table">
+          <thead><tr><th scope="col">Kind</th><th scope="col">Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Source</td><td>Rust, Lean, Python, TypeScript, TOML, Markdown, and other text</td></tr>
+            <tr><td>NumPy</td><td><code>.npy</code> and <code>.npz</code> metadata and a small preview (not treated as binary)</td></tr>
+            <tr><td>HTML, XML, JSON</td><td>Readable text, or decoded source with <code>--source</code></td></tr>
+            <tr><td>CSV, TSV</td><td>Tabular text</td></tr>
+            <tr><td>PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, RTF</td><td>Extracted text</td></tr>
+            <tr><td>Jupyter</td><td>Cells; <code>--notebook-outputs</code> keeps outputs</td></tr>
+            <tr><td>Zip, tar</td><td>A root archive always expands; nested members need <code>--archives</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Binary media (images, audio, wasm, …) is skipped unless <code>--binaries</code>. Noisy trees stay out even when they are tracked: <code>node_modules/</code>, <code>target/</code>, <code>dist/</code>, virtualenvs, lockfiles, <code>.env</code>, keys, and similar. <code>.gitignore</code> is honored unless <code>--no-gitignore</code>.</p>
     </section>
 
-    <footer class="footer">
+    <section class="lp-sec" id="formats">
+      <p class="p-label">Formats</p>
+      <h2>The same two files, three ways.</h2>
+      <div class="lp-formats">
+        <div class="lp-format"><span class="p-label">Plain text · -f txt</span><div class="p-sheet"><div class="p-ledger" tabindex="0" role="region" aria-label="Plain text output"><span class="ln" data-n="1">Directory structure:
+</span><span class="ln" data-n="2">testdata/
+</span><span class="ln" data-n="3">├── Hello.lean
+</span><span class="ln" data-n="4">└── hello.rs
+</span><span class="ln" data-n="5">
+</span><span class="ln" data-n="6">================================================
+</span><span class="ln" data-n="7">FILE: Hello.lean
+</span><span class="ln" data-n="8">================================================
+</span><span class="ln" data-n="9">def hello : String := "hello from pulp"
+</span><span class="ln" data-n="10">
+</span><span class="ln" data-n="11">================================================
+</span><span class="ln" data-n="12">FILE: hello.rs
+</span><span class="ln" data-n="13">================================================
+</span><span class="ln" data-n="14">pub fn hello() -&gt; &amp;'static str {
+</span><span class="ln" data-n="15">    "hello from pulp"
+</span><span class="ln" data-n="16">}
+</span><span class="ln" data-n="17">
+</span></div></div></div>
+        <div class="lp-format"><span class="p-label">Markdown · -f md</span><div class="p-sheet"><div class="p-ledger" tabindex="0" role="region" aria-label="Markdown output"><span class="ln" data-n="1"># Directory structure
+</span><span class="ln" data-n="2">
+</span><span class="ln" data-n="3">```
+</span><span class="ln" data-n="4">testdata/
+</span><span class="ln" data-n="5">├── Hello.lean
+</span><span class="ln" data-n="6">└── hello.rs
+</span><span class="ln" data-n="7">```
+</span><span class="ln" data-n="8">
+</span><span class="ln" data-n="9">## Hello.lean
+</span><span class="ln" data-n="10">
+</span><span class="ln" data-n="11">```lean
+</span><span class="ln" data-n="12">def hello : String := "hello from pulp"
+</span><span class="ln" data-n="13">```
+</span><span class="ln" data-n="14">
+</span><span class="ln" data-n="15">## hello.rs
+</span><span class="ln" data-n="16">
+</span><span class="ln" data-n="17">```rust
+</span><span class="ln" data-n="18">pub fn hello() -&gt; &amp;'static str {
+</span><span class="ln" data-n="19">    "hello from pulp"
+</span><span class="ln" data-n="20">}
+</span><span class="ln" data-n="21">```
+</span><span class="ln" data-n="22">
+</span></div></div></div>
+        <div class="lp-format"><span class="p-label">XML · -f xml</span><div class="p-sheet"><div class="p-ledger" tabindex="0" role="region" aria-label="XML output"><span class="ln" data-n="1">&lt;documents&gt;
+</span><span class="ln" data-n="2">&lt;document_tree&gt;
+</span><span class="ln" data-n="3">testdata/
+</span><span class="ln" data-n="4">├── Hello.lean
+</span><span class="ln" data-n="5">└── hello.rs
+</span><span class="ln" data-n="6">
+</span><span class="ln" data-n="7">&lt;/document_tree&gt;
+</span><span class="ln" data-n="8">&lt;document index="1"&gt;
+</span><span class="ln" data-n="9">&lt;source&gt;Hello.lean&lt;/source&gt;
+</span><span class="ln" data-n="10">&lt;document_content&gt;
+</span><span class="ln" data-n="11">def hello : String := "hello from pulp"
+</span><span class="ln" data-n="12">
+</span><span class="ln" data-n="13">&lt;/document_content&gt;
+</span><span class="ln" data-n="14">&lt;/document&gt;
+</span><span class="ln" data-n="15">&lt;document index="2"&gt;
+</span><span class="ln" data-n="16">&lt;source&gt;hello.rs&lt;/source&gt;
+</span><span class="ln" data-n="17">&lt;document_content&gt;
+</span><span class="ln" data-n="18">pub fn hello() -&amp;gt; &amp;amp;'static str {
+</span><span class="ln" data-n="19">    "hello from pulp"
+</span><span class="ln" data-n="20">}
+</span><span class="ln" data-n="21">
+</span><span class="ln" data-n="22">&lt;/document_content&gt;
+</span><span class="ln" data-n="23">&lt;/document&gt;
+</span><span class="ln" data-n="24">&lt;/documents&gt;
+</span></div></div></div>
+      </div>
+      <p>Real output of <code>pulp -f txt|md|xml testdata</code> from this repo. Without <code>-f</code>, the layout follows the <code>-o</code> extension and otherwise defaults to plain text.</p>
+    </section>
+
+    <section class="lp-sec" id="options">
+      <p class="p-label">Options</p>
+      <h2>Flags you will reach for.</h2>
+      <div class="lp-table-wrap">
+        <table class="lp-table">
+          <thead><tr><th scope="col">Flag</th><th scope="col">Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>-o, --output FILE</code></td><td>Write the dump here (default: stdout)</td></tr>
+            <tr><td><code>-f, --format FMT</code></td><td><code>txt</code>, <code>md</code>, or <code>xml</code></td></tr>
+            <tr><td><code>--tree MODE</code></td><td><code>selected</code> (default), <code>full</code>, or <code>none</code></td></tr>
+            <tr><td><code>-j, --jobs N</code></td><td>Parallelism; <code>0</code> uses every available core</td></tr>
+            <tr><td><code>--include GLOB</code></td><td>Repeatable allow-list</td></tr>
+            <tr><td><code>--exclude GLOB</code></td><td>Repeatable extra deny-list</td></tr>
+            <tr><td><code>--hidden</code></td><td>Include hidden files (<code>.git</code> is still skipped)</td></tr>
+            <tr><td><code>--no-gitignore</code></td><td>Ignore <code>.gitignore</code> and <code>.ignore</code></td></tr>
+            <tr><td><code>--archives</code></td><td>Expand nested zip and tar members</td></tr>
+            <tr><td><code>--source</code></td><td>Keep HTML, XML, and JSON as source</td></tr>
+            <tr><td><code>--notebook-outputs</code></td><td>Include Jupyter cell outputs</td></tr>
+            <tr><td><code>--list</code></td><td>Print relative paths only</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Every flag is in the <a href="https://github.com/BeeGass/pulp#options">README</a>.</p>
+    </section>
+
+    <section class="lp-sec" id="mills">
+      <p class="p-label">Two mills</p>
+      <h2>Same core, two places to run it.</h2>
+      <div class="lp-table-wrap">
+        <table class="lp-table">
+          <thead><tr><th scope="col"><span class="sr-only">Capability</span></th><th scope="col">Browser mill · <a href="/mill">/mill</a></th><th scope="col">Local mill · <code>pulp ui</code></th></tr></thead>
+          <tbody>
+            <tr><td>Files leave the device</td><td class="lp-yes">Never</td><td class="lp-yes">Never</td></tr>
+            <tr><td>Choosing files</td><td>Folder or file picker, or drop</td><td>Your OS file manager, or any typed path</td></tr>
+            <tr><td><code>.gitignore</code></td><td class="lp-no">Not available</td><td class="lp-yes">Honored</td></tr>
+            <tr><td>Default excludes</td><td>Same core matcher</td><td>Same core matcher</td></tr>
+            <tr><td>PDF, Office, zip</td><td>In-process WebAssembly</td><td>A child process with a timeout</td></tr>
+            <tr><td>Cancel</td><td>Stops the worker</td><td>Between files</td></tr>
+            <tr><td>Setup</td><td class="lp-yes">None</td><td>One cargo line</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="lp-sec" id="install">
+      <p class="p-label">Install</p>
+      <h2>One cargo line.</h2>
+      <div class="lp-install-block">
+        <div class="lp-install">
+          <span class="dollar" aria-hidden="true">$</span>
+          <code tabindex="0">cargo install --git https://github.com/BeeGass/pulp --locked</code>
+          <button type="button" class="p-key is-sm is-sq" data-copy="cargo install --git https://github.com/BeeGass/pulp --locked" aria-label="Copy the install command" title="Copy"><svg class="p-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/></svg></button>
+        </div>
+        <pre class="lp-term" tabindex="0" role="region" aria-label="Example commands"><span class="pr">$ </span>pulp ui              <span class="mu"># local mill on 127.0.0.1:8747</span>
+<span class="pr">$ </span>pulp -o dump.xml .   <span class="mu"># this folder, one XML dump</span>
+<span class="pr">$ </span>pulp -f md src       <span class="mu"># Markdown to stdout</span></pre>
+      </div>
+      <p>Requires Rust 1.85 or newer. Browse opens Finder on macOS, zenity or kdialog on Linux, and Explorer on Windows; <code>pulp ui --no-open</code> suits headless boxes.</p>
+    </section>
+  </main>
+
+  <footer class="lp-bottom">
+    <div class="lp lp-foot">
+      <span class="lp-name">Named for paper pulp, the verb <em>to pulp</em> (extract the juice), and pulp fiction: disposable reading.</span>
       <span>MIT · Bryan Gass</span>
-      <span><a href="https://onlygass.dev">onlygass.dev</a> · <a href="/llms.txt">llms.txt</a> · <a href="https://github.com/BeeGass/pulp">source</a></span>
-    </footer>
-  </div>
+      <span class="p-grow"></span>
+      <a href="https://onlygass.dev">onlygass.dev</a>
+      <a href="/llms.txt">llms.txt</a>
+      <a href="/index.md">index.md</a>
+      <a href="https://github.com/BeeGass/pulp">GitHub</a>
+    </div>
+  </footer>
+
+  <script type="module">
+    import { mountMill, icon } from '/mill/mill.js';
+
+    document.querySelectorAll('[data-copy]').forEach((button) => {
+      const idle = button.innerHTML;
+      button.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(button.dataset.copy);
+        } catch (_) {
+          return;
+        }
+        button.innerHTML = icon('check');
+        button.setAttribute('aria-label', 'Copied');
+        window.setTimeout(() => {
+          button.innerHTML = idle;
+          button.setAttribute('aria-label', 'Copy the install command');
+        }, 1600);
+      });
+    });
+
+    const shot = document.getElementById('shot');
+    const stage = shot.parentElement;
+    // Wide screens render the desktop mill at 1280px and scale it to fit, so the
+    // shot shows the three-column layout; phones render the phone layout as is.
+    const fitShot = () => {
+      const width = stage.clientWidth;
+      if (width >= 720) {
+        const k = width / 1280;
+        shot.style.width = '1280px';
+        shot.style.height = '800px';
+        shot.style.transform = 'scale(' + k + ')';
+        stage.style.height = Math.round(660 * k) + 'px';
+      } else {
+        shot.style.width = '';
+        shot.style.height = '';
+        shot.style.transform = '';
+        stage.style.height = '';
+      }
+    };
+    // Fit on the next frame: resizing the stage inside its own observer loops in WebKit.
+    let fitFrame = 0;
+    new ResizeObserver(() => {
+      cancelAnimationFrame(fitFrame);
+      fitFrame = requestAnimationFrame(fitShot);
+    }).observe(stage);
+    fitShot();
+    try {
+      const demo = await (await fetch('/mill/demo.json')).json();
+      const p = demo.pack;
+      const mill = mountMill(shot, {
+        surface: 'local',
+        surfaceName: 'site demo',
+        version: 'demo',
+        privacy: 'nothing leaves this machine',
+        privacyLong: 'Files never leave this machine.',
+        footer: 'pulp · 127.0.0.1:8747',
+        caps: { source: 'path', gitignore: true, sample: true },
+        scan: async () => ({ files: demo.files }),
+        pack: async () => ({
+          dump: p.dump,
+          filename: p.filename,
+          dumpBytes: p.dump_bytes,
+          filesExtracted: p.files_extracted,
+          filesSkipped: p.files_skipped,
+          tokens: p.tokens_est,
+          elapsedMs: 0,
+          outcomes: p.outcomes,
+        }),
+      }, { demo: true, path: demo.path });
+      await mill.scan();
+      await mill.pulp();
+    } catch (err) {
+      console.warn('product shot unavailable', err);
+      shot.closest('.lp-shot').hidden = true;
+    }
+  </script>
 </body>
 </html>

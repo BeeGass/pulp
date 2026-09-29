@@ -15,34 +15,73 @@ author: "Bryan Gass"
 
 # Pulp
 
-Grind a local folder into one **LLM-ready dump**.
+Grind a folder into one **LLM-ready dump**.
 
-Pulp walks a tree in parallel, pulls text out of mixed documents, and writes a single file you can hand a model. Paper pulp. Juice. Disposable reading.
+Pulp walks a tree in parallel, pulls text out of code, PDFs, Office files, and notebooks, and writes one file you can hand a model.
 
-**Local first.** Files never leave the machine. The CLI mill binds localhost only. The [browser mill](https://pulp.onlygass.dev/mill) packs in WebAssembly inside your tab — still no upload.
+**Local first.** Nothing is uploaded. The CLI mill (`pulp ui`) binds localhost only. The [browser mill](https://pulp.onlygass.dev/mill) packs in WebAssembly inside your tab. Both mills have a **Try a sample** key that loads a small built-in project.
 
 ## Install
 
 ```bash
 cargo install --git https://github.com/BeeGass/pulp --locked
-pulp -o dump.xml .
-pulp ui
+pulp ui              # local mill on 127.0.0.1:8747
+pulp -o dump.xml .   # this folder, one XML dump
+pulp -f md src       # Markdown to stdout
 ```
 
-Requires Rust 1.85+.
+Requires Rust 1.85 or newer.
 
-## What it does
+## What goes in
 
-- **Mixed documents** — code, Markdown, HTML, JSON/CSV, PDF, Office, notebooks, archives
-- **Formats you pick** — plain text, Markdown, or Claude-style XML (`-f` or `-o` extension)
-- **Quiet by default** — skips `node_modules`, `target`, venvs, secrets, and other noisy trees
-- **Local mill** — `pulp ui` at `127.0.0.1:8747`; nothing uploaded
+| Kind | Notes |
+| --- | --- |
+| Source | Rust, Lean, Python, TypeScript, TOML, Markdown, and other text |
+| NumPy | `.npy` and `.npz` metadata and a small preview (not treated as binary) |
+| HTML, XML, JSON | Readable text, or decoded source with `--source` |
+| CSV, TSV | Tabular text |
+| PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, RTF | Extracted text |
+| Jupyter | Cells; `--notebook-outputs` keeps outputs |
+| Zip, tar | A root archive always expands; nested members need `--archives` |
 
-## Browser mill
+Binary media is skipped unless `--binaries`. Noisy trees stay out even when tracked: `node_modules/`, `target/`, `dist/`, virtualenvs, lockfiles, `.env`, keys, and similar. `.gitignore` is honored unless `--no-gitignore`.
+
+## Formats
+
+Plain text (`-f txt`), Markdown (`-f md`), or Claude-style XML (`-f xml`). Without `-f`, the layout follows the `-o` extension and otherwise defaults to plain text.
+
+## Options
+
+| Flag | Meaning |
+| --- | --- |
+| `-o, --output FILE` | Write the dump here (default: stdout) |
+| `-f, --format FMT` | `txt`, `md`, or `xml` |
+| `--tree MODE` | `selected` (default), `full`, or `none` |
+| `-j, --jobs N` | Parallelism; `0` uses every available core |
+| `--include GLOB` | Repeatable allow-list |
+| `--exclude GLOB` | Repeatable extra deny-list |
+| `--hidden` | Include hidden files (`.git` is still skipped) |
+| `--no-gitignore` | Ignore `.gitignore` and `.ignore` |
+| `--archives` | Expand nested zip and tar members |
+| `--source` | Keep HTML, XML, and JSON as source |
+| `--notebook-outputs` | Include Jupyter cell outputs |
+| `--list` | Print relative paths only |
+
+Every flag is in the [README](https://github.com/BeeGass/pulp#options).
+
+## Two mills
+
+| | Browser mill (`/mill`) | Local mill (`pulp ui`) |
+| --- | --- | --- |
+| Files leave the device | Never | Never |
+| Choosing files | Folder or file picker, or drop | OS file manager, or any typed path |
+| `.gitignore` | Not available | Honored |
+| Default excludes | Same core matcher | Same core matcher |
+| PDF, Office, zip | In-process WebAssembly | A child process with a timeout |
+| Cancel | Stops the worker | Between files |
+| Setup | None | One cargo line |
 
 In-browser mill: [/mill](https://pulp.onlygass.dev/mill) · [mill.md](https://pulp.onlygass.dev/mill.md)
-
-Same privacy story as localhost: packing runs in WASM in your tab. No server-side upload/packer. Local `pulp ui` still wins for gitignore walks and hang isolation.
 
 ## Agent maps
 
@@ -77,7 +116,9 @@ The public mill UI at [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill) p
 ## What it is for
 
 - Quick dumps when you do not want to install the CLI
-- Same product idea as `pulp ui` on localhost: select files, choose format (XML / Markdown / plain text), copy or download the dump
+- The same interface as `pulp ui` on localhost: choose a folder or files (or drop them on the page), tick what goes in, choose readable text or source and XML / Markdown / plain text, then copy or download the dump
+- **Try a sample** loads a small built-in project so you can see a dump before choosing your own files
+- Selecting a file name previews the text pulp extracts from it; files that could not be extracted are flagged in the tree with the reason
 
 ## Limits vs local CLI
 

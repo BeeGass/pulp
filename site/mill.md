@@ -19,7 +19,9 @@ The public mill UI at [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill) p
 ## What it is for
 
 - Quick dumps when you do not want to install the CLI
-- Same product idea as `pulp ui` on localhost: select files, choose format (XML / Markdown / plain text), copy or download the dump
+- The same interface as `pulp ui` on localhost: choose a folder or files (or drop them on the page), tick what goes in, choose readable text or source and XML / Markdown / plain text, then copy or download the dump
+- **Try a sample** loads a small built-in project so you can see a dump before choosing your own files
+- Selecting a file name previews the text pulp extracts from it; files that could not be extracted are flagged in the tree with the reason
 
 ## Limits vs local CLI
 

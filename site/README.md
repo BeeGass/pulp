@@ -13,8 +13,8 @@ Static landing site for pulp.
 
 | Path | Purpose |
 | --- | --- |
-| `/` | Product / install landing |
-| `/mill/` | Placeholder for the in-browser WASM mill |
+| `/` | Product / install landing; its product shot is the real mill in demo mode (`/mill/demo.json`) |
+| `/mill` | In-browser WASM mill |
 
 The live axum mill (`pulp ui`) stays localhost-only. Do not point this site at a server-side packer.
 
