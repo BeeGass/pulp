@@ -928,6 +928,41 @@ struct PdfCIDFont<'a> {
     to_unicode: Option<HashMap<u32, String>>,
     widths: HashMap<CharCode, f64>, // should probably just use i32 here
     default_width: Option<f64>, // only used for CID fonts and we should probably brake out the different font types
+    /// The font's CMap is a Unicode one, so a code with no ToUnicode entry is
+    /// the text's own UTF-16 (pulp's patch).
+    unicode_codes: bool,
+}
+
+/// Predefined CMaps whose codes are UTF-16 code units: `Uni*-UCS2-H/V` hold
+/// one unit per code, and `Uni*-UTF16-H/V` also use four-byte surrogate pairs.
+/// Returns the byte mapping, or `None` for any other name.
+fn unicode_cmap(name: &str) -> Option<ByteMapping> {
+    let writing = name.ends_with("-H") || name.ends_with("-V");
+    if !name.starts_with("Uni") || !writing {
+        return None;
+    }
+    // `next_char` adds `dst_CID_lo` to the code, so 0 keeps every code as is,
+    // as the Identity-H mapping does.
+    let identity = |lo: u32, hi: u32| CIDRange { src_code_lo: lo, src_code_hi: hi, dst_CID_lo: 0 };
+    if name.contains("-UCS2-") {
+        return Some(ByteMapping {
+            codespace: vec![CodeRange { width: 2, start: 0, end: 0xffff }],
+            cid: vec![identity(0, 0xffff)],
+        });
+    }
+    if name.contains("-UTF16-") {
+        // A high surrogate is never a whole code, so the reader takes two
+        // more bytes and finds the four-byte pair.
+        return Some(ByteMapping {
+            codespace: vec![
+                CodeRange { width: 2, start: 0, end: 0xd7ff },
+                CodeRange { width: 2, start: 0xe000, end: 0xffff },
+                CodeRange { width: 4, start: 0xd800_dc00, end: 0xdbff_dfff },
+            ],
+            cid: vec![identity(0, 0xd7ff), identity(0xe000, 0xffff), identity(0xd800_dc00, 0xdbff_dfff)],
+        });
+    }
+    None
 }
 
 fn get_unicode_map<'a>(doc: &'a Document, font: &'a Dictionary) -> Option<HashMap<u32, String>> {
@@ -989,12 +1024,16 @@ impl<'a> PdfCIDFont<'a> {
         let encoding = maybe_get_obj(doc, font, b"Encoding").expect("Encoding required in type0 fonts");
         dlog!("base_name {} {:?}", base_name, font);
 
+        let mut unicode_codes = false;
         let encoding = match encoding {
             &Object::Name(ref name) => {
                 let name = pdf_to_utf8(name);
                 dlog!("encoding {:?}", name);
                 if name == "Identity-H" || name == "Identity-V" {
                     ByteMapping { codespace: vec![CodeRange{width: 2, start: 0, end: 0xffff }], cid: vec![CIDRange{ src_code_lo: 0, src_code_hi: 0xffff, dst_CID_lo: 0 }]}
+                } else if let Some(mapping) = unicode_cmap(&name) {
+                    unicode_codes = true;
+                    mapping
                 } else {
                     panic!("unsupported encoding {}", name);
                 }
@@ -1046,7 +1085,7 @@ impl<'a> PdfCIDFont<'a> {
                 }
             }
         }
-        PdfCIDFont{doc, font, widths, to_unicode: unicode_map, encoding, default_width: Some(default_width as f64) }
+        PdfCIDFont{doc, font, widths, to_unicode: unicode_map, encoding, default_width: Some(default_width as f64), unicode_codes }
     }
 }
 
@@ -1095,6 +1134,13 @@ impl<'a> PdfFont for PdfCIDFont<'a> {
         let s = self.to_unicode.as_ref().and_then(|x| x.get(&char));
         if let Some(s) = s {
             s.clone()
+        } else if self.unicode_codes {
+            let units: Vec<u16> = if char > 0xffff {
+                vec![(char >> 16) as u16, char as u16]
+            } else {
+                vec![char as u16]
+            };
+            String::from_utf16(&units).unwrap_or_default()
         } else {
             dlog!("Unknown character {:?} in {:?} {:?}", char, self.font, self.to_unicode);
             "".to_string()
