@@ -863,6 +863,8 @@ span.mill-twist {
       "out";
     gap: 10px;
     padding: 0 12px 10px;
+    /* on a short screen the panes leave room for the pinned dock */
+    --short-chrome: calc(76px + var(--safe-b));
   }
   .mill[data-tab="files"] .mill-grid {
     grid-template-rows: minmax(0, 1fr);
@@ -1058,9 +1060,10 @@ span.mill-twist {
   }
 }
 
-/* short screens (a phone on its side): the page scrolls and the panes get the
-   screen, instead of squeezing every pane into a few pixels */
-@media (max-height: 520px) and (pointer: coarse) {
+/* short windows (a phone on its side, or a page zoomed to 200%): the page
+   scrolls and the panes get the screen, instead of squeezing every pane into a
+   few pixels */
+@media (max-height: 520px) {
   .mill.is-page {
     height: auto;
     min-height: var(--mill-h, 100dvh);
@@ -1071,7 +1074,7 @@ span.mill-twist {
   }
   .mill.is-page .mill-files,
   .mill.is-page .mill-out {
-    height: calc(100dvh - 76px - var(--safe-b));
+    height: calc(100dvh - var(--short-chrome, 40px));
   }
   .mill.is-page .mill-dock {
     position: sticky;
