@@ -106,6 +106,18 @@ fn test_pulp_with_reader_closing_pipe_early_exits_quietly() {
     assert!(!err.contains("panicked"), "{err}");
 }
 
+#[cfg(unix)]
+#[test]
+fn test_pulp_with_dash_output_writes_the_dump_to_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("a.rs"), b"fn a() {}\n");
+    let out = run(pulp().current_dir(dir.path()).args(["-o", "-", "-q", "."]));
+    assert!(out.status.success(), "{}", stderr(&out));
+    let dump = String::from_utf8(out.stdout).unwrap();
+    assert!(dump.contains("FILE: a.rs"), "{dump}");
+    assert_eq!(names_in(dir.path()), ["a.rs"], "no file named - is written");
+}
+
 #[test]
 fn test_pulp_list_with_output_writes_escaped_paths_to_file() {
     let dir = tempfile::tempdir().unwrap();

@@ -22,7 +22,7 @@ struct Cli {
     #[arg(default_value = ".")]
     paths: Vec<PathBuf>,
 
-    /// Write the dump here instead of stdout (`.txt`, `.md`, `.xml` select format).
+    /// Write the dump here instead of stdout (`.txt`, `.md`, `.xml` select format; `-` is stdout).
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -175,7 +175,11 @@ fn is_broken_pipe(err: &anyhow::Error) -> bool {
     })
 }
 
-fn run(cli: Cli) -> anyhow::Result<()> {
+fn run(mut cli: Cli) -> anyhow::Result<()> {
+    // `-o -` means stdout, as it does for most tools, rather than a file named `-`.
+    if cli.output.as_deref() == Some(Path::new("-")) {
+        cli.output = None;
+    }
     match cli.command {
         Some(Command::Ui { port, no_open }) => {
             let rt = tokio::runtime::Runtime::new()?;
