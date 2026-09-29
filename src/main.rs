@@ -1,13 +1,13 @@
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use pulp::config::parse_size;
 use pulp::tree::display_path;
-use pulp::{Options, OutputFormat, TreeMode, pack};
+use pulp::{Options, OutputFormat, TreeMode};
 
 /// Pulp a local folder of mixed documents into one LLM-ready text file.
 #[derive(Parser, Debug)]
@@ -100,7 +100,8 @@ struct Cli {
     #[arg(long)]
     list: bool,
 
-    /// Suppress the stderr summary.
+    /// Suppress the stderr summary. Warnings about paths that could not be
+    /// walked still print.
     #[arg(short, long)]
     quiet: bool,
 }
@@ -235,7 +236,11 @@ fn main() -> anyhow::Result<()> {
         max_entries: cli.max_entries,
         max_total_bytes: cli.max_total_bytes,
     };
-    let packed = pack(&opts).context("pulp failed")?;
+    let start = Instant::now();
+    let (manifest, warnings) =
+        pulp::manifest::scan_manifest_with_warnings(&opts).context("pulp failed")?;
+    let packed =
+        pulp::pack_manifest(&manifest, &opts, None, None, Some(start)).context("pulp failed")?;
     if opts.list_only {
         for file in &packed.files {
             println!("{}", display_path(&file.relative));
@@ -252,6 +257,10 @@ fn main() -> anyhow::Result<()> {
         pulp::render::write_all(&mut w, &packed, &opts)?;
         w.flush()?;
     }
+    // Walk warnings print even with --quiet, which hides only the summary.
+    for line in warning_lines(&warnings) {
+        eprintln!("{line}");
+    }
     if !opts.quiet {
         print_summary(&packed, opts.tokens);
     }
@@ -267,6 +276,23 @@ fn resolve_format(cli: &Cli) -> anyhow::Result<OutputFormat> {
     } else {
         Ok(OutputFormat::Plain)
     }
+}
+
+/// Warnings printed before the summary: the first few paths the walk could
+/// not read, then a count of the rest.
+fn warning_lines(warnings: &pulp::walk::WalkWarnings) -> Vec<String> {
+    const SHOWN: usize = 10;
+    let mut lines: Vec<String> = warnings
+        .messages
+        .iter()
+        .take(SHOWN)
+        .map(|message| format!("warning: {}", display_path(message)))
+        .collect();
+    let rest = warnings.total.saturating_sub(lines.len());
+    if rest > 0 {
+        lines.push(format!("warning: {rest} more paths could not be walked"));
+    }
+    lines
 }
 
 fn print_summary(packed: &pulp::Packed, show_tokens: bool) {
@@ -379,6 +405,21 @@ mod tests {
         packed.stats.files_skipped = 1;
         let line = summary_line(&packed);
         assert!(line.ends_with(" in 0ms, 1 skipped"), "{line}");
+    }
+
+    #[test]
+    fn test_warning_lines_with_many_warnings_returns_first_ten_and_a_count() {
+        let warnings = pulp::walk::WalkWarnings {
+            messages: (0..12)
+                .map(|i| format!("/p{i:02}: Permission denied"))
+                .collect(),
+            total: 15,
+        };
+        let lines = warning_lines(&warnings);
+        assert_eq!(lines.len(), 11);
+        assert_eq!(lines[0], "warning: /p00: Permission denied");
+        assert_eq!(lines[10], "warning: 5 more paths could not be walked");
+        assert!(warning_lines(&pulp::walk::WalkWarnings::default()).is_empty());
     }
 
     #[test]

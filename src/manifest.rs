@@ -43,6 +43,16 @@ pub struct ScanManifest {
 /// Walk roots with `opts` and record every eligible entry once.
 #[cfg(feature = "native")]
 pub fn scan_manifest(opts: &Options) -> Result<ScanManifest, Error> {
+    Ok(scan_manifest_with_warnings(opts)?.0)
+}
+
+/// [`scan_manifest`], plus the paths the walk could not read (a directory
+/// without read permission, a dangling link), so a caller can say which
+/// files are missing and why.
+#[cfg(feature = "native")]
+pub fn scan_manifest_with_warnings(
+    opts: &Options,
+) -> Result<(ScanManifest, walk::WalkWarnings), Error> {
     let walked = walk::collect_detailed(opts)?;
     let entries = entries_from_walked(walked.files, opts);
     let bytes = entries.iter().map(|e| e.size).sum();
@@ -51,12 +61,13 @@ pub fn scan_manifest(opts: &Options) -> Result<ScanManifest, Error> {
         .first()
         .cloned()
         .unwrap_or_else(|| PathBuf::from("."));
-    Ok(ScanManifest {
+    let manifest = ScanManifest {
         root,
         entries,
         bytes,
         truncated: walked.truncated,
-    })
+    };
+    Ok((manifest, walked.warnings))
 }
 
 #[cfg(feature = "native")]

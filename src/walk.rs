@@ -33,6 +33,31 @@ pub struct WalkedFile {
 pub struct WalkOutcome {
     pub files: Vec<WalkedFile>,
     pub truncated: bool,
+    /// Paths the walk could not read, such as a directory without read
+    /// permission, whose files are therefore missing.
+    pub warnings: WalkWarnings,
+}
+
+/// Most walk warnings kept word for word; the rest are only counted.
+pub const MAX_WALK_WARNINGS: usize = 1000;
+
+/// Problems met while walking, in walk order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WalkWarnings {
+    /// The first [`MAX_WALK_WARNINGS`] messages. The walk visits paths in
+    /// the same order on every run, so the same ones are kept.
+    pub messages: Vec<String>,
+    /// Every warning, kept or not.
+    pub total: usize,
+}
+
+impl WalkWarnings {
+    fn push(&mut self, message: String) {
+        self.total += 1;
+        if self.messages.len() < MAX_WALK_WARNINGS {
+            self.messages.push(message);
+        }
+    }
 }
 
 /// Collect files under `opts.roots`, applying gitignore, include, and exclude.
@@ -128,6 +153,7 @@ struct Found<'a> {
     budget: Budget,
     ids: HashSet<String>,
     files: Vec<WalkedFile>,
+    warnings: WalkWarnings,
 }
 
 impl<'a> Found<'a> {
@@ -142,6 +168,7 @@ impl<'a> Found<'a> {
             budget: Budget::new(opts),
             ids: HashSet::new(),
             files: Vec::new(),
+            warnings: WalkWarnings::default(),
         }
     }
 
@@ -198,6 +225,7 @@ impl<'a> Found<'a> {
         WalkOutcome {
             truncated: self.budget.is_cut(),
             files: self.files,
+            warnings: self.warnings,
         }
     }
 }
@@ -339,8 +367,14 @@ fn walk_dir(
     }
 
     for result in builder.build() {
-        let Ok(entry) = result else {
-            continue;
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(err) => {
+                // An unreadable directory drops every file under it; say so
+                // rather than leave a silent gap.
+                found.warnings.push(err.to_string());
+                continue;
+            }
         };
         if entry.file_type().is_none_or(|ft| !ft.is_file()) {
             continue;
@@ -941,6 +975,33 @@ mod tests {
         assert_eq!(rels(&collect(&opts).unwrap()), ["src/a.rs"]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_detailed_with_max_entries_never_walks_past_the_cut() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.rs"), b"fn a() {}\n");
+        write(&dir.path().join("b.rs"), b"fn b() {}\n");
+        let locked = dir.path().join("zz");
+        write(&locked.join("c.rs"), b"fn c() {}\n");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let privileged = fs::read_dir(&locked).is_ok();
+        let outcome = collect_detailed(&Options {
+            roots: vec![dir.path().to_path_buf()],
+            max_entries: 1,
+            ..Options::default()
+        });
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if privileged {
+            // Running as root: nothing is unreadable, so there is nothing to test.
+            return;
+        }
+        let outcome = outcome.unwrap();
+        assert!(outcome.truncated);
+        assert_eq!(rels(&outcome.files), ["a.rs"]);
+        assert_eq!(outcome.warnings.total, 0, "{:?}", outcome.warnings);
+    }
+
     #[test]
     fn test_collect_detailed_with_max_entries_keeps_first_file_in_depth_first_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -1011,6 +1072,53 @@ mod tests {
         })
         .unwrap();
         assert_eq!(rels(&files), ["p/a/b/x.txt", "a/b/x.txt", "r/b/y.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_detailed_with_more_warnings_than_kept_returns_first_in_path_order() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.rs"), b"fn a() {}\n");
+        let locked: Vec<PathBuf> = (0..MAX_WALK_WARNINGS + 5)
+            .map(|i| dir.path().join(format!("d{i:04}")))
+            .collect();
+        for path in &locked {
+            write(&path.join("x.rs"), b"fn x() {}\n");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        let privileged = fs::read_dir(&locked[0]).is_ok();
+        let outcomes: Vec<_> = [1, 8]
+            .into_iter()
+            .map(|jobs| {
+                collect_detailed(&Options {
+                    roots: vec![dir.path().to_path_buf()],
+                    jobs,
+                    ..Options::default()
+                })
+            })
+            .collect();
+        for path in &locked {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        if privileged {
+            // Running as root: nothing is unreadable, so there is nothing to test.
+            return;
+        }
+        let warnings: Vec<WalkWarnings> = outcomes
+            .into_iter()
+            .map(|outcome| outcome.unwrap().warnings)
+            .collect();
+        assert_eq!(warnings[0], warnings[1]);
+        let kept = &warnings[0];
+        assert_eq!(kept.total, MAX_WALK_WARNINGS + 5);
+        assert_eq!(kept.messages.len(), MAX_WALK_WARNINGS);
+        assert!(kept.messages[0].contains("d0000"), "{}", kept.messages[0]);
+        let last = &kept.messages[MAX_WALK_WARNINGS - 1];
+        assert!(
+            last.contains(&format!("d{:04}", MAX_WALK_WARNINGS - 1)),
+            "{last}"
+        );
     }
 
     #[cfg(unix)]

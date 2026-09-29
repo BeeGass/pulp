@@ -24,6 +24,53 @@ fn write(path: &Path, body: &[u8]) {
     fs::write(path, body).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn test_pulp_with_quiet_and_unreadable_directory_still_prints_warnings() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("a.rs"), b"fn a() {}\n");
+    let locked = dir.path().join("locked");
+    write(&locked.join("inner.rs"), b"fn hidden() {}\n");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let privileged = fs::read_dir(&locked).is_ok();
+    let out = run(pulp().arg("-q").arg(dir.path()));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    if privileged {
+        // Running as root: nothing is unreadable, so there is nothing to test.
+        return;
+    }
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.starts_with("warning: "), "{err}");
+    assert!(err.contains("locked"), "{err}");
+    assert!(!err.contains("pulped"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_pulp_with_unreadable_directory_warns_and_packs_the_rest() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("a.rs"), b"fn a() {}\n");
+    let locked = dir.path().join("locked");
+    write(&locked.join("inner.rs"), b"fn hidden() {}\n");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let privileged = fs::read_dir(&locked).is_ok();
+    let out = run(pulp().arg(dir.path()));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    if privileged {
+        // Running as root: nothing is unreadable, so there is nothing to test.
+        return;
+    }
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.starts_with("warning: "), "{err}");
+    assert!(err.contains("locked"), "{err}");
+    let dump = String::from_utf8(out.stdout).unwrap();
+    assert!(dump.contains("FILE: a.rs"), "{dump}");
+}
+
 #[test]
 fn test_pulp_with_any_job_count_returns_identical_dump() {
     let dir = tempfile::tempdir().unwrap();
