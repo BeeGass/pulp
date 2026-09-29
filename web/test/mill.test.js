@@ -880,6 +880,29 @@ test('alert: Scan with no folder asks for one without scanning', async () => {
   equal(document.activeElement, m.$('[data-el="path"]'), 'focus moves to the path field');
 });
 
+test('alert: folders a scan could not read are a warning that names them', async () => {
+  const a = fakeAdapter();
+  const m = mount(a);
+  press(typePath(m, '/tmp/project'), 'Enter');
+  const denied = ['locked: Permission denied (os error 13)', 'private: Permission denied (os error 13)', 'vault: Permission denied (os error 13)'];
+  (await a.next('scan')).resolve({ files: FILES, warnings: denied, warning_count: 5 });
+  await flush();
+  const alert = alertBox(m);
+  ok(!alert.hidden, 'the alert shows');
+  match(text(alert), /could not read 5 folders/);
+  match(text(alert), /locked: Permission denied/);
+  match(text(alert), /vault: Permission denied/);
+  match(text(alert), /2 more/);
+  equal(alert.querySelector('[data-tone]').dataset.tone, 'warn');
+  equal(alert.querySelector('[data-act="report-alert"]'), null, 'nothing to report');
+  equal(fileIds(m).length, FILES.length, 'the files that were read are listed');
+
+  m.$('.mill-source [data-act="scan"]').click();
+  (await a.next('scan')).resolve({ files: FILES, warnings: [], warning_count: 0 });
+  await flush();
+  ok(alert.hidden, 'a scan that reads everything clears the warning');
+});
+
 /* ---------- tree, filter, and focus ---------- */
 
 test('preview: a slow preview never replaces a newer one', async () => {

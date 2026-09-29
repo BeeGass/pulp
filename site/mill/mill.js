@@ -107,6 +107,22 @@ function errText(err) {
   return err && err.message ? err.message : String(err);
 }
 
+/**
+ * The folders a scan could not open (no read permission, say), as a warning
+ * title and the lines naming them; null when the scan read everything. The
+ * local mill sends the first few messages and a count of all of them.
+ */
+function unreadFolders(data) {
+  const count = Number(data.warning_count) || 0;
+  if (!count) return null;
+  const lines = (data.warnings || []).map(String);
+  if (count > lines.length) lines.push(count - lines.length + ' more');
+  const title = count === 1
+    ? 'pulp could not read one folder, so the files in it are missing.'
+    : 'pulp could not read ' + count + ' folders, so the files in them are missing.';
+  return { title, detail: lines.join('\n') };
+}
+
 function fence(text) {
   const body = String(text || '');
   const runs = body.match(/`+/g) || [];
@@ -1678,8 +1694,12 @@ export function mountMill(root, adapter, options) {
       if (caps.source === 'path' && !demo && S.remember !== false) writeStore(PATH_KEY, S.path);
       if (!keepSelection) S.tab = 'files';
       renderFiles();
+      const unread = unreadFolders(data);
       if (data.truncated) {
-        showAlert('The scan stopped at the size cap, so some files were left out.', 'Narrow the folder, or use the CLI with --max-total-bytes.', false, 'warn');
+        const advice = 'Narrow the folder, or use the CLI with --max-total-bytes.';
+        showAlert('The scan stopped at the size cap, so some files were left out.', unread ? advice + '\n\n' + unread.title + '\n' + unread.detail : advice, false, 'warn');
+      } else if (unread) {
+        showAlert(unread.title, unread.detail, false, 'warn');
       }
     } catch (err) {
       if (!keepSelection) {

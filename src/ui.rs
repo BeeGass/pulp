@@ -660,7 +660,14 @@ struct ScanResponse {
     bytes: u64,
     truncated: bool,
     manifest_id: String,
+    /// The first few paths the walk could not read, relative to the root.
+    warnings: Vec<String>,
+    /// How many paths the walk could not read, shown or not.
+    warning_count: usize,
 }
+
+/// Walk warnings a scan answer carries; the mill counts the rest.
+const SCAN_WARNINGS_SHOWN: usize = 3;
 
 #[derive(Debug, Serialize)]
 struct FileEntry {
@@ -1010,7 +1017,8 @@ fn scan_sync(req: ScanRequest, mill: &Mill) -> Result<ScanResponse, ApiError> {
         list_only: true,
         ..Options::default()
     };
-    let manifest = manifest::scan_manifest(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
+    let (manifest, warnings) = manifest::scan_manifest_with_warnings(&opts)
+        .map_err(|err| ApiError::bad(err.to_string()))?;
     let files: Vec<FileEntry> = manifest
         .entries
         .iter()
@@ -1028,6 +1036,13 @@ fn scan_sync(req: ScanRequest, mill: &Mill) -> Result<ScanResponse, ApiError> {
     let bytes = manifest.bytes;
     let stored = mill.put_manifest(key, manifest);
     Ok(ScanResponse {
+        warnings: warnings
+            .messages
+            .iter()
+            .take(SCAN_WARNINGS_SHOWN)
+            .map(|message| scan_warning(message, &root))
+            .collect(),
+        warning_count: warnings.total,
         root: root.display().to_string(),
         file_count: files.len(),
         bytes,
@@ -1035,6 +1050,13 @@ fn scan_sync(req: ScanRequest, mill: &Mill) -> Result<ScanResponse, ApiError> {
         truncated,
         manifest_id: stored.id.clone(),
     })
+}
+
+/// A walk warning as the mill shows it: paths under the scanned folder are
+/// written relative to it, as the file list writes them.
+fn scan_warning(message: &str, root: &Path) -> String {
+    let prefix = format!("{}{}", root.display(), std::path::MAIN_SEPARATOR);
+    message.replace(&prefix, "")
 }
 
 fn pack_sync(req: PackRequest, mill: &Mill, job: &PackJob) -> Result<PackResponse, ApiError> {
@@ -1705,6 +1727,51 @@ mod tests {
         assert!(html.contains(env!("CARGO_PKG_VERSION")));
         assert!(!html.contains("__PULP_VERSION__"));
         assert!(html.contains("127.0.0.1 only"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_scan_with_unreadable_folder_returns_warning_and_other_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("b.rs"), "fn b() {}\n").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let privileged = std::fs::read_dir(&locked).is_ok();
+        let (status, json) = post_json(
+            "/api/scan",
+            serde_json::json!({ "path": dir.path().display().to_string() }),
+        )
+        .await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if privileged {
+            // Running as root: nothing is unreadable, so there is nothing to test.
+            return;
+        }
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["file_count"], 1, "{json}");
+        assert_eq!(json["warning_count"], 1, "{json}");
+        let warning = json["warnings"][0].as_str().unwrap();
+        assert!(warning.starts_with("locked: "), "{warning}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_warning_with_path_under_root_returns_relative_text() {
+        let root = Path::new("/home/ada/tides");
+        assert_eq!(
+            scan_warning(
+                "/home/ada/tides/locked: Permission denied (os error 13)",
+                root
+            ),
+            "locked: Permission denied (os error 13)"
+        );
+        assert_eq!(
+            scan_warning("/elsewhere/x: Permission denied (os error 13)", root),
+            "/elsewhere/x: Permission denied (os error 13)"
+        );
     }
 
     #[tokio::test]
