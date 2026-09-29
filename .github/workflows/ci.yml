@@ -4,12 +4,17 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # A hung browser or server fails the run instead of holding a runner for hours.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -18,17 +23,21 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: rustfmt
         run: cargo fmt --all --check
+      # --locked: Cargo.lock must already match the manifests, as `cargo install --locked` needs.
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # The browser mill builds pulp without its native features, for wasm32.
       - name: clippy (pulp without native features)
-        run: cargo clippy -p pulp --no-default-features --lib -- -D warnings
+        run: cargo clippy -p pulp --no-default-features --lib --locked -- -D warnings
       - name: clippy (browser mill, wasm32)
-        run: cargo clippy -p pulp-wasm --target wasm32-unknown-unknown -- -D warnings
+        run: cargo clippy -p pulp-wasm --target wasm32-unknown-unknown --locked -- -D warnings
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       - name: site copies match web/
         run: cargo xtask site --check
-      # ubuntu-latest ships google-chrome, which the harness finds on PATH.
+      # ubuntu-latest ships google-chrome, which the harness finds on PATH. The
+      # harness also builds pulp and runs web/test/local.test.html against a
+      # real `pulp ui`, which it stops, with Chrome, however the step ends.
       - name: mill browser tests
+        timeout-minutes: 20
         run: cargo xtask ui-test
