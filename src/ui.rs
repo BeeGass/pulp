@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{
     Options, OutputFormat, Selection, TreeMode, default_exclude_globs, parse_size,
 };
-use crate::manifest;
+use crate::manifest::{self, ManifestEntry};
 use crate::pack;
 use crate::pick;
 use crate::store::{self, JobGuard, Mill, StoredResult};
@@ -732,7 +732,7 @@ fn load_or_scan_manifest(
     if !req.manifest_id.is_empty() {
         if let Some(stored) = mill.get_manifest(&req.manifest_id) {
             if stored.discovery_key == want {
-                return Ok((stored.id, stored.manifest));
+                return Ok((stored.id.clone(), stored.manifest.clone()));
             }
             return Err(ApiError::bad("manifest settings changed; rescan"));
         }
@@ -848,53 +848,140 @@ async fn preview(
     Json(req): Json<PackRequest>,
 ) -> Result<Json<PreviewResponse>, ApiError> {
     authorize(&state, &headers)?;
-    let job = state.mill.try_begin_pack().ok_or_else(ApiError::busy)?;
+    let slot = state.mill.try_begin_preview().ok_or_else(ApiError::busy)?;
     let mill = Arc::clone(&state.mill);
-    let job_worker = Arc::clone(&job);
     let result = tokio::task::spawn_blocking(move || {
-        let _guard = JobGuard {
-            mill,
-            job: job_worker,
-        };
-        preview_sync(req)
+        let _slot = slot;
+        preview_sync(req, &mill)
     })
     .await
     .map_err(|err| ApiError::bad(err.to_string()))?;
     result.map(Json)
 }
 
-fn preview_sync(req: PackRequest) -> Result<PreviewResponse, ApiError> {
-    if req.selected.len() != 1 {
+/// Extract the one selected file. With a usable manifest only that entry is
+/// read; otherwise the folder is walked to find it.
+fn preview_sync(req: PackRequest, mill: &Mill) -> Result<PreviewResponse, ApiError> {
+    let [want] = req.selected.as_slice() else {
         return Err(ApiError::bad("preview one file"));
-    }
-    let opts = options_from_pack(req, false, false)?;
-    let packed = pack::pack(&opts).map_err(|err| ApiError::bad(err.to_string()))?;
-    let file = packed
-        .files
-        .first()
-        .ok_or_else(|| ApiError::bad("file not found"))?;
-    const CAP: usize = 16 * 1024;
-    let truncated = file.text.len() > CAP;
+    };
+    let opts = options_from_pack(req.clone(), false, false)?;
+    let entry = match stored_entry(&req, want, mill)? {
+        Some(entry) => entry,
+        None => walked_entry(&opts)?,
+    };
+    let mut files = pack::pack_manifest_entry(&entry, &opts);
+    // Same shape as the browser mill's preview: the extracted text, or empty
+    // text and the reason; an expanded archive shows every member.
+    let (full, status, message) = match files.as_slice() {
+        [] => (
+            String::new(),
+            pack::FileStatus::Extracted.as_str(),
+            "Nothing in this file goes into the dump.".to_string(),
+        ),
+        [file] if file.id == entry.id => {
+            let file = files.swap_remove(0);
+            let status = file.status.as_str();
+            let message = file.status.message(file.size);
+            let text = if file.status == pack::FileStatus::Extracted {
+                file.text
+            } else {
+                String::new()
+            };
+            (text, status, message)
+        }
+        members => {
+            let (status, message) = if members
+                .iter()
+                .any(|f| f.status == pack::FileStatus::Extracted)
+            {
+                (pack::FileStatus::Extracted.as_str(), String::new())
+            } else {
+                (
+                    members[0].status.as_str(),
+                    members[0].status.message(members[0].size),
+                )
+            };
+            (plain_members(files, &opts)?, status, message)
+        }
+    };
+    let truncated = full.len() > FILE_PREVIEW_BYTES;
     let text = if truncated {
-        let mut end = CAP;
-        while end > 0 && !file.text.is_char_boundary(end) {
+        let mut end = FILE_PREVIEW_BYTES;
+        while end > 0 && !full.is_char_boundary(end) {
             end -= 1;
         }
-        file.text[..end].to_string()
+        full[..end].to_string()
     } else {
-        file.text.clone()
+        full
     };
     Ok(PreviewResponse {
-        id: file.id.clone(),
-        relative: file.relative.clone(),
-        status: file.status.as_str(),
-        message: file.status.message(file.size),
-        kind: file.kind.as_str(),
-        language: crate::language_name(std::path::Path::new(&file.relative), file.kind),
-        size: file.size,
+        id: entry.id.clone(),
+        relative: entry.relative.clone(),
+        status,
+        message,
+        kind: entry.kind.as_str(),
+        language: crate::language_name(std::path::Path::new(&entry.relative), entry.kind),
+        size: entry.size,
         truncated,
         text,
     })
+}
+
+/// A file preview's cap, the same as the browser mill's.
+const FILE_PREVIEW_BYTES: usize = 32 * 1024;
+
+/// An expanded archive's members as a plain-text dump with no directory map.
+fn plain_members(files: Vec<pack::PackedFile>, opts: &Options) -> Result<String, ApiError> {
+    let packed = pack::Packed {
+        files,
+        tree: String::new(),
+        stats: pack::Stats::default(),
+    };
+    let plain = Options {
+        format: OutputFormat::Plain,
+        tree: TreeMode::None,
+        source_mode: opts.source_mode,
+        ..Options::default()
+    };
+    let mut out = Vec::new();
+    crate::render::write_all(&mut out, &packed, &plain)
+        .map_err(|err| ApiError::bad(err.to_string()))?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// The selected file's entry in the request's stored manifest, matched by id or
+/// relative path so a request can never name a path of its own. `Ok(None)` when
+/// the manifest id is unknown or was scanned with other discovery settings.
+fn stored_entry(
+    req: &PackRequest,
+    want: &str,
+    mill: &Mill,
+) -> Result<Option<ManifestEntry>, ApiError> {
+    let Some(stored) = mill.get_manifest(&req.manifest_id) else {
+        return Ok(None);
+    };
+    if stored.discovery_key != discovery_key_pack(req) {
+        return Ok(None);
+    }
+    stored
+        .manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == want || entry.relative == want)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| ApiError::bad("file is not in this scan; rescan"))
+}
+
+/// Walk the folder for the selected file when there is no usable manifest.
+fn walked_entry(opts: &Options) -> Result<ManifestEntry, ApiError> {
+    manifest::scan_manifest(opts)
+        .map_err(|err| ApiError::bad(err.to_string()))?
+        .entries
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::bad("file not found"))
 }
 
 fn tree_sync(req: PackRequest, mill: &Mill) -> Result<TreeResponse, ApiError> {
@@ -1027,7 +1114,17 @@ mod tests {
     }
 
     async fn post_json(uri: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
-        let response = router()
+        post_to(&router(), uri, body).await
+    }
+
+    /// POST to one app, so later requests see the manifests earlier ones stored.
+    async fn post_to(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1045,6 +1142,16 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         (status, json)
+    }
+
+    fn router_with_mill(mill: Arc<Mill>) -> Router {
+        router_with(AppState {
+            pick: pick::pick_folder,
+            token: Arc::from(TEST_TOKEN),
+            origin: Arc::from(TEST_ORIGIN),
+            mill,
+            sample: Arc::default(),
+        })
     }
 
     #[tokio::test]
@@ -1284,6 +1391,326 @@ mod tests {
         assert!(json["text"].as_str().unwrap().contains("fn hello"));
         assert_eq!(json["relative"].as_str(), Some("hello.rs"));
         assert_eq!(json["status"].as_str(), Some("extracted"));
+    }
+
+    #[tokio::test]
+    async fn test_preview_with_manifest_id_returns_source() {
+        let app = router();
+        let path = testdata().display().to_string();
+        let (status, scan) = post_to(
+            &app,
+            "/api/scan",
+            serde_json::json!({ "path": path, "gitignore": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        let manifest_id = scan["manifest_id"].as_str().unwrap();
+        // Two previews in a row: the first must hand its slot back.
+        for (file, marker, language) in [
+            ("hello.rs", "fn hello", "rust"),
+            ("Hello.lean", "def hello", "lean"),
+        ] {
+            let (status, json) = post_to(
+                &app,
+                "/api/preview",
+                serde_json::json!({
+                    "path": path,
+                    "gitignore": false,
+                    "manifest_id": manifest_id,
+                    "selected": [file]
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            assert_eq!(json["relative"].as_str(), Some(file));
+            assert_eq!(json["status"].as_str(), Some("extracted"));
+            assert_eq!(json["language"].as_str(), Some(language));
+            assert!(json["text"].as_str().unwrap().contains(marker), "{json}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_preview_with_expanded_archive_shows_every_member() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zw = zip::ZipWriter::new(&mut buf);
+            let opt = zip::write::SimpleFileOptions::default();
+            zw.start_file("first.txt", opt).unwrap();
+            zw.write_all(b"alpha member\n").unwrap();
+            zw.start_file("second.txt", opt).unwrap();
+            zw.write_all(b"beta member\n").unwrap();
+            zw.finish().unwrap();
+        }
+        std::fs::write(dir.path().join("bundle.zip"), buf.into_inner()).unwrap();
+        let app = router();
+        let path = dir.path().display().to_string();
+        let (status, scan) = post_to(
+            &app,
+            "/api/scan",
+            serde_json::json!({ "path": path, "archives": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        let (status, json) = post_to(
+            &app,
+            "/api/preview",
+            serde_json::json!({
+                "path": path,
+                "archives": true,
+                "manifest_id": scan["manifest_id"],
+                "selected": ["bundle.zip"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let text = json["text"].as_str().unwrap();
+        assert!(
+            text.contains("alpha member") && text.contains("beta member"),
+            "{json}"
+        );
+        assert_eq!(json["status"], "extracted");
+        assert_eq!(json["relative"], "bundle.zip");
+    }
+
+    #[tokio::test]
+    async fn test_preview_with_damaged_file_returns_reason_and_no_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("paper.pdf"), b"%PDF-1.4\nnot a real pdf\n").unwrap();
+        let app = router();
+        let path = dir.path().display().to_string();
+        let (status, scan) = post_to(&app, "/api/scan", serde_json::json!({ "path": path })).await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        let (status, json) = post_to(
+            &app,
+            "/api/preview",
+            serde_json::json!({
+                "path": path,
+                "manifest_id": scan["manifest_id"],
+                "selected": ["paper.pdf"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["status"], "unreadable");
+        assert_eq!(json["text"], "");
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("Could not parse"),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_preview_with_large_file_returns_capped_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("wide.txt"), "\u{20ac}".repeat(12_000)).unwrap();
+        let app = router();
+        let path = dir.path().display().to_string();
+        let (status, scan) = post_to(&app, "/api/scan", serde_json::json!({ "path": path })).await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        let (status, json) = post_to(
+            &app,
+            "/api/preview",
+            serde_json::json!({
+                "path": path,
+                "manifest_id": scan["manifest_id"],
+                "selected": ["wide.txt"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "kind",
+                "language",
+                "message",
+                "relative",
+                "size",
+                "status",
+                "text",
+                "truncated"
+            ]
+        );
+        // 32 KiB ends inside a three-byte character, so the cut backs up two bytes.
+        assert_eq!(json["text"].as_str().unwrap().len(), 32 * 1024 - 2);
+        assert_eq!(json["truncated"], true);
+        assert_eq!(json["size"], 36_000);
+    }
+
+    #[tokio::test]
+    async fn test_preview_with_manifest_id_after_folder_change_returns_scanned_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("kept.rs"), "fn kept() {}\n").unwrap();
+        let app = router();
+        let path = dir.path().display().to_string();
+        let (status, scan) = post_to(&app, "/api/scan", serde_json::json!({ "path": path })).await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        let manifest_id = scan["manifest_id"].as_str().unwrap();
+        // A fresh walk would now skip kept.rs and find new.rs.
+        std::fs::write(dir.path().join(".ignore"), "kept.rs\n").unwrap();
+        std::fs::write(dir.path().join("new.rs"), "fn new() {}\n").unwrap();
+        let body = |file: &str| {
+            serde_json::json!({
+                "path": path,
+                "manifest_id": manifest_id,
+                "selected": [file]
+            })
+        };
+
+        let (status, json) = post_to(&app, "/api/preview", body("kept.rs")).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(json["text"].as_str().unwrap().contains("fn kept"), "{json}");
+
+        let (status, json) = post_to(&app, "/api/preview", body("new.rs")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(
+            json["error"].as_str(),
+            Some("file is not in this scan; rescan")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_preview_with_id_outside_manifest_returns_bad_request() {
+        let app = router();
+        let path = testdata().display().to_string();
+        let (status, scan) = post_to(
+            &app,
+            "/api/scan",
+            serde_json::json!({ "path": path, "gitignore": false }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        let outside = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("Cargo.toml")
+            .display()
+            .to_string();
+        for file in ["missing.rs", "../Cargo.toml", outside.as_str()] {
+            let (status, json) = post_to(
+                &app,
+                "/api/preview",
+                serde_json::json!({
+                    "path": path,
+                    "gitignore": false,
+                    "manifest_id": scan["manifest_id"],
+                    "selected": [file]
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{file}: {json}");
+            assert_eq!(
+                json["error"].as_str(),
+                Some("file is not in this scan; rescan"),
+                "{file}"
+            );
+            // Without a manifest the walk cannot reach outside the folder either.
+            let (status, json) = post_to(
+                &app,
+                "/api/preview",
+                serde_json::json!({ "path": path, "gitignore": false, "selected": [file] }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{file}: {json}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_preview_with_stale_manifest_id_returns_walked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        let app = router();
+        let path = dir.path().display().to_string();
+        let (status, scan) = post_to(&app, "/api/scan", serde_json::json!({ "path": path })).await;
+        assert_eq!(status, StatusCode::OK, "{scan}");
+        // Only a fresh walk can find a file added after the scan.
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        for body in [
+            serde_json::json!({
+                "path": path,
+                "manifest_id": "0123456789abcdef",
+                "selected": ["b.rs"]
+            }),
+            serde_json::json!({
+                "path": path,
+                "manifest_id": scan["manifest_id"],
+                "hidden": true,
+                "selected": ["b.rs"]
+            }),
+        ] {
+            let (status, json) = post_to(&app, "/api/preview", body).await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            assert!(json["text"].as_str().unwrap().contains("fn b"), "{json}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_preview_with_pack_running_returns_source() {
+        let mill = Arc::new(Mill::new());
+        let _pack = mill.try_begin_pack().expect("pack slot");
+        let app = router_with_mill(mill);
+        let path = testdata().display().to_string();
+        let (status, json) = post_to(
+            &app,
+            "/api/preview",
+            serde_json::json!({ "path": path, "gitignore": false, "selected": ["hello.rs"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(
+            json["text"].as_str().unwrap().contains("fn hello"),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pack_with_preview_running_returns_dump() {
+        let mill = Arc::new(Mill::new());
+        let _preview = mill.try_begin_preview().expect("preview slot");
+        let app = router_with_mill(mill);
+        let path = testdata().display().to_string();
+        let (status, json) = post_to(
+            &app,
+            "/api/pack",
+            serde_json::json!({
+                "path": path,
+                "format": "txt",
+                "gitignore": false,
+                "selected": ["hello.rs"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(
+            json["dump"].as_str().unwrap().contains("fn hello"),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_preview_busy_returns_too_many_requests() {
+        let mill = Arc::new(Mill::new());
+        let _preview = mill.try_begin_preview().expect("preview slot");
+        let app = router_with_mill(mill);
+        let path = testdata().display().to_string();
+        let (status, json) = post_to(
+            &app,
+            "/api/preview",
+            serde_json::json!({ "path": path, "gitignore": false, "selected": ["hello.rs"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{json}");
     }
 
     #[tokio::test]

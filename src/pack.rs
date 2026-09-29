@@ -228,6 +228,19 @@ pub fn pack_manifest(
     })
 }
 
+/// Extract one manifest entry on the calling thread, as [`pack_manifest`]
+/// would. Archive members come back sorted by relative path.
+///
+/// The mill preview uses this so it never queues behind a pack on the shared
+/// Rayon pool.
+#[cfg(feature = "native")]
+pub(crate) fn pack_manifest_entry(entry: &ManifestEntry, opts: &Options) -> Vec<PackedFile> {
+    let extract_opts = ExtractOpts::from_options(opts);
+    let mut files = process_entry(entry, opts, &extract_opts, &AtomicU64::new(0), None);
+    files.sort_by(|a, b| a.relative.cmp(&b.relative));
+    files
+}
+
 /// Pack an in-memory file set (browser / virtual trees). No filesystem reads.
 ///
 /// Enforces [`Options::selection`], include/exclude, hidden, and the byte budget.
@@ -1145,6 +1158,58 @@ mod tests {
             !rels.iter().any(|r| r.contains(".env")),
             ".env must not leak from archives, got {rels:?}"
         );
+    }
+
+    #[test]
+    fn test_pack_manifest_entry_with_one_entry_returns_its_text_only() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.rs"), b"fn a() {}\n");
+        write(&dir.path().join("b.rs"), b"fn b() {}\n");
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            ..Options::default()
+        };
+        let manifest = crate::manifest::scan_manifest(&opts).unwrap();
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == "b.rs")
+            .unwrap();
+        let files = pack_manifest_entry(entry, &opts);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative, "b.rs");
+        assert_eq!(files[0].status, FileStatus::Extracted);
+        assert!(files[0].text.contains("fn b"), "{}", files[0].text);
+    }
+
+    #[test]
+    fn test_pack_manifest_entry_with_zip_returns_sorted_members() {
+        use std::io::{Cursor, Write as IoWrite};
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zw = ZipWriter::new(&mut buf);
+            let opt = SimpleFileOptions::default();
+            zw.start_file("z.rs", opt).unwrap();
+            zw.write_all(b"fn z() {}\n").unwrap();
+            zw.start_file("a.rs", opt).unwrap();
+            zw.write_all(b"fn a() {}\n").unwrap();
+            zw.finish().unwrap();
+        }
+        write(&dir.path().join("bundle.zip"), &buf.into_inner());
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            follow_archives: true,
+            ..Options::default()
+        };
+        let manifest = crate::manifest::scan_manifest(&opts).unwrap();
+        assert_eq!(manifest.entries.len(), 1);
+        let files = pack_manifest_entry(&manifest.entries[0], &opts);
+        let rels: Vec<&str> = files.iter().map(|f| f.relative.as_str()).collect();
+        assert_eq!(rels, vec!["bundle.zip/a.rs", "bundle.zip/z.rs"]);
     }
 
     #[test]

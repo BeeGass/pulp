@@ -1,4 +1,5 @@
-//! Bounded mill session: manifests, extraction results, and one pack job.
+//! Bounded mill session: manifests, extraction results, one pack job, and one
+//! preview.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -15,20 +16,21 @@ pub const PREVIEW_CHARS: usize = 32 * 1024;
 /// In-memory mill session.
 pub struct Mill {
     busy: AtomicBool,
+    /// Separate from `busy` so a preview and a pack never turn each other away.
+    preview_busy: AtomicBool,
     job_seq: AtomicU64,
     current: Mutex<Option<Arc<PackJob>>>,
-    manifests: Mutex<Lru<StoredManifest>>,
+    manifests: Mutex<Lru<Arc<StoredManifest>>>,
     results: Mutex<Lru<Arc<StoredResult>>>,
 }
 
-/// One admitted pack/preview job with its own cancel flag.
+/// One admitted pack job with its own cancel flag.
 pub struct PackJob {
     pub id: u64,
     pub cancel: AtomicBool,
 }
 
 /// Discovery snapshot keyed by [`StoredManifest::id`].
-#[derive(Clone)]
 pub struct StoredManifest {
     pub id: String,
     pub discovery_key: String,
@@ -66,6 +68,7 @@ impl Default for Mill {
     fn default() -> Self {
         Self {
             busy: AtomicBool::new(false),
+            preview_busy: AtomicBool::new(false),
             job_seq: AtomicU64::new(1),
             current: Mutex::new(None),
             manifests: Mutex::new(Lru::default()),
@@ -124,6 +127,18 @@ impl Mill {
             .clone()
     }
 
+    /// Admit one preview. Previews have their own slot, so one runs beside a
+    /// pack; only a second preview is turned away.
+    #[must_use]
+    pub fn try_begin_preview(self: &Arc<Self>) -> Option<PreviewGuard> {
+        self.preview_busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()?;
+        Some(PreviewGuard {
+            mill: Arc::clone(self),
+        })
+    }
+
     pub fn put_manifest(&self, discovery_key: String, manifest: ScanManifest) -> String {
         let id = new_id();
         let stored = StoredManifest {
@@ -134,11 +149,11 @@ impl Mill {
         self.manifests
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(id.clone(), stored, 0);
+            .push(id.clone(), Arc::new(stored), 0);
         id
     }
 
-    pub fn get_manifest(&self, id: &str) -> Option<StoredManifest> {
+    pub fn get_manifest(&self, id: &str) -> Option<Arc<StoredManifest>> {
         self.manifests
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -221,6 +236,18 @@ impl Drop for JobGuard {
     }
 }
 
+/// Holds the preview slot. Move it into the worker so the slot frees when the
+/// worker finishes, even if the HTTP task is gone.
+pub struct PreviewGuard {
+    mill: Arc<Mill>,
+}
+
+impl Drop for PreviewGuard {
+    fn drop(&mut self) {
+        self.mill.preview_busy.store(false, Ordering::SeqCst);
+    }
+}
+
 pub fn new_id() -> String {
     let mut buf = [0u8; 8];
     let _ = getrandom::fill(&mut buf);
@@ -264,6 +291,25 @@ mod tests {
         assert!(mill.try_begin_pack().is_none());
         assert!(job.cancel.load(Ordering::SeqCst));
         mill.end_pack(&job);
+    }
+
+    #[test]
+    fn test_try_begin_preview_with_busy_returns_none() {
+        let mill = Arc::new(Mill::new());
+        let slot = mill.try_begin_preview().expect("first");
+        assert!(mill.try_begin_preview().is_none());
+        drop(slot);
+        assert!(mill.try_begin_preview().is_some());
+    }
+
+    #[test]
+    fn test_try_begin_preview_with_pack_running_returns_slot() {
+        let mill = Arc::new(Mill::new());
+        let job = mill.try_begin_pack().expect("pack");
+        let slot = mill.try_begin_preview().expect("preview beside a pack");
+        mill.end_pack(&job);
+        assert!(mill.try_begin_pack().is_some(), "pack beside a preview");
+        drop(slot);
     }
 
     #[test]
