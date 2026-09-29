@@ -17,7 +17,7 @@ import init, * as pulp from './pkg/pulp_wasm.js';
  * A page hands its compiled packer only to a worker of the same build; a
  * worker from a later deploy loads the packer it shipped with.
  */
-export const BUILD = '7e719ff18250bcf6';
+export const BUILD = '4a44d71575539bea';
 
 /** Leading bytes read from a file whose name does not say what it holds. */
 const HEAD_BYTES = 8192;
