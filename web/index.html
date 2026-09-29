@@ -41,7 +41,9 @@
         const what = url === '/api/preview' ? 'preview' : 'pack';
         throw Object.assign(new Error('Another ' + what + ' is running. Try again when it finishes.'), { busy: true });
       }
-      if (!res.ok) throw new Error(json.error || res.statusText);
+      // A 4xx answer is about the request (a folder that does not exist, say),
+      // not a bug in pulp, so the mill shows it without offering a report.
+      if (!res.ok) throw Object.assign(new Error(json.error || res.statusText), { user: res.status < 500 });
       return json;
     }
 
@@ -147,7 +149,7 @@
         const q = '?format=' + encodeURIComponent(r.format) + (r.tree ? '' : '&no_tree=true');
         const out = await fetch('/api/artifact/' + encodeURIComponent(res.resultId) + q, { headers: { 'x-pulp-token': TOKEN } });
         if (out.status === 401) throw staleSession();
-        if (!out.ok) throw new Error('could not fetch the full dump (' + out.status + ')');
+        if (!out.ok) throw Object.assign(new Error('could not fetch the full dump (' + out.status + ')'), { user: out.status < 500 });
         return out.text();
       },
       async cancel() {

@@ -1696,6 +1696,7 @@ export function mountMill(root, adapter, options) {
   function failed(title, err) {
     if (err && err.busy) showAlert('The mill is busy.', err, false, 'warn');
     else if (err && err.reload) showAlert('This mill has restarted.', err, false, 'warn');
+    else if (err && err.user) showAlert(title, err, false, 'warn');
     else showAlert(title, err, true);
   }
 
@@ -1725,7 +1726,7 @@ export function mountMill(root, adapter, options) {
       picked = kind === 'files' ? await adapter.pickFiles() : await adapter.browse();
     } catch (err) {
       if (hold) setBusy('');
-      showAlert(kind === 'files' ? 'Could not open the file picker.' : 'Could not open the folder picker.', err, true);
+      failed(kind === 'files' ? 'Could not open the file picker.' : 'Could not open the folder picker.', err);
       return;
     }
     if (hold) setBusy('');
@@ -1762,7 +1763,7 @@ export function mountMill(root, adapter, options) {
       picked = await adapter.sample();
     } catch (err) {
       setBusy('');
-      showAlert('Could not load the sample project.', err, true);
+      failed('Could not load the sample project.', err);
       return;
     }
     setBusy('');
@@ -2331,7 +2332,7 @@ export function mountMill(root, adapter, options) {
         return takeSource(picked);
       }, (err) => {
         setBusy('');
-        showAlert('Could not read the dropped files.', err, true);
+        failed('Could not read the dropped files.', err);
       });
     });
   }
