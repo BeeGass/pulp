@@ -4,7 +4,7 @@
 //! and the local mill writes it to a temp folder so the normal scan path runs.
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use serde::Deserialize;
 
@@ -66,10 +66,9 @@ impl Private {
 impl Scratch {
     /// Write the sample into the private folder and return the project root.
     pub fn materialize(&self) -> Result<PathBuf, String> {
-        let mut slot = self
-            .0
-            .lock()
-            .map_err(|_| "sample folder lock poisoned".to_string())?;
+        // A write that panicked leaves nothing that the checks below do not
+        // cover, so a poisoned lock is safe to keep using.
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if !slot.as_ref().is_some_and(Private::is_intact) {
             let fresh = create_private_dir(&std::env::temp_dir())
                 .map_err(|err| format!("create a sample folder: {err}"))?;
@@ -81,13 +80,13 @@ impl Scratch {
         }
     }
 
-    /// Delete the private folder, if one was made and it is still ours.
+    /// Delete the private folder, if one was made and it is still ours. Runs
+    /// even after a sample write panicked, so a stop signal still removes it.
     pub fn remove(&self) {
-        if let Ok(mut slot) = self.0.lock() {
-            if let Some(private) = slot.take() {
-                if private.is_intact() {
-                    let _ = std::fs::remove_dir_all(&private.path);
-                }
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(private) = slot.take() {
+            if private.is_intact() {
+                let _ = std::fs::remove_dir_all(&private.path);
             }
         }
     }
@@ -229,6 +228,33 @@ mod tests {
         }
         scratch.remove();
         assert!(!parent.exists());
+    }
+
+    #[test]
+    fn test_scratch_remove_with_poisoned_lock_removes_folder() {
+        let scratch = Scratch::default();
+        let parent = scratch
+            .materialize()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let poisoned = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _held = scratch.0.lock().unwrap();
+                    panic!("a sample write failed while holding the lock");
+                })
+                .join()
+        });
+        assert!(poisoned.is_err());
+        assert!(scratch.0.is_poisoned());
+        assert_eq!(
+            scratch.materialize().unwrap().parent().unwrap(),
+            parent.as_path()
+        );
+        scratch.remove();
+        assert!(!parent.exists(), "shutdown left {}", parent.display());
     }
 
     #[test]
