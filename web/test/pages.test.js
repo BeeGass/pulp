@@ -2,7 +2,7 @@
 // browser mill at /mill/, both served from site/ by `cargo xtask ui-test`) in
 // same-origin frames and use them the way a visitor would.
 
-import { equal, match, ok, run, test, waitFor } from './harness.js';
+import { equal, match, ok, run, same, sleep, test, waitFor } from './harness.js';
 
 const stage = document.getElementById('stage');
 // Lines of a dump; the ruling on an empty sheet is aria-hidden.
@@ -142,15 +142,31 @@ test('browser mill: a crash, a panic, or a stack overflow spends the instance it
 });
 
 /**
- * Start the frame's workers from a wrapper around worker.js in which an
- * extractor that reads the file `name` recurses without end, as a parser does
- * on a document that draws itself, and runs out of stack.
+ * Start the frame's workers, nested extractors included, from a wrapper that
+ * runs `setup` (lines of a module) before worker.js, so it sees each message
+ * before the worker does.
  */
-function overflowOn(win, name) {
-  const setup = [
+function wrapWorkers(win, setup) {
+  const lines = [
     'const wrap = self.location.href;',
     'const Real = self.Worker;',
     'if (Real) self.Worker = function (url, options) { return new Real(wrap, options); };',
+  ].concat(setup);
+  const script = (text) => win.URL.createObjectURL(new win.Blob([text], { type: 'text/javascript' }));
+  const wrap = script('import ' + JSON.stringify(script(lines.join('\n'))) + ';\nimport ' + JSON.stringify(win.location.origin + '/mill/worker.js') + ';\n');
+  const Real = win.Worker;
+  win.Worker = function (url, options) {
+    return new Real(wrap, options);
+  };
+}
+
+/**
+ * Wrap the frame's workers so an extractor that reads the file `name`
+ * recurses without end, as a parser does on a document that draws itself,
+ * and runs out of stack.
+ */
+function overflowOn(win, name) {
+  wrapWorkers(win, [
     'self.addEventListener("message", (ev) => {',
     '  const msg = ev.data;',
     '  if (!msg || msg.type !== "extract" || !msg.payload) return;',
@@ -160,13 +176,7 @@ function overflowOn(win, name) {
     '    Object.defineProperty(f, "file", { get: () => deeper(0) });',
     '  }',
     '});',
-  ].join('\n');
-  const script = (text) => win.URL.createObjectURL(new win.Blob([text], { type: 'text/javascript' }));
-  const wrap = script('import ' + JSON.stringify(script(setup)) + ';\nimport ' + JSON.stringify(win.location.origin + '/mill/worker.js') + ';\n');
-  const Real = win.Worker;
-  win.Worker = function (url, options) {
-    return new Real(wrap, options);
-  };
+  ]);
 }
 
 test('browser mill: a parser that runs out of stack is noted, and the rest of a drop pulps', async () => {
@@ -189,6 +199,150 @@ test('browser mill: a parser that runs out of stack is noted, and the rest of a 
   match(dump, /\[error extracting deep\.txt: extractor ran out of stack\]/, 'the note in the dump');
   match(dump, /fn main\(\) \{\}/, 'the rest of the drop is in the dump');
 }, { timeout: 60000 });
+
+/**
+ * Wrap the frame's workers so each extractor reports the files it is asked
+ * to extract. Returns the names, which grow as packs run.
+ */
+function countExtractions(win) {
+  const channel = 'pulp-extract-' + Math.random().toString(36).slice(2);
+  const names = [];
+  const listen = new BroadcastChannel(channel);
+  listen.onmessage = (ev) => names.push(...ev.data);
+  wrapWorkers(win, [
+    'const report = new BroadcastChannel(' + JSON.stringify(channel) + ');',
+    'self.addEventListener("message", (ev) => {',
+    '  const msg = ev.data;',
+    '  if (msg && msg.type === "extract" && msg.payload) report.postMessage(msg.payload.files.map((f) => f.relative));',
+    '});',
+  ]);
+  return { names, close: () => listen.close() };
+}
+
+/** Write `text` to `path` under the folder handle `top`, making its folders. */
+async function writeFile(top, path, text) {
+  const parts = path.split('/');
+  let dir = top;
+  for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part, { create: true });
+  const handle = await dir.getFileHandle(parts[parts.length - 1], { create: true });
+  const out = await handle.createWritable();
+  await out.write(text);
+  await out.close();
+}
+
+/**
+ * A folder handle that records, in `listed`, the path of every folder a walk
+ * lists, and otherwise answers as `handle` does.
+ */
+function recording(handle, listed, path = '') {
+  if (handle.kind !== 'directory') return handle;
+  return {
+    kind: 'directory',
+    name: handle.name,
+    async *values() {
+      listed.push(path);
+      for await (const child of handle.values()) yield recording(child, listed, path ? path + '/' + child.name : child.name);
+    },
+  };
+}
+
+/** A folder `name` of `{ path: text }` files in the frame's private file system, as a picker would hand it over. */
+async function privateFolder(win, name, files) {
+  const root = await win.navigator.storage.getDirectory();
+  await root.removeEntry(name, { recursive: true }).catch(() => {});
+  const top = await root.getDirectoryHandle(name, { create: true });
+  for (const [path, text] of Object.entries(files)) await writeFile(top, path, text);
+  return { top, remove: () => root.removeEntry(name, { recursive: true }).catch(() => {}) };
+}
+
+test('browser mill: a picked folder is walked past node_modules, a second pulp reuses every file, and an edit is read as it is now', async () => {
+  const doc = await open('/mill/');
+  const win = doc.defaultView;
+  const mill = doc.getElementById('mill');
+  const browse = await waitFor(() => doc.querySelector('.mill-empty [data-act="browse"]'), { timeout: 10000, what: () => 'the mill: ' + describe(mill) });
+  const folder = await privateFolder(win, 'proj', {
+    'src/lib.rs': 'pub fn tide() -> u32 {\n    1\n}\n',
+    'src/main.rs': 'fn main() {}\n',
+    'README.md': '# proj\n',
+    'node_modules/pkg/index.js': 'module.exports = 1;\n',
+  });
+  const extracted = countExtractions(win);
+  const listed = [];
+  try {
+    // The page asks the browser's folder picker for the folder.
+    win.showDirectoryPicker = async () => recording(folder.top, listed);
+    browse.click();
+    await waitFor(() => !mill.dataset.busy && mill.querySelectorAll('.mill-row[data-id]').length === 3, {
+      timeout: 20000, what: () => 'the scan: ' + describe(mill),
+    });
+    ok(!mill.querySelector('.mill-row[data-id^="proj/node_modules"]'), 'node_modules is left out');
+    same(listed.sort(), ['', 'src'], 'the walk never opens node_modules');
+    const dump = () => doc.querySelector('[data-el="dump"]').textContent;
+    const status = () => doc.querySelector('[data-el="status"]').textContent;
+
+    await pulp(doc, mill);
+    await sleep(100);
+    equal(status(), 'Ready', describe(mill));
+    same(extracted.names.slice().sort(), ['README.md', 'src/lib.rs', 'src/main.rs'], 'the first pulp extracts every file');
+    const first = dump();
+
+    extracted.names.length = 0;
+    await pulp(doc, mill);
+    await sleep(100);
+    same(extracted.names, [], 'a second pulp of an unchanged folder extracts nothing');
+    equal(dump(), first, 'and gives the same dump');
+
+    // Edited in place after the pick: read as it is now, not flagged.
+    await sleep(20);
+    await writeFile(folder.top, 'src/lib.rs', 'pub fn tide() -> u32 {\n    2\n}\n');
+    extracted.names.length = 0;
+    await pulp(doc, mill);
+    await sleep(100);
+    same(extracted.names, ['src/lib.rs'], 'only the edited file is extracted again');
+    equal(status(), 'Ready', 'nothing is flagged: ' + describe(mill));
+    match(dump(), /u32 \{\n\s*2\n\}/, 'the dump holds the edit');
+    match(dump(), /fn main\(\) \{\}/, 'and the files taken from the last dump');
+
+    // Gone since the scan: that file cannot be read at all, so it is flagged.
+    const root = await win.navigator.storage.getDirectory();
+    await (await root.getDirectoryHandle('proj')).removeEntry('README.md');
+    await pulp(doc, mill);
+    equal(status(), '1 issue', describe(mill));
+    ok(mill.querySelector('.mill-row.is-flag[data-id="proj/README.md"]'), 'the deleted file is flagged');
+    match(dump(), /\[changed since scan: no longer there\]/, 'and noted as gone, as pulp ui notes it');
+  } finally {
+    extracted.close();
+    await folder.remove();
+  }
+}, { timeout: 90000 });
+
+test('browser mill: a dismissed folder picker offers the folder input next, and a refused one at once', async () => {
+  const doc = await open('/mill/');
+  const win = doc.defaultView;
+  const mill = doc.getElementById('mill');
+  const browse = await waitFor(() => doc.querySelector('.mill-empty [data-act="browse"]'), { timeout: 10000, what: () => 'the mill: ' + describe(mill) });
+  const input = doc.getElementById('dirInput');
+  let opened = 0;
+  input.click = () => { opened++; };
+  let asked = 0;
+  let refusal = 'AbortError';
+  win.showDirectoryPicker = async () => {
+    asked++;
+    throw new win.DOMException('The user aborted a request.', refusal);
+  };
+  // Chrome answers a closed picker and a declined permission prompt alike.
+  browse.click();
+  await waitFor(() => asked === 1 && !mill.dataset.busy, { what: 'the folder picker' });
+  await sleep(50);
+  equal(opened, 0, 'a dismissed picker is a cancel');
+  browse.click();
+  await waitFor(() => opened === 1, { what: 'the folder input' });
+  equal(asked, 1, 'the next Choose folder offers the folder input');
+  // A picker refused outright, say in a frame, falls back at once.
+  refusal = 'SecurityError';
+  browse.click();
+  await waitFor(() => asked === 2 && opened === 2, { what: () => 'the folder input after a refusal: asked ' + asked + ', opened ' + opened });
+}, { timeout: 20000 });
 
 test('browser mill: a picked folder lists its files from inside it, as pulp ui does', async () => {
   const doc = await open('/mill/');

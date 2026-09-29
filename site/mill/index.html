@@ -37,21 +37,36 @@
   <input id="fileInput" type="file" multiple hidden>
   <noscript><p style="padding:24px">The browser mill needs JavaScript and WebAssembly. The CLI works without either: <code>cargo install --git https://github.com/BeeGass/pulp --locked</code></p></noscript>
   <script type="module">
-    import { render_result, drop_result, preview_file, format_tree, scan_keep, pulp_version, smoke_pack, heavy_kind, extract_timeout_ms } from '/mill/pkg/pulp_wasm.js';
+    import { render_result, drop_result, preview_file, format_tree, scan_keep, pulp_version, smoke_pack, heavy_kind, extract_timeout_ms, FolderFilter } from '/mill/pkg/pulp_wasm.js';
     // The worker's code, for the build it shipped with and for this thread when workers cannot start.
     import * as here from '/mill/worker.js';
     import { mountMill } from '/mill/mill.js';
 
     const WORKER = '/mill/worker.js';
     const RELOAD = 'The mill was updated while this page was open. Reload the page, then pulp again.';
+    /** Folders listed at once while a grant is walked. */
+    const WALK_POOL = 8;
+    /** Files the page opens at once to learn their size or read them for a pack. */
+    const OPEN_POOL = 32;
+    /** How long a cancelled pack's worker gets to stop on its own before it is stopped outright. */
+    const CANCEL_GRACE_MS = 4000;
 
     let version = 'unknown';
-    // `root` is the folder the scan found every granted path under ('.' for
-    // loose files or several folders). Ids keep the granted path; the scan
-    // and the dump name files from inside the root, as `pulp ui` does. `kinds`
-    // holds the kind the scan found for each id, by name or by leading bytes,
-    // and `truncated` whether the scan stopped at its budgets.
-    const grant = { files: new Map(), label: '', root: '', kinds: new Map(), truncated: false };
+    /**
+     * What the user chose. A folder picker or a drop that hands over handles
+     * or entries leaves them in `tops`: each scan walks them again, and each
+     * pack and preview reads every file as it is now. A grant of plain files
+     * (the folder input, a file pick, the sample) has no `tops`; its files are
+     * the snapshots the browser took when they were chosen.
+     *
+     * `files` maps each id (the granted path) to its source, `{ handle }`,
+     * `{ entry }`, or `{ file }`. `root` is the folder the scan found every
+     * path under ('.' for loose files or several folders); the scan and the
+     * dump name files from inside it, as `pulp ui` does. `meta` holds the
+     * kind and size the scan found for each id, and `truncated` whether the
+     * scan stopped at its budgets.
+     */
+    const grant = { label: '', shown: '', tops: null, files: new Map(), root: '', meta: new Map(), truncated: false };
     /** The packer, compiled once. Workers of this build instantiate it without fetching it again. */
     let compiled = null;
     const ready = here.ensure().then((module) => {
@@ -73,12 +88,13 @@
 
     /* ---------- workers ----------
        Scans, previews, and packs run in workers (site/mill/worker.js), so the
-       page stays responsive. Each pack gets its own worker, and the worker
-       behind the dump on screen keeps that result: a format change redraws it
-       there, and cancelling a newer pack never loses it. A worker whose
-       instance panicked, trapped, or ran out of stack is dropped, and the next
-       job starts a fresh one. Where workers cannot start at all, the same code
-       runs on this thread, except parsers that could hang. */
+       page stays responsive. One pack worker runs every pack of a grant and
+       keeps the result on screen: a format change redraws it there, the next
+       pack takes from it the files that did not change, and a cancel stops a
+       pack without touching it. A worker whose instance panicked, trapped, or
+       ran out of stack is dropped, and the next job starts a fresh one. Where
+       workers cannot start at all, the same code runs on this thread, except
+       parsers that could hang. */
     let noWorkers = false;
     /** Set once a parser crashed on this thread; its instance is spent. */
     let spentHere = '';
@@ -100,13 +116,15 @@
       // message, or cannot load or link a packer.
       if (msg.stale || /^unknown message /.test(text)) text = RELOAD;
       else if (text === 'unreachable') text = 'The packer ran out of memory or crashed. Tick fewer or smaller files, or use the CLI for a folder this large.';
-      return Object.assign(new Error(text), { poisoned: !!msg.poisoned, crash: msg.crash || '' });
+      return Object.assign(new Error(text), { poisoned: !!msg.poisoned, crash: msg.crash || '', cancelled: !!msg.cancelled });
     }
 
     function lane() {
       let worker = null;
       // Whether the worker ever answered: one that never did cannot start here.
       let started = false;
+      // Counts the workers this lane has started; a result lives in one of them.
+      let generation = 0;
       let seq = 0;
       // Set once the lane is to stop when its last call is answered.
       let retiring = false;
@@ -121,6 +139,7 @@
         if (worker) return worker;
         started = false;
         const w = new Worker(WORKER, { type: 'module' });
+        generation++;
         w.onmessage = (ev) => {
           if (worker !== w) return;
           started = true;
@@ -154,6 +173,8 @@
       }
       return {
         idle: () => pending.size === 0,
+        /** The worker the lane runs now, as a number that changes when it starts another. */
+        current: () => (worker ? generation : 0),
         call(type, payload, onProgress) {
           return new Promise((resolve, reject) => {
             let w;
@@ -164,13 +185,26 @@
               return;
             }
             const id = ++seq;
-            pending.set(id, { resolve, reject, onProgress });
+            pending.set(id, { resolve, reject, onProgress, type });
             // The worker takes the compiled packer only if it is of the same build.
             w.postMessage({ type, id, payload, module: compiled, build: here.BUILD });
           });
         },
         stop(err) {
           drop(err || cancelled());
+        },
+        /**
+         * Ask the worker to stop the pack it runs, which leaves the result it
+         * keeps; stop the worker outright if the pack has not ended by `ms`.
+         */
+        cancel(ms) {
+          const packs = [...pending].filter(([, job]) => job.type === 'pack_grant').map(([id]) => id);
+          if (!worker || !packs.length) return;
+          const w = worker;
+          w.postMessage({ type: 'cancel' });
+          setTimeout(() => {
+            if (worker === w && packs.some((id) => pending.has(id))) drop(cancelled());
+          }, ms);
         },
         /** Stop once the calls still running, such as a Download fetching the whole dump, are answered. */
         retire() {
@@ -194,9 +228,14 @@
       return { via: 'main', result: await onPage(local) };
     }
 
-    let jobLane = null;
-    let resultLane = null;
+    /** Runs the packs of the grant and keeps the result on screen. */
+    let packLane = null;
+    /** That result, `{ id, worker }`, while the worker that made it still runs. */
+    let shown = null;
+    /** The result on screen when it was made on this thread. */
     let mainResult = '';
+    /** The lane of the pack running, which a cancel stops. */
+    let packing = null;
     let scanLane = null;
     let previewLane = null;
     let cancelGen = 0;
@@ -206,10 +245,17 @@
       return scanLane;
     }
 
-    /** Free the result on screen before a new one replaces it; a call still running on it finishes first. */
+    /** The lane holding the result `id`, or null once it is gone. */
+    function holding(id) {
+      if (!packLane || !shown || shown.id !== id || packLane.current() !== shown.worker) return null;
+      return packLane;
+    }
+
+    /** Free the result on screen with the grant it came from; a call still running on it finishes first. */
     function retire() {
-      if (resultLane) resultLane.retire();
-      resultLane = null;
+      if (packLane) packLane.retire();
+      packLane = null;
+      shown = null;
       if (mainResult && !spentHere) drop_result(mainResult);
       mainResult = '';
     }
@@ -224,22 +270,139 @@
       return String(path || '').replace(/^(?:\.\/)+/, '').replace(/^\/+/, '');
     }
 
-    /** Replace the grant only when the new selection has files in it. */
+    function countLabel(label, n) {
+      return label + ' · ' + n + (n === 1 ? ' file' : ' files') + ' in this tab';
+    }
+
+    /** Replace the grant with plain files, only when the new selection has files in it. */
     function take(entries, label) {
       const next = new Map();
       for (const e of entries) {
         const rel = cleanPath(e.relative);
-        if (rel) next.set(rel, e.file);
+        if (rel) next.set(rel, { file: e.file });
       }
       if (!next.size) return { cancelled: true, empty: true };
       // The dump of the old grant goes with it.
       retire();
-      grant.files = next;
-      grant.root = '';
-      grant.kinds = new Map();
-      grant.truncated = false;
-      grant.label = label + ' · ' + next.size + (next.size === 1 ? ' file' : ' files') + ' in this tab';
-      return { label: grant.label };
+      Object.assign(grant, { label, shown: countLabel(label, next.size), tops: null, files: next, root: '', meta: new Map(), truncated: false });
+      return { label: grant.shown };
+    }
+
+    /**
+     * Replace the grant with folders and files held as handles or entries,
+     * `[{ name, dir, handle | entry, file? }]`. The scan walks them; `file` is
+     * a dropped file's snapshot, for a browser that cannot open its entry.
+     */
+    function takeTops(tops, label) {
+      retire();
+      Object.assign(grant, { label, shown: label + ' · in this tab', tops, files: new Map(), root: '', meta: new Map(), truncated: false });
+      return { label: grant.shown };
+    }
+
+    /**
+     * Whether a dropped file's entry reports the file as it is now. Chromium,
+     * the engine whose drops also offer file system handles, opens the file
+     * afresh for each `file()`, size and modification time included. Other
+     * engines may keep the size and time they first saw while they read the
+     * bytes afresh, so there a time proves nothing.
+     */
+    const ENTRY_TIMES_CURRENT = typeof DataTransferItem !== 'undefined' && typeof DataTransferItem.prototype.getAsFileSystemHandle === 'function';
+
+    /**
+     * The file behind a source as it is now, and whether its modification
+     * time says so, which lets a later pack take an unchanged file from the
+     * result on screen. A handle and an entry open the file afresh; a plain
+     * file is the snapshot taken when it was chosen.
+     */
+    async function current(source) {
+      if (source.handle) return { file: await source.handle.getFile(), fresh: true };
+      if (source.entry) {
+        try {
+          return { file: await new Promise((resolve, reject) => source.entry.file(resolve, reject)), fresh: ENTRY_TIMES_CURRENT };
+        } catch (err) {
+          if (source.file) return { file: source.file, fresh: false };
+          throw err;
+        }
+      }
+      return { file: source.file, fresh: false };
+    }
+
+    /** The children of a folder handle or entry, as sources. */
+    async function listFolder(node) {
+      const out = [];
+      if (node.handle) {
+        for await (const handle of node.handle.values()) out.push({ name: handle.name, dir: handle.kind === 'directory', handle });
+        return out;
+      }
+      const reader = node.entry.createReader();
+      for (;;) {
+        const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+        if (!batch.length) return out;
+        for (const entry of batch) {
+          if (entry.isFile || entry.isDirectory) out.push({ name: entry.name, dir: entry.isDirectory, entry });
+        }
+      }
+    }
+
+    /**
+     * The files under the grant's tops as `id -> source`, named from each top
+     * down (a name may hold a `\`), without opening the folders the scan's
+     * filters leave out whole: `target/`, `node_modules/`, hidden folders
+     * while hidden files are off. A folder that cannot be listed is left out
+     * and named in `warnings`, as `pulp ui` names the folders it cannot read.
+     */
+    async function walkGrant(opts) {
+      const filter = new FolderFilter(opts);
+      const files = new Map();
+      const warnings = [];
+      try {
+        const single = grant.tops.length === 1 && grant.tops[0].dir;
+        const inner = (path) => (single ? path.slice(grant.tops[0].name.length + 1) : path);
+        const queue = [];
+        for (const top of grant.tops) {
+          if (!top.dir) files.set(top.name, { handle: top.handle, entry: top.entry, file: top.file });
+          else if (single || filter.enter(top.name)) queue.push({ path: top.name, node: top });
+        }
+        const visit = async ({ path, node }) => {
+          let children;
+          try {
+            children = await listFolder(node);
+          } catch (err) {
+            warnings.push(path + ': ' + (err && err.message ? err.message : String(err)));
+            return;
+          }
+          for (const child of children) {
+            const at = path + '/' + child.name;
+            if (!child.dir) files.set(at, { handle: child.handle, entry: child.entry });
+            else if (filter.enter(inner(at))) queue.push({ path: at, node: child });
+          }
+        };
+        await drain(queue, WALK_POOL, visit);
+      } finally {
+        filter.free();
+      }
+      return { files, warnings };
+    }
+
+    /** Run `visit` over `queue`, which it may add to, `limit` items at a time. */
+    function drain(queue, limit, visit) {
+      return new Promise((resolve, reject) => {
+        let active = 0;
+        const next = () => {
+          if (!queue.length && !active) {
+            resolve();
+            return;
+          }
+          while (active < limit && queue.length) {
+            active++;
+            visit(queue.shift()).then(() => {
+              active--;
+              next();
+            }, reject);
+          }
+        };
+        next();
+      });
     }
 
     let settlePick = null;
@@ -287,49 +450,20 @@
       return first ? first.webkitRelativePath.split('/')[0] : 'chosen files';
     }
 
-    function readEntries(reader) {
-      return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+    /** The folder input: every file under the folder, as snapshots. */
+    async function pickFolderInput() {
+      const files = await pick(document.getElementById('dirInput'));
+      if (files === undefined) return undefined;
+      if (!files) return { cancelled: true };
+      return take(files.map((file) => ({ relative: pickedPath(file), file })), folderLabel(files));
     }
 
     /**
-     * Collect the files under a dropped entry, named from the entry names down
-     * from the drop (a name may hold a `\`). An entry that cannot be opened (a
-     * broken link, a folder without read permission) is left out and noted in
-     * `errors`, as the folder picker and `pulp ui` leave such entries out.
+     * Set when the browser's own folder picker was dismissed. It reports a
+     * declined permission prompt and a folder it will not share the same
+     * way, so the next Choose folder offers the folder input instead.
      */
-    async function walkEntry(entry, out, errors, parent) {
-      const path = parent ? parent + '/' + entry.name : entry.name;
-      if (entry.isFile) {
-        try {
-          const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
-          out.push({ relative: path, file });
-        } catch (err) {
-          errors.push(err);
-        }
-        return;
-      }
-      if (!entry.isDirectory) return;
-      let reader;
-      try {
-        reader = entry.createReader();
-      } catch (err) {
-        errors.push(err);
-        return;
-      }
-      for (;;) {
-        let batch;
-        try {
-          batch = await readEntries(reader);
-        } catch (err) {
-          errors.push(err);
-          return;
-        }
-        if (!batch.length) break;
-        // A folder's files open together; its subfolders one after another.
-        await Promise.all(batch.filter((e) => e.isFile).map((e) => walkEntry(e, out, errors, path)));
-        for (const child of batch) if (!child.isFile) await walkEntry(child, out, errors, path);
-      }
-    }
+    let pickerDeclined = false;
 
     function fromBase64(text) {
       const bin = atob(text);
@@ -339,6 +473,34 @@
     }
 
     /* ---------- packing ---------- */
+
+    /**
+     * The ticked files as they are now, `[{ id, relative, kind, size,
+     * modified?, scanned, file }]`, where `scanned` is the size the scan
+     * listed. A file that can no longer be opened (deleted, moved, its
+     * permission gone) comes with `file` null and the size the scan saw, and
+     * the pack notes it as changed, or as gone when the browser says so. Only a file the browser reports as it is
+     * now (through a handle, or an entry in Chromium) carries `modified`,
+     * which lets a pack take it from the result on screen.
+     */
+    function tickedFiles(selected) {
+      const ids = selected.filter((id) => grant.files.has(id));
+      return here.mapPool(ids, OPEN_POOL, async (id) => {
+        const meta = grant.meta.get(id) || {};
+        const one = { id, relative: id, kind: meta.kind, size: meta.size || 0, scanned: meta.size, file: null };
+        try {
+          const { file, fresh } = await current(grant.files.get(id));
+          one.file = file;
+          one.size = file.size;
+          if (fresh) one.modified = file.lastModified;
+        } catch (err) {
+          // Packed as changed, or as gone.
+          one.gone = !!err && err.name === 'NotFoundError';
+        }
+        return one;
+      });
+    }
+
     function packInput(r, files) {
       return {
         files,
@@ -389,7 +551,7 @@
       return typeof out === 'string' ? out : new LargeDump([out], { type: out.type || 'text/plain;charset=utf-8' });
     }
 
-    /** A preview for a file whose parser was lost, worded as a pack would word it. */
+    /** A preview for a file whose parser was lost, or that could not be opened, worded as a pack would word it. */
     async function lostPreview(file, failure) {
       const out = await onPage(() => preview_file({ relative: file.id || file.relative, kind: file.kind, size: file.size || 0, failure }));
       return { text: '', truncated: false, status: out.status, message: out.message };
@@ -405,38 +567,60 @@
       footer: 'wasm · runs in this tab',
       caps: { source: 'grant', pickFiles: true, drop: true, gitignore: false, rerender: true, sample: true, progress: true, copyLimit: here.STRING_BYTES },
       async browse() {
-        const files = await pick(document.getElementById('dirInput'));
-        if (files === undefined) return undefined;
-        if (!files) return { cancelled: true };
-        return take(files.map((file) => ({ relative: pickedPath(file), file })), folderLabel(files));
+        // The browser's folder picker, where there is one, hands over a folder
+        // the mill can walk and read again; otherwise the folder input.
+        if (typeof window.showDirectoryPicker !== 'function' || pickerDeclined) {
+          pickerDeclined = false;
+          return pickFolderInput();
+        }
+        let dir;
+        try {
+          dir = await window.showDirectoryPicker({ id: 'pulp-mill', mode: 'read' });
+        } catch (err) {
+          if (err && err.name === 'AbortError') {
+            pickerDeclined = true;
+            return { cancelled: true };
+          }
+          // Refused outright here, say in a frame: the folder input still works.
+          console.warn('the folder picker is not available here; using the folder input', err);
+          return pickFolderInput();
+        }
+        return takeTops([{ name: dir.name, dir: true, handle: dir }], dir.name);
       },
       async pickFiles() {
+        if (typeof window.showOpenFilePicker === 'function') {
+          let handles;
+          try {
+            handles = await window.showOpenFilePicker({ id: 'pulp-mill', multiple: true });
+          } catch (err) {
+            if (err && err.name === 'AbortError') return { cancelled: true };
+            console.warn('the file picker is not available here; using the file input', err);
+            handles = null;
+          }
+          if (handles && handles.length) return takeTops(handles.map((handle) => ({ name: handle.name, dir: false, handle })), 'chosen files');
+        }
         const files = await pick(document.getElementById('fileInput'));
         if (files === undefined) return undefined;
         if (!files) return { cancelled: true };
         return take(files.map((file) => ({ relative: file.name, file })), 'chosen files');
       },
       drop(dataTransfer) {
-        // Entries are only available while the drop event runs.
+        // Entries are only available while the drop event runs. They list every
+        // name, where Chromium's handles leave out the names Windows cannot hold.
         const entries = [...(dataTransfer.items || [])]
-          .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+          .map((item) => (item.kind === 'file' && item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
           .filter(Boolean);
         const loose = [...(dataTransfer.files || [])];
-        const takeLoose = () => take(loose.map((file) => ({ relative: file.name, file })), 'dropped files');
-        return (async () => {
-          if (!entries.length) return takeLoose();
-          const dirs = entries.filter((e) => e.isDirectory).map((e) => e.name);
-          const out = [];
-          const errors = [];
-          for (const entry of entries) await walkEntry(entry, out, errors, '');
-          if (!out.length) {
-            // WebKit cannot open entries for files that have no path on disk, but it
-            // still lists them in dataTransfer.files. A folder has no such fallback.
-            if (!dirs.length && loose.length) return takeLoose();
-            if (errors.length) throw errors[0];
-          }
-          return take(out, dirs.length === 1 && entries.length === 1 ? dirs[0] : 'dropped files');
-        })();
+        if (!entries.length) return Promise.resolve(take(loose.map((file) => ({ relative: file.name, file })), 'dropped files'));
+        // WebKit cannot open entries for files that have no path on disk, but it
+        // still lists them in dataTransfer.files; such a file keeps that snapshot.
+        const tops = entries.map((entry) => ({
+          name: entry.name,
+          dir: entry.isDirectory,
+          entry,
+          file: entry.isDirectory ? null : loose.find((f) => f.name === entry.name) || null,
+        }));
+        return Promise.resolve(takeTops(tops, tops.length === 1 && tops[0].dir ? tops[0].name : 'dropped files'));
       },
       async sample() {
         const res = await fetch('/mill/sample.json');
@@ -451,61 +635,85 @@
       async scan(o) {
         await ready;
         const opts = { hidden: o.hidden, archives: o.archives };
+        let warnings = [];
+        if (grant.tops) {
+          const walked = await walkGrant(opts);
+          grant.files = walked.files;
+          grant.shown = countLabel(grant.label, walked.files.size);
+          warnings = walked.warnings;
+        }
         // The filters need only the paths. Keep what they keep before touching any file.
         const relatives = [...grant.files.keys()];
         const request = Object.assign({ relatives }, opts);
         const { result: kept } = await inWorker(scanWorker, 'scan_keep', request, async () => scan_keep(request));
-        const files = [...grant.files.values()];
-        const entries = [];
-        for (let k = 0; k < kept.keep.length; k++) {
-          const i = kept.keep[k];
-          // The first look at a picked file's size waits on the browser, about
-          // a tenth of a millisecond each, so sizes are taken a slice at a time.
-          void files[i].size;
-          entries.push([relatives[i], files[i]]);
-          if (k % 1000 === 999) await yieldToPage();
+        const sources = [...grant.files.values()];
+        let entries;
+        if (grant.tops) {
+          // Each kept file is opened once for its size and, if its name does not
+          // say what it holds, its leading bytes. One that cannot be opened is left out.
+          const opened = await here.mapPool(kept.keep, OPEN_POOL, async (i) => {
+            try {
+              return [relatives[i], (await current(sources[i])).file];
+            } catch (_) {
+              return null;
+            }
+          });
+          entries = opened.filter(Boolean);
+        } else {
+          entries = [];
+          for (let k = 0; k < kept.keep.length; k++) {
+            const i = kept.keep[k];
+            // The first look at a picked file's size waits on the browser, about
+            // a tenth of a millisecond each, so sizes are taken a slice at a time.
+            void sources[i].file.size;
+            entries.push([relatives[i], sources[i].file]);
+            if (k % 1000 === 999) await yieldToPage();
+          }
         }
         const payload = Object.assign({ entries, root: kept.root }, opts);
         const { result: data } = await inWorker(scanWorker, 'scan', payload, async () => here.scanGrant(payload));
         grant.root = data.root || '';
-        grant.kinds = new Map((data.files || []).map((f) => [f.id, f.kind]));
+        grant.meta = new Map((data.files || []).map((f) => [f.id, { kind: f.kind, size: f.size }]));
         grant.truncated = !!data.truncated;
-        return { files: data.files || [], bytes: data.bytes || 0, truncated: !!data.truncated, label: grant.label };
+        return {
+          files: data.files || [],
+          bytes: data.bytes || 0,
+          truncated: !!data.truncated,
+          label: grant.shown,
+          warnings: warnings.slice(0, 5),
+          warning_count: warnings.length,
+        };
       },
       async pack(r, hooks) {
         const gen = cancelGen;
         await ready;
         if (gen !== cancelGen) throw cancelled();
-        const files = [];
-        for (const id of r.selected) {
-          const file = grant.files.get(id);
-          if (file) files.push({ id, relative: id, kind: grant.kinds.get(id), file });
-        }
+        const files = await tickedFiles(r.selected);
+        if (gen !== cancelGen) throw cancelled();
         if (!files.length) throw new Error('none of the ticked files can be read in this tab any more; choose the folder again');
-        // The worker reports files extracted, as `pulp ui` does.
+        // The worker reports files extracted, as `pulp ui` does; files taken
+        // from the result on screen count as done at once.
         const onProgress = hooks && hooks.onProgress ? hooks.onProgress : null;
         const input = packInput(r, files);
-        const job = lane();
-        jobLane = job;
+        if (!packLane) packLane = lane();
+        const job = packLane;
+        const replaces = shown && holding(shown.id) === job ? shown.id : null;
+        packing = job;
         let out;
         try {
-          out = await inWorker(() => job, 'pack_grant', input,
-            async () => here.packGrant(input, onProgress || (() => {}), false, () => gen !== cancelGen), onProgress);
-        } catch (err) {
-          job.stop();
-          throw err;
+          out = await inWorker(() => job, 'pack_grant', Object.assign({ replaces }, input), async () => here.packGrant(
+            Object.assign({}, input, { replaces: mainResult || null }), onProgress || (() => {}), false, () => gen !== cancelGen), onProgress);
         } finally {
-          if (jobLane === job) jobLane = null;
+          if (packing === job) packing = null;
         }
-        if (gen !== cancelGen) {
-          job.stop();
-          throw cancelled();
-        }
-        retire();
+        // The pack dropped the result it replaced, so it stands even when a
+        // cancel came too late to stop it.
         if (out.via === 'worker') {
-          resultLane = job;
+          shown = { id: out.result.result_id, worker: job.current() };
         } else {
-          job.stop();
+          if (packLane) packLane.retire();
+          packLane = null;
+          shown = null;
           mainResult = out.result.result_id;
         }
         return normalize(out.result, out.via);
@@ -514,16 +722,23 @@
         await ready;
         const input = renderInput(r.resultId, r);
         if (mainResult && mainResult === r.resultId) return normalize(await onPage(() => render_result(input)), 'main');
-        if (!resultLane) throw new Error('the dump is no longer in memory; pulp again');
-        return normalize(await resultLane.call('render', input), 'worker');
+        const where = holding(r.resultId);
+        if (!where) throw new Error('the dump is no longer in memory; pulp again');
+        return normalize(await where.call('render', input), 'worker');
       },
       async preview(file, r) {
         await ready;
         const id = file.id || file.relative;
-        const blob = grant.files.get(id);
-        if (!blob) throw new Error('this file is no longer available in the tab');
-        const kind = file.kind || grant.kinds.get(id) || '';
-        const payload = { relative: id, kind, file: blob, root: grant.root, source: r.source, notebook_outputs: r.notebook, archives: r.archives, hidden: r.hidden };
+        const source = grant.files.get(id);
+        if (!source) throw new Error('this file is no longer available in the tab');
+        const kind = file.kind || (grant.meta.get(id) || {}).kind || '';
+        let now;
+        try {
+          ({ file: now } = await current(source));
+        } catch (err) {
+          return lostPreview(file, { reason: 'changed', message: err && err.name === 'NotFoundError' ? here.GONE : '' });
+        }
+        const payload = { relative: id, kind, file: now, root: grant.root, source: r.source, notebook_outputs: r.notebook, archives: r.archives, hidden: r.hidden };
         // A preview still running is for a file no longer on screen: start this one at once.
         if (previewLane && !previewLane.idle()) {
           previewLane.stop();
@@ -570,13 +785,13 @@
       async fullDump(res, r) {
         const input = renderInput(res.resultId, r);
         if (mainResult && mainResult === res.resultId) return asDump(await onPage(() => here.dumpOf(input)));
-        if (!resultLane) throw new Error('the full dump is no longer in memory; pulp again');
-        return asDump(await resultLane.call('dump', input));
+        const where = holding(res.resultId);
+        if (!where) throw new Error('the full dump is no longer in memory; pulp again');
+        return asDump(await where.call('dump', input));
       },
       async cancel() {
         cancelGen++;
-        if (jobLane) jobLane.stop();
-        jobLane = null;
+        if (packing) packing.cancel(CANCEL_GRACE_MS);
       },
     });
 

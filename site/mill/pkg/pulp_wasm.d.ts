@@ -2,6 +2,27 @@
 /* eslint-disable */
 
 /**
+ * A scan's filters, compiled once, for a page that walks a granted folder
+ * itself: which folders it can leave unopened because the filters leave out
+ * every file inside them (`target/`, `node_modules/`, hidden folders while
+ * hidden files are off). Skipping them changes no scan, only its time.
+ */
+export class FolderFilter {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Whether a walk should open the folder at `relative`, a path inside
+     * the grant folder.
+     */
+    enter(relative: string): boolean;
+    /**
+     * The filters of a scan with `{ hidden, archives, exclude?,
+     * no_default_excludes? }`, the settings [`scan_keep`] takes.
+     */
+    constructor(input: any);
+}
+
+/**
  * Full dump for a previous [`pack_files`] result, in the format it was packed in.
  */
 export function artifact(result_id: string): string;
@@ -59,6 +80,12 @@ export function heavy_kind(kind: string): boolean;
 export function needs_worker(kind: string, archives: boolean): boolean;
 
 /**
+ * Drop the pack [`pack_begin`] started, as a cancelled or failed pack
+ * leaves it. The result it would have replaced stays as it was.
+ */
+export function pack_abort(): void;
+
+/**
  * Add a batch from [`extract_files`], its JSON bytes, to the pack
  * [`pack_begin`] started. A batch that fails to add leaves the pack as it
  * was, so its files can be noted instead.
@@ -66,12 +93,16 @@ export function needs_worker(kind: string, archives: boolean): boolean;
 export function pack_add(json: Uint8Array): void;
 
 /**
- * Start a stepped pack of `{ files: [{ relative, id?, size, kind? }],
- * truncated?, ...settings }`, where `kind` is the scan's kind for the file
- * and `truncated` says the scan was cut at its budgets. Returns the grant root
- * and the files to extract, in order, with their names inside the root, their
- * kinds, and whether each goes alone. The files are ticked already; nothing
- * else is selected.
+ * Start a stepped pack of `{ files: [{ relative, id?, size, kind?,
+ * modified?, scanned? }], truncated?, replaces?, ...settings }`, where `kind`
+ * is the scan's kind for the file, `size` and `modified` are the file as the
+ * page just read it, `scanned` the size the scan listed it at, `truncated`
+ * says the scan was cut at its budgets, and `replaces` names the result on
+ * screen. Returns the grant root and the files
+ * to extract, in order, with their names inside the root, their kinds,
+ * whether each goes alone, and whether it is `cached`: taken from the
+ * replaced result, so the page neither reads nor extracts it. The files are
+ * ticked already; nothing else is selected.
  */
 export function pack_begin(input: any): any;
 
@@ -85,7 +116,7 @@ export function pack_files(input: any): any;
 
 /**
  * End the pack [`pack_begin`] started: store it as a result and return what
- * [`pack_files`] returns.
+ * [`pack_files`] returns. The result it replaces is dropped.
  */
 export function pack_finish(): any;
 
@@ -136,15 +167,19 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_folderfilter_free: (a: number, b: number) => void;
     readonly artifact: (a: number, b: number) => [number, number, number, number];
     readonly artifact_as: (a: any) => [number, number, number, number];
     readonly artifact_chunks: (a: any, b: any) => [number, number, number];
     readonly drop_result: (a: number, b: number) => number;
     readonly extract_files: (a: any) => [number, number, number, number];
     readonly extract_timeout_ms: () => number;
+    readonly folderfilter_enter: (a: number, b: number, c: number) => number;
+    readonly folderfilter_new: (a: any) => [number, number, number];
     readonly format_tree: (a: any) => [number, number, number, number];
     readonly heavy_kind: (a: number, b: number) => number;
     readonly needs_worker: (a: number, b: number, c: number) => number;
+    readonly pack_abort: () => void;
     readonly pack_add: (a: number, b: number) => [number, number];
     readonly pack_begin: (a: any) => [number, number, number];
     readonly pack_files: (a: any) => [number, number, number];

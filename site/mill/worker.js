@@ -1,11 +1,13 @@
-// The browser mill's worker. The page starts one per pulp (the pack worker),
+// The browser mill's worker. The page starts one for packs (the pack worker),
 // one for scans and trees, and one for previews. A pack worker starts a nested
 // worker of its own, the extractor, to turn the ticked files into text in
 // batches. A parser that panics, traps, runs out of stack, or hangs takes down
 // only the extractor: the pack worker notes that file in the dump and carries
 // on with a fresh one, as `pulp ui` does with its child processes. The pack
-// worker keeps the result, so the page can redraw the dump in another format
-// or ask for the full dump, and the page cancels a pack by terminating it.
+// worker keeps the result on screen, so the page can redraw the dump in
+// another format or ask for the full dump, and runs the next pack beside it,
+// taking from it the files that did not change. A cancel stops the pack at
+// once and leaves that result as it was.
 //
 // The page imports this module too: for the build it shipped with, and to run
 // the same code on its own thread when it cannot start workers.
@@ -17,7 +19,7 @@ import init, * as pulp from './pkg/pulp_wasm.js';
  * A page hands its compiled packer only to a worker of the same build; a
  * worker from a later deploy loads the packer it shipped with.
  */
-export const BUILD = '4a44d71575539bea';
+export const BUILD = 'db173d0922bcb53d';
 
 /** Leading bytes read from a file whose name does not say what it holds. */
 const HEAD_BYTES = 8192;
@@ -94,7 +96,8 @@ function errorText(err) {
   return err && err.message ? err.message : String(err);
 }
 
-async function mapPool(items, limit, fn) {
+/** `fn` over `items`, at most `limit` at a time, results in order. */
+export async function mapPool(items, limit, fn) {
   const out = new Array(items.length);
   let next = 0;
   async function run() {
@@ -107,11 +110,16 @@ async function mapPool(items, limit, fn) {
   return out;
 }
 
+/** How `pulp ui` says a file is gone since its scan. */
+export const GONE = 'no longer there';
+
 /**
  * Why a chosen file could not be read. Browsers keep a snapshot of each chosen
  * file and refuse to read it once it changes, moves, or loses its read
  * permission, each with its own error: Chrome's NotReadableError or
- * NotFoundError, Safari's NotFoundError, Firefox's AbortError.
+ * NotFoundError, Safari's NotFoundError, Firefox's AbortError. Safari gives
+ * NotFoundError for an edit too, so a failed read never says the file is gone;
+ * only a failed open does (see `packGrant`).
  */
 function readFailure(err) {
   const name = err && err.name;
@@ -175,13 +183,19 @@ export async function previewGrant(payload) {
 }
 
 /**
- * Read and extract one batch, `{ root, settings, files: [{ id, relative, kind, file }] }`:
- * its JSON bytes for `pack_add`.
+ * Read and extract one batch, `{ root, settings, files: [{ id, relative, kind,
+ * size, file, gone? }] }`: its JSON bytes for `pack_add`. A file the page
+ * could no longer open comes without one and is noted as changed, and as gone
+ * when the browser said it is no longer there.
  */
 async function extractBatch(payload) {
   await ensure();
   const files = await mapPool(payload.files, READ_POOL, async (f) => {
-    const one = { id: f.id, relative: f.relative, kind: f.kind, size: f.file.size };
+    const one = { id: f.id, relative: f.relative, kind: f.kind, size: f.size };
+    if (!f.file) {
+      one.failure = { reason: 'changed', message: f.gone ? GONE : '' };
+      return one;
+    }
     try {
       one.bytes = new Uint8Array(await f.file.arrayBuffer());
     } catch (err) {
@@ -208,9 +222,9 @@ function batches(todo) {
       out.push([f]);
       continue;
     }
-    if (batch.length >= BATCH_FILES || (batch.length && bytes + f.file.size > BATCH_BYTES)) flush();
+    if (batch.length >= BATCH_FILES || (batch.length && bytes + f.size > BATCH_BYTES)) flush();
     batch.push(f);
-    bytes += f.file.size;
+    bytes += f.size;
   }
   flush();
   return out;
@@ -232,11 +246,21 @@ class Extractor {
     this.ready = false;
     this.seq = 0;
     this.limit = pulp.extract_timeout_ms();
+    // Set once the pack is cancelled; `stop` fails the batch in flight.
+    this.aborted = false;
+    this.stop = null;
   }
 
   close() {
     if (this.worker) this.worker.terminate();
     this.worker = null;
+  }
+
+  /** Stop at once, for a cancelled pack: the extractor goes and its batch fails as cancelled. */
+  abort() {
+    this.aborted = true;
+    if (this.stop) this.stop();
+    this.close();
   }
 
   /** The text of `batch` in parts, `[{ files, json }]`, each part's JSON bytes for `pack_add`. */
@@ -285,7 +309,7 @@ class Extractor {
       files,
       json: pulp.extract_files(Object.assign({}, this.settings, {
         root: this.root,
-        files: files.map((f) => ({ id: f.id, relative: f.relative, kind: f.kind, size: f.file.size, failure })),
+        files: files.map((f) => ({ id: f.id, relative: f.relative, kind: f.kind, size: f.size, failure })),
       })),
     };
   }
@@ -302,6 +326,10 @@ class Extractor {
 
   once(payload, heavy) {
     return new Promise((resolve, reject) => {
+      if (this.aborted) {
+        reject(cancelledError());
+        return;
+      }
       let worker;
       try {
         worker = this.worker || this.spawn();
@@ -315,6 +343,11 @@ class Extractor {
         worker.removeEventListener('message', onMessage);
         worker.removeEventListener('error', onError);
         if (timer) clearTimeout(timer);
+        this.stop = null;
+      };
+      this.stop = () => {
+        settle();
+        reject(cancelledError());
       };
       // An extractor that never loaded means nested workers do not run here.
       const lose = (failure) => {
@@ -374,39 +407,72 @@ async function addPart(extractor, part) {
   }
 }
 
+function cancelledError() {
+  return Object.assign(new Error('cancelled'), { cancelled: true });
+}
+
+/** The pack running in this instance, which a cancel stops. */
+let running = null;
+
+/** Stop the pack running here, if any: its extractor goes at once, and the pack fails as cancelled. */
+export function cancelPack() {
+  if (!running) return;
+  running.stopped = true;
+  running.extractor.abort();
+}
+
 /**
- * Pack the ticked files, `{ files: [{ id, relative, kind, file }], truncated,
- * ...settings }`, where `kind` is the scan's kind for each file and
- * `truncated` says the scan was cut short, reporting `progress(done, total)`
- * in files. `nested` extracts in a nested worker; `stopped()` is checked
- * between batches.
+ * Pack the ticked files, `{ files: [{ id, relative, kind, size, modified?,
+ * scanned?, file, gone? }], truncated, replaces, ...settings }`, where `kind`
+ * is the scan's kind for each file, `size` and `modified` are the file as the
+ * page just found it (`file` is null for one it could no longer open, and
+ * `gone` set when the browser said it is no longer there), `scanned`
+ * the size the scan listed, `truncated` says the scan was cut short, and
+ * `replaces` names the result on screen. Files that result holds as they are
+ * now are taken from it, neither read nor extracted, and count as done at once
+ * in `progress(done, total)`. `nested` extracts in a nested worker;
+ * `stopped()` is checked between batches.
  */
 export async function packGrant(payload, progress, nested, stopped) {
   await ensure();
   const settings = Object.assign({}, payload);
   delete settings.files;
   delete settings.truncated;
+  delete settings.replaces;
   const ticked = payload.files || [];
   const plan = pulp.pack_begin(Object.assign({}, settings, {
     truncated: !!payload.truncated,
-    files: ticked.map((f) => ({ id: f.id, relative: f.relative, size: f.file.size, kind: f.kind })),
+    replaces: payload.replaces || null,
+    files: ticked.map((f) => ({ id: f.id, relative: f.relative, size: f.size, kind: f.kind, modified: f.modified, scanned: f.scanned })),
   }));
-  const todo = plan.files.map((p) => Object.assign({}, p, { file: ticked[p.index].file }));
-  const total = todo.length;
-  let done = 0;
-  progress(done, total);
-  const extractor = new Extractor(settings, plan.root, nested);
+  const pack = { stopped: false, extractor: new Extractor(settings, plan.root, nested) };
+  const halted = () => pack.stopped || (stopped && stopped());
+  running = pack;
   try {
+    const todo = [];
+    let done = 0;
+    for (const p of plan.files) {
+      if (p.cached) done++;
+      else todo.push(Object.assign({}, p, { file: ticked[p.index].file, size: ticked[p.index].size, gone: !!ticked[p.index].gone }));
+    }
+    const total = plan.files.length;
+    progress(done, total);
     for (const batch of batches(todo)) {
-      if (stopped && stopped()) throw Object.assign(new Error('cancelled'), { cancelled: true });
-      for (const part of await extractor.run(batch)) await addPart(extractor, part);
+      if (halted()) throw cancelledError();
+      for (const part of await pack.extractor.run(batch)) await addPart(pack.extractor, part);
       done += batch.length;
       progress(done, total);
     }
+    if (halted()) throw cancelledError();
+    return pulp.pack_finish();
+  } catch (err) {
+    // The result on screen stays; only this pack goes.
+    if (!isPoisoned(err)) pulp.pack_abort();
+    throw err;
   } finally {
-    extractor.close();
+    pack.extractor.close();
+    if (running === pack) running = null;
   }
-  return pulp.pack_finish();
 }
 
 /**
@@ -431,6 +497,15 @@ export async function dumpOf(input) {
 /** Set once this instance has panicked, trapped, or run out of stack; it takes no more work. */
 let spent = '';
 
+/** Packs run one after another: a pack sent while another unwinds from a cancel waits for it. */
+let packs = Promise.resolve();
+
+function queuePack(msg) {
+  const turn = packs.then(() => packGrant(msg.payload || {}, (done, total) => self.postMessage({ id: msg.id, progress: [done, total] }), true));
+  packs = turn.catch(() => {});
+  return turn;
+}
+
 async function run(msg) {
   const payload = msg.payload || {};
   // The pack worker and its extractor pass batches in a form only one build reads.
@@ -439,8 +514,7 @@ async function run(msg) {
   }
   await ensure();
   switch (msg.type) {
-    case 'pack_grant':
-      return packGrant(payload, (done, total) => self.postMessage({ id: msg.id, progress: [done, total] }), true);
+    case 'pack_grant': return queuePack(msg);
     case 'extract': return extractBatch(payload);
     case 'scan_keep': return pulp.scan_keep(payload);
     case 'scan': return scanGrant(payload);
@@ -470,6 +544,10 @@ if (inWorker) {
   self.onmessage = async (ev) => {
     const msg = ev.data || {};
     const id = msg.id;
+    if (msg.type === 'cancel') {
+      cancelPack();
+      return;
+    }
     // A packer compiled for another build would not fit this worker's glue.
     if (msg.module && msg.build === BUILD && !compiled) compiled = msg.module;
     if (spent) {
@@ -482,7 +560,10 @@ if (inWorker) {
     } catch (err) {
       const poisoned = isPoisoned(err);
       if (poisoned) spent = errorText(err);
-      self.postMessage({ ok: false, id, poisoned, stale: !!(err && err.stale), error: errorText(err), crash: poisoned ? crashText(err) : '' });
+      self.postMessage({
+        ok: false, id, poisoned, stale: !!(err && err.stale), cancelled: !!(err && err.cancelled),
+        error: errorText(err), crash: poisoned ? crashText(err) : '',
+      });
     }
   };
 }

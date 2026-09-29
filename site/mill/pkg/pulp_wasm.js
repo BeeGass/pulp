@@ -1,6 +1,52 @@
 /* @ts-self-types="./pulp_wasm.d.ts" */
 
 /**
+ * A scan's filters, compiled once, for a page that walks a granted folder
+ * itself: which folders it can leave unopened because the filters leave out
+ * every file inside them (`target/`, `node_modules/`, hidden folders while
+ * hidden files are off). Skipping them changes no scan, only its time.
+ */
+export class FolderFilter {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        FolderFilterFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_folderfilter_free(ptr, 0);
+    }
+    /**
+     * Whether a walk should open the folder at `relative`, a path inside
+     * the grant folder.
+     * @param {string} relative
+     * @returns {boolean}
+     */
+    enter(relative) {
+        const ptr0 = passStringToWasm0(relative, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.folderfilter_enter(this.__wbg_ptr, ptr0, len0);
+        return ret !== 0;
+    }
+    /**
+     * The filters of a scan with `{ hidden, archives, exclude?,
+     * no_default_excludes? }`, the settings [`scan_keep`] takes.
+     * @param {any} input
+     */
+    constructor(input) {
+        const ret = wasm.folderfilter_new(input);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        FolderFilterFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+}
+if (Symbol.dispose) FolderFilter.prototype[Symbol.dispose] = FolderFilter.prototype.free;
+
+/**
  * Full dump for a previous [`pack_files`] result, in the format it was packed in.
  * @param {string} result_id
  * @returns {string}
@@ -162,6 +208,14 @@ export function needs_worker(kind, archives) {
 }
 
 /**
+ * Drop the pack [`pack_begin`] started, as a cancelled or failed pack
+ * leaves it. The result it would have replaced stays as it was.
+ */
+export function pack_abort() {
+    wasm.pack_abort();
+}
+
+/**
  * Add a batch from [`extract_files`], its JSON bytes, to the pack
  * [`pack_begin`] started. A batch that fails to add leaves the pack as it
  * was, so its files can be noted instead.
@@ -177,12 +231,16 @@ export function pack_add(json) {
 }
 
 /**
- * Start a stepped pack of `{ files: [{ relative, id?, size, kind? }],
- * truncated?, ...settings }`, where `kind` is the scan's kind for the file
- * and `truncated` says the scan was cut at its budgets. Returns the grant root
- * and the files to extract, in order, with their names inside the root, their
- * kinds, and whether each goes alone. The files are ticked already; nothing
- * else is selected.
+ * Start a stepped pack of `{ files: [{ relative, id?, size, kind?,
+ * modified?, scanned? }], truncated?, replaces?, ...settings }`, where `kind`
+ * is the scan's kind for the file, `size` and `modified` are the file as the
+ * page just read it, `scanned` the size the scan listed it at, `truncated`
+ * says the scan was cut at its budgets, and `replaces` names the result on
+ * screen. Returns the grant root and the files
+ * to extract, in order, with their names inside the root, their kinds,
+ * whether each goes alone, and whether it is `cached`: taken from the
+ * replaced result, so the page neither reads nor extracts it. The files are
+ * ticked already; nothing else is selected.
  * @param {any} input
  * @returns {any}
  */
@@ -212,7 +270,7 @@ export function pack_files(input) {
 
 /**
  * End the pack [`pack_begin`] started: store it as a result and return what
- * [`pack_files`] returns.
+ * [`pack_files`] returns. The result it replaces is dropped.
  * @returns {any}
  */
 export function pack_finish() {
@@ -589,6 +647,10 @@ function __wbg_get_imports() {
         "./pulp_wasm_bg.js": import0,
     };
 }
+
+const FolderFilterFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_folderfilter_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();

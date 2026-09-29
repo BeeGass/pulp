@@ -1,15 +1,19 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const __wbg_folderfilter_free: (a: number, b: number) => void;
 export const artifact: (a: number, b: number) => [number, number, number, number];
 export const artifact_as: (a: any) => [number, number, number, number];
 export const artifact_chunks: (a: any, b: any) => [number, number, number];
 export const drop_result: (a: number, b: number) => number;
 export const extract_files: (a: any) => [number, number, number, number];
 export const extract_timeout_ms: () => number;
+export const folderfilter_enter: (a: number, b: number, c: number) => number;
+export const folderfilter_new: (a: any) => [number, number, number];
 export const format_tree: (a: any) => [number, number, number, number];
 export const heavy_kind: (a: number, b: number) => number;
 export const needs_worker: (a: number, b: number, c: number) => number;
+export const pack_abort: () => void;
 export const pack_add: (a: number, b: number) => [number, number];
 export const pack_begin: (a: any) => [number, number, number];
 export const pack_files: (a: any) => [number, number, number];

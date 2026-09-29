@@ -11,9 +11,14 @@
 //! or overflows its stack takes down only the instance extracting its batch,
 //! so the worker can note that file in the dump and carry on, as `pulp ui`
 //! does with its child processes.
+//!
+//! A stepped pack may name the result it replaces. Files whose name, size,
+//! and modification time match what that result was made from, under the
+//! same extraction settings, are taken from it instead of being read and
+//! extracted again.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use pulp::{
@@ -41,8 +46,9 @@ const PANIC_NAME: &str = "PulpPanic";
 /// snapshot of each chosen file and refuses to read it once the file changes,
 /// moves, or loses its read permission.
 const CHANGED_MESSAGE: &str = "This file changed, moved, or lost its read permission after it was chosen, so the tab can no longer read it. Choose the folder again, then pulp again so the dump holds its current bytes.";
-/// Dump note for such a file, as `pulp ui` writes one.
-const CHANGED_NOTE: &str = "[changed since scan]";
+/// Dump note for such a file, as `pulp ui` writes one. A failure's message,
+/// such as `no longer there` for a file that is gone, follows a colon.
+const CHANGED_NOTE: &str = "changed since scan";
 /// Seconds a parser `pulp ui` would run in a child process gets before the
 /// mill stops it, as `pulp ui` stops the child.
 const EXTRACT_TIMEOUT_SECS: u32 = 30;
@@ -294,6 +300,44 @@ struct Settings {
 }
 
 impl Settings {
+    /// The settings a file's extracted text and outcome depend on: those for
+    /// every file, and those an archive's members also depend on. Every other
+    /// setting only draws the dump (`format`, `no_tree`), picks the files
+    /// (the budgets), or names them (`root`, which each file's name already
+    /// carries), so a pack that changes it can still reuse a file.
+    fn extraction(&self) -> (TextSettings, MemberSettings) {
+        // Listed whole, so a new setting cannot be left out unnoticed.
+        let Self {
+            format: _,
+            archives,
+            binaries,
+            notebook_outputs,
+            source,
+            hidden,
+            no_tree: _,
+            exclude,
+            no_default_excludes,
+            max_file_size,
+            max_total_bytes: _,
+            max_entries: _,
+            root: _,
+        } = self;
+        (
+            TextSettings {
+                binaries: *binaries,
+                notebook_outputs: *notebook_outputs,
+                source: *source,
+                max_file_size: max_file_size.unwrap_or(DEFAULT_MAX_FILE_SIZE),
+            },
+            MemberSettings {
+                archives: *archives,
+                hidden: *hidden,
+                exclude: exclude.clone(),
+                no_default_excludes: *no_default_excludes,
+            },
+        )
+    }
+
     /// Options for a pack from inside the grant folder `root`. The directory
     /// map is always built, so a redraw can show it; rendering leaves it out
     /// when it is off.
@@ -337,6 +381,80 @@ struct StoredResult {
     source_mode: bool,
     /// Time the pack took to extract. A redraw reports it again, as `pulp ui` does.
     extract_ms: f64,
+    /// What a later pack needs to take files from this result. Only a stepped
+    /// pack records it.
+    reuse: Option<Reusable>,
+}
+
+/// What a file's text and outcome depend on besides its bytes and its name.
+#[derive(Clone, Debug, PartialEq)]
+struct TextSettings {
+    binaries: bool,
+    notebook_outputs: bool,
+    source: bool,
+    max_file_size: u64,
+}
+
+/// What an archive's entries also depend on: whether it is unpacked, and the
+/// filters its members pass.
+#[derive(Clone, Debug, PartialEq)]
+struct MemberSettings {
+    archives: bool,
+    hidden: bool,
+    exclude: Vec<String>,
+    no_default_excludes: bool,
+}
+
+/// How one ticked file was extracted, so a later pack of the same bytes under
+/// the same settings can take its entries instead of extracting it again.
+#[derive(Clone, Debug)]
+struct Extraction {
+    /// The name inside the root it was packed under.
+    relative: String,
+    size: u64,
+    /// The modification time the page read for it, in milliseconds.
+    modified: f64,
+    /// Positions in the result's files of the entries it became: its own, or
+    /// an archive's.
+    outputs: Vec<usize>,
+    /// It is an archive, so its entries also depend on [`MemberSettings`].
+    archive: bool,
+    /// Its archive stopped at the archive budget, which marks a pack truncated.
+    cut: bool,
+}
+
+/// The settings a result was extracted under, and its files by the id of the
+/// ticked file each came from.
+#[derive(Debug)]
+struct Reusable {
+    text: TextSettings,
+    members: MemberSettings,
+    inputs: HashMap<String, Extraction>,
+}
+
+impl Reusable {
+    /// What the result holds for a file named `relative`, `size` bytes long,
+    /// last modified at `modified`, to be packed under `text` and `members`.
+    fn find(
+        &self,
+        id: &str,
+        relative: &str,
+        size: u64,
+        modified: Option<f64>,
+        text: &TextSettings,
+        members: &MemberSettings,
+    ) -> Option<&Extraction> {
+        let modified = modified?;
+        if self.text != *text {
+            return None;
+        }
+        self.inputs.get(id).filter(|e| {
+            e.relative == relative
+                && e.size == size
+                && e.modified == modified
+                && (!e.archive || self.members == *members)
+        })
+    }
 }
 
 impl StoredResult {
@@ -434,6 +552,20 @@ impl ResultStore {
         let entry = self.entries.remove(at)?;
         self.entries.push_back(entry);
         self.entries.back_mut().map(|(_, result)| result)
+    }
+
+    /// The result stored under `id`, leaving the order alone.
+    fn peek(&self, id: &str) -> Option<&StoredResult> {
+        self.entries
+            .iter()
+            .find(|(key, _)| key == id)
+            .map(|(_, result)| result)
+    }
+
+    /// Take the result stored under `id` out of the store.
+    fn take(&mut self, id: &str) -> Option<StoredResult> {
+        let at = self.entries.iter().position(|(key, _)| key == id)?;
+        self.entries.remove(at).map(|(_, result)| result)
     }
 
     /// Forget `id`. Returns whether it was stored.
@@ -642,7 +774,7 @@ fn unknown(req: &ScanInput) -> Result<Vec<u32>, String> {
 }
 
 /// A grant's paths, and the scan settings that filter them.
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct KeepInput {
     #[serde(default)]
     relatives: Vec<String>,
@@ -674,17 +806,64 @@ pub fn scan_keep(input: JsValue) -> Result<JsValue, JsValue> {
     to_js(&resp)
 }
 
+/// A file name no filter names, to ask whether the filters would keep a file
+/// inside a folder.
+const FOLDER_PROBE: &str = "\u{1}pulp-folder-probe\u{1}";
+
+/// A scan's filters, compiled once, for a page that walks a granted folder
+/// itself: which folders it can leave unopened because the filters leave out
+/// every file inside them (`target/`, `node_modules/`, hidden folders while
+/// hidden files are off). Skipping them changes no scan, only its time.
+#[wasm_bindgen]
+pub struct FolderFilter {
+    policy: PathPolicy,
+}
+
+#[wasm_bindgen]
+impl FolderFilter {
+    /// The filters of a scan with `{ hidden, archives, exclude?,
+    /// no_default_excludes? }`, the settings [`scan_keep`] takes.
+    #[wasm_bindgen(constructor)]
+    pub fn new(input: JsValue) -> Result<FolderFilter, JsValue> {
+        let req: KeepInput = from_js(input, "folder filter")?;
+        Self::from_keep(&req).map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Whether a walk should open the folder at `relative`, a path inside
+    /// the grant folder.
+    pub fn enter(&self, relative: &str) -> bool {
+        let relative = normalize_rel(relative);
+        let relative = relative.trim_end_matches('/');
+        relative.is_empty() || self.policy.keep_walk(&format!("{relative}/{FOLDER_PROBE}"))
+    }
+}
+
+impl FolderFilter {
+    fn from_keep(req: &KeepInput) -> Result<Self, String> {
+        Ok(Self {
+            policy: req.scan_input().policy()?,
+        })
+    }
+}
+
+impl KeepInput {
+    /// The scan these settings describe, with no files.
+    fn scan_input(&self) -> ScanInput {
+        ScanInput {
+            files: Vec::new(),
+            hidden: self.hidden,
+            archives: self.archives,
+            exclude: self.exclude.clone(),
+            no_default_excludes: self.no_default_excludes,
+            max_file_size: None,
+            max_total_bytes: None,
+            root: None,
+        }
+    }
+}
+
 fn keep(req: KeepInput) -> Result<KeepResponse, String> {
-    let scan = ScanInput {
-        files: Vec::new(),
-        hidden: req.hidden,
-        archives: req.archives,
-        exclude: req.exclude,
-        no_default_excludes: req.no_default_excludes,
-        max_file_size: None,
-        max_total_bytes: None,
-        root: None,
-    };
+    let scan = req.scan_input();
     let policy = scan.policy()?;
     let relatives: Vec<String> = req.relatives.iter().map(|r| normalize_rel(r)).collect();
     let root = root_or_shared(scan.root.as_deref(), relatives.iter().map(String::as_str));
@@ -904,6 +1083,7 @@ fn extract(req: PackInput, settings: &Settings) -> Result<StoredResult, String> 
         tree: !settings.no_tree,
         source_mode: settings.source,
         extract_ms: 0.0,
+        reuse: None,
     })
 }
 
@@ -1008,6 +1188,15 @@ struct PlanFileIn {
     /// `pdf`). Missing, the file is classified by name.
     #[serde(default)]
     kind: Option<String>,
+    /// When the file was last modified, in milliseconds, as the page read it
+    /// for this pack. Missing, the file is never taken from an earlier result.
+    #[serde(default)]
+    modified: Option<f64>,
+    /// The size the scan listed the file at, when the page reads it afresh
+    /// for the pack. The budgets are spent by it, as `pulp ui` spends them at
+    /// its scan and then reads each file as it is now.
+    #[serde(default)]
+    scanned: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1018,6 +1207,10 @@ struct PlanInput {
     /// as `pulp ui` reports a pack of a cut scan.
     #[serde(default)]
     truncated: bool,
+    /// The result this pack replaces. Files that did not change since it was
+    /// made are taken from it, and it is dropped when the pack finishes.
+    #[serde(default)]
+    replaces: Option<String>,
 }
 
 /// A file [`pack_begin`] kept, in the order the pack extracts it.
@@ -1036,6 +1229,8 @@ struct PlannedFile {
     heavy: bool,
     /// Extract on its own: a heavy file or an archive.
     alone: bool,
+    /// Taken from the result the pack replaces: neither read nor extracted.
+    cached: bool,
 }
 
 #[derive(Serialize)]
@@ -1053,6 +1248,34 @@ struct Pending {
     truncated: bool,
     bytes_read: u64,
     started_ms: f64,
+    /// Each planned file's name, size, and modification time, by id.
+    planned: HashMap<String, Fingerprint>,
+    /// The files extracted so far and the entries each became.
+    done: Vec<InputDone>,
+    /// The result this pack replaces, and what it takes from it.
+    replaces: Option<String>,
+    reused: Vec<(String, Extraction)>,
+    text: TextSettings,
+    members: MemberSettings,
+}
+
+/// The name, size, and modification time a file was planned with.
+struct Fingerprint {
+    relative: String,
+    size: u64,
+    modified: Option<f64>,
+}
+
+/// A file of a stepped pack as [`plan`] weighs it.
+struct Candidate {
+    index: u32,
+    id: String,
+    relative: String,
+    size: u64,
+    /// What it spends of the budgets.
+    budget: u64,
+    kind: Kind,
+    modified: Option<f64>,
 }
 
 /// The kind a scan reported for a file, else the kind its name says.
@@ -1064,10 +1287,17 @@ fn known_kind(label: Option<&str>, relative: &str) -> Kind {
 
 /// Which files a stepped pack extracts, and under what names. Mirrors the
 /// checks [`pack_entries`] makes before it reads a file: the path filters, the
-/// entry cap, and the byte budget, taken in path order.
-fn plan(req: PlanInput, settings: &Settings) -> Result<(PlanResponse, Pending), String> {
+/// entry cap, and the byte budget, taken in path order. A file that
+/// `previous`, the result the pack replaces, holds as it is now, under the
+/// same settings, is marked `cached`: the pack takes its entries from there.
+fn plan(
+    req: PlanInput,
+    settings: &Settings,
+    previous: Option<&Reusable>,
+) -> Result<(PlanResponse, Pending), String> {
     let scan_cut = req.truncated;
-    let files: Vec<(u32, String, String, u64, Kind)> = req
+    let replaces = req.replaces.filter(|id| !id.is_empty());
+    let files: Vec<Candidate> = req
         .files
         .into_iter()
         .enumerate()
@@ -1081,49 +1311,91 @@ fn plan(req: PlanInput, settings: &Settings) -> Result<(PlanResponse, Pending), 
             } else {
                 f.id
             };
-            let kind = known_kind(f.kind.as_deref(), &relative);
-            Some((i as u32, id, relative, f.size, kind))
+            Some(Candidate {
+                index: i as u32,
+                id,
+                kind: known_kind(f.kind.as_deref(), &relative),
+                relative,
+                size: f.size,
+                budget: f.scanned.unwrap_or(f.size),
+                modified: f.modified,
+            })
         })
         .collect();
-    let root = root_or_shared(settings.root.as_deref(), files.iter().map(|f| f.2.as_str()));
+    let root = root_or_shared(
+        settings.root.as_deref(),
+        files.iter().map(|f| f.relative.as_str()),
+    );
     let opts = settings.options(&root);
     let policy = policy_for(&opts)?;
-    let mut kept: Vec<(u32, String, String, u64, Kind)> = files
+    let mut kept: Vec<Candidate> = files
         .into_iter()
-        .filter_map(|(index, id, relative, size, kind)| {
-            let inner = under_root(&relative, &root);
-            policy
-                .keep_walk(inner)
-                .then(|| (index, id, inner.to_string(), size, kind))
+        .filter_map(|mut c| {
+            let inner = under_root(&c.relative, &root);
+            if !policy.keep_walk(inner) {
+                return None;
+            }
+            c.relative = inner.to_string();
+            Some(c)
         })
         .collect();
     // The budgets are spent in path order, as `pack_entries` and the walk spend them.
-    kept.sort_by(|a, b| cmp_path_order(&a.2, &b.2).then_with(|| a.1.cmp(&b.1)));
-    let truncated = apply_budgets(&mut kept, &opts, |f| f.3);
+    kept.sort_by(|a, b| cmp_path_order(&a.relative, &b.relative).then_with(|| a.id.cmp(&b.id)));
+    let truncated = apply_budgets(&mut kept, &opts, |c| c.budget);
 
+    let (text, members) = settings.extraction();
     let mut planned = Vec::with_capacity(kept.len());
+    let mut fingerprints = HashMap::with_capacity(kept.len());
+    let mut reused = Vec::new();
+    let mut cut = false;
     let mut bytes_read = 0u64;
-    for (index, id, relative, size, kind) in kept {
-        if size <= opts.max_file_size {
-            bytes_read = bytes_read.saturating_add(size);
+    for c in kept {
+        if c.size <= opts.max_file_size {
+            bytes_read = bytes_read.saturating_add(c.size);
         }
-        let heavy = pulp::extract::isolate::needs_isolation(kind);
+        let found = previous
+            .and_then(|prev| prev.find(&c.id, &c.relative, c.size, c.modified, &text, &members));
+        let cached = found.is_some();
+        match found {
+            Some(extraction) => {
+                cut |= extraction.cut;
+                reused.push((c.id.clone(), extraction.clone()));
+            }
+            None => {
+                fingerprints.insert(
+                    c.id.clone(),
+                    Fingerprint {
+                        relative: c.relative.clone(),
+                        size: c.size,
+                        modified: c.modified,
+                    },
+                );
+            }
+        }
+        let heavy = pulp::extract::isolate::needs_isolation(c.kind);
         planned.push(PlannedFile {
-            index,
-            id,
-            relative,
-            kind: kind.as_str(),
+            index: c.index,
+            id: c.id,
+            relative: c.relative,
+            kind: c.kind.as_str(),
             heavy,
-            alone: heavy || kind.is_archive(),
+            alone: heavy || c.kind.is_archive(),
+            cached,
         });
     }
     let pending = Pending {
         opts,
         no_tree: settings.no_tree,
         files: Vec::new(),
-        truncated: truncated || scan_cut,
+        truncated: truncated || scan_cut || cut,
         bytes_read,
         started_ms: 0.0,
+        planned: fingerprints,
+        done: Vec::new(),
+        replaces,
+        reused,
+        text,
+        members,
     };
     Ok((
         PlanResponse {
@@ -1135,21 +1407,42 @@ fn plan(req: PlanInput, settings: &Settings) -> Result<(PlanResponse, Pending), 
     ))
 }
 
-/// Start a stepped pack of `{ files: [{ relative, id?, size, kind? }],
-/// truncated?, ...settings }`, where `kind` is the scan's kind for the file
-/// and `truncated` says the scan was cut at its budgets. Returns the grant root
-/// and the files to extract, in order, with their names inside the root, their
-/// kinds, and whether each goes alone. The files are ticked already; nothing
-/// else is selected.
+/// Start a stepped pack of `{ files: [{ relative, id?, size, kind?,
+/// modified?, scanned? }], truncated?, replaces?, ...settings }`, where `kind`
+/// is the scan's kind for the file, `size` and `modified` are the file as the
+/// page just read it, `scanned` the size the scan listed it at, `truncated`
+/// says the scan was cut at its budgets, and `replaces` names the result on
+/// screen. Returns the grant root and the files
+/// to extract, in order, with their names inside the root, their kinds,
+/// whether each goes alone, and whether it is `cached`: taken from the
+/// replaced result, so the page neither reads nor extracts it. The files are
+/// ticked already; nothing else is selected.
 #[wasm_bindgen]
 pub fn pack_begin(input: JsValue) -> Result<JsValue, JsValue> {
     let started_ms = js_now_ms();
     let settings: Settings = from_js(input.clone(), "pack")?;
     let req: PlanInput = from_js(input, "pack")?;
-    let (resp, mut pending) = plan(req, &settings).map_err(|e| JsValue::from_str(&e))?;
+    let (resp, mut pending) = RESULTS
+        .with(|results| {
+            let results = results.borrow();
+            let previous = req
+                .replaces
+                .as_deref()
+                .and_then(|id| results.peek(id))
+                .and_then(|stored| stored.reuse.as_ref());
+            plan(req, &settings, previous)
+        })
+        .map_err(|e| JsValue::from_str(&e))?;
     pending.started_ms = started_ms;
     PENDING.with(|slot| *slot.borrow_mut() = Some(pending));
     to_js(&resp)
+}
+
+/// Drop the pack [`pack_begin`] started, as a cancelled or failed pack
+/// leaves it. The result it would have replaced stays as it was.
+#[wasm_bindgen]
+pub fn pack_abort() {
+    PENDING.with(|slot| slot.borrow_mut().take());
 }
 
 /// One extracted file between instances. Kinds and statuses travel as the
@@ -1222,6 +1515,21 @@ struct Extracted {
     files: Vec<WireFile>,
     #[serde(default)]
     truncated: bool,
+    /// The files the batch extracted and the entries each became. A file
+    /// noted for a failure is left out, so a later pack tries it again.
+    #[serde(default)]
+    inputs: Vec<InputDone>,
+}
+
+/// A ticked file a batch extracted, and the entries it became.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct InputDone {
+    id: String,
+    /// Ids of its entries: its own, or the members of its archive.
+    entries: Vec<String>,
+    /// Its archive stopped at the archive budget.
+    #[serde(default)]
+    cut: bool,
 }
 
 /// One file of a batch: its bytes, or why there are none.
@@ -1251,9 +1559,10 @@ struct ExtractInput {
 }
 
 /// The dump entry for a file with no text. A file the browser no longer
-/// reads is `changed`, as `pulp ui` marks a file that changed after its scan;
-/// anything else is an extraction error, noted as `pulp ui` notes one, with
-/// the name written the way the dump writes names.
+/// reads is `changed`, as `pulp ui` marks a file that changed after its scan,
+/// with the reason it gives, if any (`no longer there`); anything else is an
+/// extraction error, noted as `pulp ui` notes one, with the name written the
+/// way the dump writes names.
 fn failed_file(
     id: String,
     relative: String,
@@ -1263,12 +1572,17 @@ fn failed_file(
 ) -> PackedFile {
     let message = match failure.reason.as_str() {
         "changed" => {
+            let why = failure.message.trim();
             return PackedFile {
                 id,
                 relative,
                 kind,
                 size,
-                text: CHANGED_NOTE.to_string(),
+                text: if why.is_empty() {
+                    format!("[{CHANGED_NOTE}]")
+                } else {
+                    format!("[{CHANGED_NOTE}: {why}]")
+                },
                 status: FileStatus::Changed,
             };
         }
@@ -1332,13 +1646,62 @@ fn extract_batch(req: ExtractInput, settings: &Settings) -> Result<Extracted, St
         }
     }
     let mut truncated = false;
+    let mut inputs = Vec::new();
     if !mem.is_empty() {
         let packed =
             pack_entries(&mem, &opts, None).map_err(|e| format!("pack_entries failed: {e}"))?;
         truncated = packed.stats.truncated;
+        let extracted: Vec<&str> = mem.iter().map(|m| m.id).collect();
+        inputs = attribute(&extracted, &packed.files, truncated);
         files.extend(packed.files.into_iter().map(WireFile::from));
     }
-    Ok(Extracted { files, truncated })
+    Ok(Extracted {
+        files,
+        truncated,
+        inputs,
+    })
+}
+
+/// Which extracted file each entry of a batch came from: the file with its
+/// id, or the archive whose id and a `!` start it. A batch whose entries
+/// cannot all be placed, or that an archive cut short while it held more than
+/// one file, reports none, so none of its files is taken by a later pack.
+fn attribute(ids: &[&str], entries: &[PackedFile], cut: bool) -> Vec<InputDone> {
+    let mut owned: Vec<Vec<String>> = vec![Vec::new(); ids.len()];
+    if ids.len() == 1 {
+        owned[0] = entries.iter().map(|e| e.id.clone()).collect();
+    } else {
+        if cut {
+            return Vec::new();
+        }
+        let at: HashMap<&str, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        for entry in entries {
+            let owner = at.get(entry.id.as_str()).copied().or_else(|| {
+                ids.iter()
+                    .enumerate()
+                    .filter(|(_, id)| {
+                        entry
+                            .id
+                            .strip_prefix(**id)
+                            .is_some_and(|rest| rest.starts_with('!'))
+                    })
+                    .max_by_key(|(_, id)| id.len())
+                    .map(|(i, _)| i)
+            });
+            match owner {
+                Some(i) => owned[i].push(entry.id.clone()),
+                None => return Vec::new(),
+            }
+        }
+    }
+    ids.iter()
+        .zip(owned)
+        .map(|(id, entries)| InputDone {
+            id: (*id).to_string(),
+            entries,
+            cut,
+        })
+        .collect()
 }
 
 /// Extract a batch of a stepped pack: `{ root, files: [{ relative, id?, size,
@@ -1364,6 +1727,7 @@ fn add(pending: &mut Pending, json: &[u8]) -> Result<(), String> {
         .map(WireFile::into_packed)
         .collect::<Result<Vec<_>, _>>()?;
     pending.truncated |= batch.truncated;
+    pending.done.extend(batch.inputs);
     pending.files.extend(files);
     Ok(())
 }
@@ -1382,7 +1746,7 @@ pub fn pack_add(json: &[u8]) -> Result<(), JsValue> {
 }
 
 /// The collected files as one result: sorted, mapped, and counted the way
-/// [`pack_entries`] leaves them.
+/// [`pack_entries`] leaves them, with the record a later pack reuses it by.
 fn finish(pending: Pending) -> StoredResult {
     let Pending {
         opts,
@@ -1390,9 +1754,14 @@ fn finish(pending: Pending) -> StoredResult {
         mut files,
         truncated,
         bytes_read,
-        started_ms: _,
+        planned,
+        done,
+        text,
+        members,
+        ..
     } = pending;
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
+    let reuse = record(&files, &planned, done, text, members);
     let extracted: Vec<String> = files
         .iter()
         .filter(|f| f.status == FileStatus::Extracted)
@@ -1428,18 +1797,120 @@ fn finish(pending: Pending) -> StoredResult {
         tree: !no_tree,
         source_mode: opts.source_mode,
         extract_ms: 0.0,
+        reuse: Some(reuse),
     }
 }
 
+/// What a later pack may take from a result of `files`: every file the pack
+/// extracted from bytes the page gave a modification time for, with the
+/// positions its entries now hold.
+fn record(
+    files: &[PackedFile],
+    planned: &HashMap<String, Fingerprint>,
+    done: Vec<InputDone>,
+    text: TextSettings,
+    members: MemberSettings,
+) -> Reusable {
+    // An id twice over cannot say which entry is whose; neither is recorded.
+    let mut at: HashMap<&str, Option<usize>> = HashMap::with_capacity(files.len());
+    for (i, file) in files.iter().enumerate() {
+        at.entry(file.id.as_str())
+            .and_modify(|slot| *slot = None)
+            .or_insert(Some(i));
+    }
+    let mut inputs = HashMap::with_capacity(done.len());
+    for input in done {
+        let Some(fingerprint) = planned.get(&input.id) else {
+            continue;
+        };
+        let Some(modified) = fingerprint.modified else {
+            continue;
+        };
+        let Some(outputs) = input
+            .entries
+            .iter()
+            .map(|entry| at.get(entry.as_str()).copied().flatten())
+            .collect::<Option<Vec<usize>>>()
+        else {
+            continue;
+        };
+        let archive = match outputs.as_slice() {
+            [only] => files[*only].id != input.id || files[*only].kind.is_archive(),
+            _ => true,
+        };
+        inputs.insert(
+            input.id,
+            Extraction {
+                relative: fingerprint.relative.clone(),
+                size: fingerprint.size,
+                modified,
+                outputs,
+                archive,
+                cut: input.cut,
+            },
+        );
+    }
+    Reusable {
+        text,
+        members,
+        inputs,
+    }
+}
+
+/// Move the entries of the files this pack takes from `old`, the result it
+/// replaces, into the pack. `old` goes with whatever else it held.
+fn take_reused(pending: &mut Pending, old: Option<StoredResult>) -> Result<(), String> {
+    if pending.reused.is_empty() {
+        return Ok(());
+    }
+    let old = old.ok_or_else(|| RESULT_GONE.to_string())?;
+    let mut slots: Vec<Option<PackedFile>> = old.packed.files.into_iter().map(Some).collect();
+    for (id, extraction) in std::mem::take(&mut pending.reused) {
+        let mut entries = Vec::with_capacity(extraction.outputs.len());
+        for &at in &extraction.outputs {
+            let file = slots
+                .get_mut(at)
+                .and_then(Option::take)
+                .ok_or_else(|| RESULT_GONE.to_string())?;
+            entries.push(file.id.clone());
+            pending.files.push(file);
+        }
+        pending.planned.insert(
+            id.clone(),
+            Fingerprint {
+                relative: extraction.relative,
+                size: extraction.size,
+                modified: Some(extraction.modified),
+            },
+        );
+        pending.done.push(InputDone {
+            id,
+            entries,
+            cut: extraction.cut,
+        });
+    }
+    Ok(())
+}
+
+/// The pack [`pack_begin`] started, with the files it takes from the result
+/// it replaces, which goes from the store.
+fn complete(mut pending: Pending) -> Result<StoredResult, String> {
+    if let Some(old) = pending.replaces.take() {
+        let old = RESULTS.with(|results| results.borrow_mut().take(&old));
+        take_reused(&mut pending, old)?;
+    }
+    Ok(finish(pending))
+}
+
 /// End the pack [`pack_begin`] started: store it as a result and return what
-/// [`pack_files`] returns.
+/// [`pack_files`] returns. The result it replaces is dropped.
 #[wasm_bindgen]
 pub fn pack_finish() -> Result<JsValue, JsValue> {
     let pending = PENDING
         .with(|slot| slot.borrow_mut().take())
         .ok_or_else(|| JsValue::from_str("no pack is running; pulp again"))?;
     let started_ms = pending.started_ms;
-    let mut stored = finish(pending);
+    let mut stored = complete(pending).map_err(|e| JsValue::from_str(&e))?;
     stored.extract_ms = js_now_ms() - started_ms;
     let mut resp = store_and_respond(stored).map_err(|e| JsValue::from_str(&e))?;
     resp.elapsed_ms = elapsed_since(started_ms);
@@ -1931,6 +2402,8 @@ mod tests {
             id: String::new(),
             size,
             kind: None,
+            modified: None,
+            scanned: None,
         }
     }
 
@@ -1942,8 +2415,10 @@ mod tests {
             PlanInput {
                 files,
                 truncated: false,
+                replaces: None,
             },
             settings,
+            None,
         )
     }
 
@@ -3011,6 +3486,19 @@ mod tests {
             format!("[error extracting docs/a.pdf: {NO_WORKER_MESSAGE}]")
         );
         assert_eq!(note("changed").status, FileStatus::Changed);
+        assert_eq!(note("changed").text, "[changed since scan]");
+        let gone = failed_file(
+            "a".into(),
+            "docs/a.pdf".into(),
+            5,
+            Kind::Pdf,
+            Failure {
+                reason: "changed".into(),
+                message: "no longer there".into(),
+            },
+        );
+        assert_eq!(gone.text, "[changed since scan: no longer there]");
+        assert_eq!(gone.status, FileStatus::Changed);
         assert_eq!(
             note("error").text,
             "[error extracting docs/a.pdf: the file could not be read]"
@@ -3033,6 +3521,432 @@ mod tests {
         bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| {
             (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
         })
+    }
+
+    /// A file as the page hands it to a pack: its bytes, and the modification
+    /// time the page read for it.
+    struct Picked {
+        relative: String,
+        bytes: Vec<u8>,
+        modified: Option<f64>,
+    }
+
+    /// `files` with modification times, as a page reading them through the
+    /// handles it was granted gives them.
+    fn picked(files: &[PackFileIn]) -> Vec<Picked> {
+        files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| Picked {
+                relative: f.relative.clone(),
+                bytes: f.bytes.clone(),
+                modified: Some(1_000.0 + i as f64),
+            })
+            .collect()
+    }
+
+    /// One stepped pack of `files` the way the worker runs it: plan, taking
+    /// what it can from the stored result `replaces`; extract the rest, a
+    /// heavy file or an archive alone and the others `batch` at a time; and
+    /// finish and store the result. Returns its id and the names of the files
+    /// it extracted rather than took.
+    fn repack(
+        files: &[Picked],
+        settings: &Settings,
+        replaces: Option<&str>,
+        batch: usize,
+    ) -> (String, Vec<String>) {
+        let input = PlanInput {
+            files: files
+                .iter()
+                .map(|f| PlanFileIn {
+                    modified: f.modified,
+                    ..plan_file(&f.relative, f.bytes.len() as u64)
+                })
+                .collect(),
+            truncated: false,
+            replaces: replaces.map(str::to_string),
+        };
+        let (resp, mut pending) = RESULTS
+            .with(|results| {
+                let results = results.borrow();
+                let previous = replaces
+                    .and_then(|id| results.peek(id))
+                    .and_then(|stored| stored.reuse.as_ref());
+                plan(input, settings, previous)
+            })
+            .unwrap();
+        let todo: Vec<&PlannedFile> = resp.files.iter().filter(|p| !p.cached).collect();
+        let mut batches: Vec<Vec<&PlannedFile>> = Vec::new();
+        let mut open: Vec<&PlannedFile> = Vec::new();
+        for p in todo.iter().copied() {
+            if p.alone {
+                batches.push(vec![p]);
+            } else {
+                open.push(p);
+                if open.len() == batch {
+                    batches.push(std::mem::take(&mut open));
+                }
+            }
+        }
+        if !open.is_empty() {
+            batches.push(open);
+        }
+        for chunk in batches {
+            let batch = chunk
+                .iter()
+                .map(|p| batch_file(&p.relative, &p.id, &files[p.index as usize].bytes, None))
+                .collect();
+            add_batch(&mut pending, &resp.root, batch, settings);
+        }
+        let stored = complete(pending).unwrap();
+        let id = store_and_respond(stored).unwrap().result_id;
+        (id, todo.iter().map(|p| p.relative.clone()).collect())
+    }
+
+    /// The stored result `id`, out of the store.
+    fn taken(id: &str) -> StoredResult {
+        RESULTS
+            .with(|results| results.borrow_mut().take(id))
+            .unwrap()
+    }
+
+    fn fresh_of(files: &[Picked], settings: &Settings) -> StoredResult {
+        let files: Vec<PackFileIn> = files.iter().map(|f| file(&f.relative, &f.bytes)).collect();
+        stepped(&files, settings, 64)
+    }
+
+    #[test]
+    fn test_repack_takes_unchanged_files_and_matches_a_fresh_pack() {
+        for archives in [false, true] {
+            for hidden in [false, true] {
+                for source in [false, true] {
+                    let settings = awkward_settings(archives, hidden, source);
+                    for batch in [1, 3, 64] {
+                        let case = format!(
+                            "archives={archives} hidden={hidden} source={source} batch={batch}"
+                        );
+                        let mut files = picked(&awkward());
+                        let (first, extracted) = repack(&files, &settings, None, batch);
+                        assert!(!extracted.is_empty(), "{case}");
+
+                        // Nothing changed: nothing is read or extracted again.
+                        let (second, extracted) = repack(&files, &settings, Some(&first), batch);
+                        assert_eq!(extracted, Vec::<String>::new(), "{case}");
+                        assert!(
+                            RESULTS.with(|r| r.borrow().peek(&first).is_none()),
+                            "{case}: the replaced result is dropped"
+                        );
+
+                        // One file changed: only it is extracted again.
+                        let readme = files
+                            .iter_mut()
+                            .find(|f| f.relative == "tides/README.md")
+                            .unwrap();
+                        readme.bytes = b"# Tides\n\nFour a day now.\n".to_vec();
+                        readme.modified = Some(9_999.0);
+                        let (third, extracted) = repack(&files, &settings, Some(&second), batch);
+                        assert_eq!(extracted, ["README.md"], "{case}");
+
+                        let mut got = taken(&third);
+                        let mut want = fresh_of(&files, &settings);
+                        assert_same_result(&mut got, &mut want, &case);
+                        assert!(got
+                            .packed
+                            .files
+                            .iter()
+                            .any(|f| f.text.contains("Four a day")));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_repack_after_a_settings_change_extracts_what_it_changes() {
+        let files = picked(&awkward());
+        let base = awkward_settings(true, false, false);
+        let (first, _) = repack(&files, &base, None, 64);
+
+        // Source mode changes every file's text.
+        let source = awkward_settings(true, false, true);
+        let (second, extracted) = repack(&files, &source, Some(&first), 64);
+        let (_, all) = repack(&files, &source, None, 64);
+        assert_eq!(extracted, all);
+        let mut got = taken(&second);
+        assert_same_result(&mut got, &mut fresh_of(&files, &source), "source");
+
+        // Archives off changes only what an archive becomes.
+        let (third, _) = repack(&files, &base, None, 64);
+        let packed = awkward_settings(false, false, false);
+        let (fourth, extracted) = repack(&files, &packed, Some(&third), 64);
+        assert_eq!(extracted, ["data/bundle.zip"]);
+        let mut got = taken(&fourth);
+        assert_same_result(&mut got, &mut fresh_of(&files, &packed), "archives");
+
+        // A new per-file cap changes which files are over it.
+        let (fifth, _) = repack(&files, &base, None, 64);
+        let capped = Settings {
+            max_file_size: Some(4096),
+            ..base.clone()
+        };
+        let (sixth, extracted) = repack(&files, &capped, Some(&fifth), 64);
+        assert_eq!(extracted, all);
+        let mut got = taken(&sixth);
+        assert_same_result(&mut got, &mut fresh_of(&files, &capped), "cap");
+    }
+
+    #[test]
+    fn test_repack_without_modification_times_takes_nothing() {
+        let mut files = picked(&awkward());
+        for f in &mut files {
+            f.modified = None;
+        }
+        let settings = awkward_settings(true, false, false);
+        let (first, all) = repack(&files, &settings, None, 64);
+        let (second, extracted) = repack(&files, &settings, Some(&first), 64);
+        assert_eq!(extracted, all);
+        assert_same_result(
+            &mut taken(&second),
+            &mut fresh_of(&files, &settings),
+            "no times",
+        );
+    }
+
+    #[test]
+    fn test_repack_extracts_again_a_file_it_noted_as_unreadable() {
+        let settings = settings("txt", false);
+        let files = picked(&[
+            file("tides/src/lib.rs", b"pub fn tide() {}\n"),
+            file("tides/src/gone.rs", b"fn gone() {}\n"),
+        ]);
+        let planned = files
+            .iter()
+            .map(|f| PlanFileIn {
+                modified: f.modified,
+                ..plan_file(&f.relative, f.bytes.len() as u64)
+            })
+            .collect();
+        let (resp, mut pending) = plan_of(planned, &settings).unwrap();
+        let batch = resp
+            .files
+            .iter()
+            .map(|p| {
+                let failure = (p.relative == "src/gone.rs").then(|| Failure {
+                    reason: "changed".into(),
+                    message: String::new(),
+                });
+                batch_file(&p.relative, &p.id, &files[p.index as usize].bytes, failure)
+            })
+            .collect();
+        add_batch(&mut pending, &resp.root, batch, &settings);
+        let first = store_and_respond(complete(pending).unwrap())
+            .unwrap()
+            .result_id;
+        let (_, extracted) = repack(&files, &settings, Some(&first), 64);
+        assert_eq!(extracted, ["src/gone.rs"]);
+    }
+
+    #[test]
+    fn test_repack_keeps_the_budgets_and_the_cut_of_a_fresh_pack() {
+        let settings = Settings {
+            max_file_size: Some(200),
+            max_total_bytes: Some(100),
+            ..settings("txt", false)
+        };
+        let mut files = picked(&[
+            file("app/a.rs", &[b'a'; 60]),
+            file("app/b.rs", &[b'b'; 60]),
+            file("app/c.rs", &[b'c'; 30]),
+        ]);
+        let (first, _) = repack(&files, &settings, None, 64);
+        // `a.rs` shrinks, so `b.rs` now fits the byte budget too.
+        files[0].bytes = vec![b'a'; 20];
+        files[0].modified = Some(5_000.0);
+        let (second, extracted) = repack(&files, &settings, Some(&first), 64);
+        assert_eq!(extracted, ["a.rs", "b.rs"]);
+        let mut got = taken(&second);
+        let mut want = fresh_of(&files, &settings);
+        assert!(got.packed.stats.truncated);
+        assert_same_result(&mut got, &mut want, "budget");
+    }
+
+    #[test]
+    fn test_plan_spends_the_budgets_by_the_sizes_the_scan_listed() {
+        let settings = Settings {
+            max_total_bytes: Some(100),
+            ..settings("txt", false)
+        };
+        // `a.rs` grew after the scan; the scan kept both files, so the pack
+        // does too, and reads `a.rs` as it is now.
+        let files = vec![
+            PlanFileIn {
+                scanned: Some(40),
+                ..plan_file("app/a.rs", 90)
+            },
+            PlanFileIn {
+                scanned: Some(40),
+                ..plan_file("app/b.rs", 40)
+            },
+        ];
+        let (resp, _) = plan_of(files, &settings).unwrap();
+        assert!(!resp.truncated);
+        let kept: Vec<&str> = resp.files.iter().map(|p| p.relative.as_str()).collect();
+        assert_eq!(kept, ["a.rs", "b.rs"]);
+    }
+
+    #[test]
+    fn test_repack_of_an_archive_cut_at_its_budget_stays_truncated() {
+        let settings = awkward_settings(true, false, false);
+        let files = picked(&[
+            file("app/a.rs", b"fn a() {}\n"),
+            file("app/logs.zip", &zip_of(&[("one.txt", b"one\n")])),
+        ]);
+        let planned = files
+            .iter()
+            .map(|f| PlanFileIn {
+                modified: f.modified,
+                ..plan_file(&f.relative, f.bytes.len() as u64)
+            })
+            .collect();
+        let (resp, mut pending) = plan_of(planned, &settings).unwrap();
+        for p in &resp.files {
+            let req = ExtractInput {
+                root: resp.root.clone(),
+                files: vec![batch_file(
+                    &p.relative,
+                    &p.id,
+                    &files[p.index as usize].bytes,
+                    None,
+                )],
+            };
+            let mut batch = extract_batch(req, &settings).unwrap();
+            if p.relative == "logs.zip" {
+                // As a zip past the archive budget leaves it.
+                batch.truncated = true;
+                batch.inputs[0].cut = true;
+            }
+            add(&mut pending, &serde_json::to_vec(&batch).unwrap()).unwrap();
+        }
+        let first = store_and_respond(complete(pending).unwrap())
+            .unwrap()
+            .result_id;
+        let (second, extracted) = repack(&files, &settings, Some(&first), 64);
+        assert_eq!(extracted, Vec::<String>::new());
+        assert!(taken(&second).packed.stats.truncated);
+    }
+
+    #[test]
+    fn test_pack_finish_without_the_result_it_takes_from_fails() {
+        let settings = settings("txt", false);
+        let files = picked(&[file("app/a.rs", b"fn a() {}\n")]);
+        let (first, _) = repack(&files, &settings, None, 64);
+        let input = PlanInput {
+            files: files
+                .iter()
+                .map(|f| PlanFileIn {
+                    modified: f.modified,
+                    ..plan_file(&f.relative, f.bytes.len() as u64)
+                })
+                .collect(),
+            truncated: false,
+            replaces: Some(first.clone()),
+        };
+        let (resp, pending) = RESULTS
+            .with(|results| {
+                let results = results.borrow();
+                plan(
+                    input,
+                    &settings,
+                    results.peek(&first).and_then(|r| r.reuse.as_ref()),
+                )
+            })
+            .unwrap();
+        assert!(resp.files[0].cached);
+        RESULTS.with(|results| results.borrow_mut().remove(&first));
+        assert_eq!(complete(pending).err().as_deref(), Some(RESULT_GONE));
+    }
+
+    #[test]
+    fn test_attribute_places_each_entry_with_its_file_or_archive() {
+        let entry = |id: &str| PackedFile {
+            id: id.into(),
+            relative: id.into(),
+            kind: Kind::Text,
+            size: 1,
+            text: String::new(),
+            status: FileStatus::Extracted,
+        };
+        let done = attribute(
+            &["a.rs", "b.zip", "b.zip!x"],
+            &[entry("a.rs"), entry("b.zip!in/c.rs"), entry("b.zip!x")],
+            false,
+        );
+        let got: Vec<(&str, Vec<&str>)> = done
+            .iter()
+            .map(|d| {
+                (
+                    d.id.as_str(),
+                    d.entries.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a.rs", vec!["a.rs"]),
+                ("b.zip", vec!["b.zip!in/c.rs"]),
+                ("b.zip!x", vec!["b.zip!x"]),
+            ]
+        );
+        assert!(attribute(&["a.rs", "b.rs"], &[entry("c.rs")], false).is_empty());
+        assert!(attribute(&["a.zip", "b.rs"], &[entry("b.rs")], true).is_empty());
+        let one = attribute(&["a.zip"], &[entry("a.zip!m"), entry("a.zip!n")], true);
+        assert_eq!(one.len(), 1);
+        assert!(one[0].cut);
+    }
+
+    #[test]
+    fn test_folder_filter_skips_folders_whose_files_the_scan_leaves_out() {
+        let filter = |hidden: bool| {
+            FolderFilter::from_keep(&KeepInput {
+                hidden,
+                ..KeepInput::default()
+            })
+            .unwrap()
+        };
+        let quiet = filter(false);
+        for dir in pulp::config::generated_dir_names() {
+            for path in [dir.to_string(), format!("src/{dir}")] {
+                assert!(!quiet.enter(&path), "{path} is opened");
+                assert!(
+                    !filter(true).enter(&path),
+                    "{path} is opened with hidden files on"
+                );
+            }
+        }
+        for path in ["src", "docs/api", "research/src/metastable", "a b/c", ""] {
+            assert!(quiet.enter(path), "{path} is skipped");
+        }
+        assert!(!quiet.enter(".github"));
+        assert!(!quiet.enter("src/.hidden"));
+        assert!(filter(true).enter(".github"));
+        assert!(filter(true).enter("src/.hidden"));
+
+        // Skipping a folder never drops a file the scan would list.
+        let policy = KeepInput::default().scan_input().policy().unwrap();
+        for dir in [
+            "target",
+            "node_modules",
+            "app/node_modules",
+            ".github",
+            "build",
+        ] {
+            for name in ["lib.rs", "index.js", "README.md", "a/b/c.txt", ".env"] {
+                let inside = format!("{dir}/{name}");
+                assert!(!policy.keep_walk(&inside), "{inside} would be listed");
+            }
+        }
     }
 
     /// A page hands its compiled packer only to a worker of its own build, so
@@ -3119,8 +4033,10 @@ mod tests {
             PlanInput {
                 files: vec![plan_file("a/b.rs", 10)],
                 truncated: true,
+                replaces: None,
             },
             &settings,
+            None,
         )
         .unwrap();
         let p = &resp.files[0];
