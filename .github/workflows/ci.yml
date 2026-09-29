@@ -41,3 +41,30 @@ jobs:
       - name: mill browser tests
         timeout-minutes: 20
         run: cargo xtask ui-test
+
+  # The toolchain is the rust-version Cargo.toml declares, so CI checks the claim as written.
+  msrv:
+    name: minimum Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Warnings on the oldest supported compiler count too, the vendored crate included.
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - name: read rust-version
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version = "\([0-9.]*\)"$/\1/p' Cargo.toml)
+          test -n "$version" || { echo "Cargo.toml declares no rust-version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          targets: wasm32-unknown-unknown
+      - name: check
+        run: cargo check --workspace --all-targets --locked
+      - name: check (pulp without native features)
+        run: cargo check -p pulp --no-default-features --lib --locked
+      - name: check (browser mill, wasm32)
+        run: cargo check -p pulp-wasm --target wasm32-unknown-unknown --locked
