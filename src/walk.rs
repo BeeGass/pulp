@@ -2,15 +2,13 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use globset::GlobSet;
+use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
-use ignore::{WalkBuilder, WalkState};
 
-use crate::config::Options;
+use crate::config::{Budget, Options, Selection};
 use crate::error::Error;
 use crate::filter::{build_globset, glob_matches};
 
@@ -40,74 +38,147 @@ pub fn collect(opts: &Options) -> Result<Vec<WalkedFile>, Error> {
     Ok(collect_detailed(opts)?.files)
 }
 
-/// Like [`collect`], but reports whether the discovery budget stopped the walk.
+/// Like [`collect`], but reports whether a budget stopped the walk.
+///
+/// Roots are walked one after another, each depth first with every
+/// directory's entries in name order: the path order of
+/// [`crate::config::cmp_path_order`]. The entry and byte budgets are spent
+/// as files are found, and the walk stops at the first file that does not
+/// fit, so a budget bounds the walk's time and memory, and the same tree
+/// and options keep the same files whatever [`Options::jobs`] is.
 pub fn collect_detailed(opts: &Options) -> Result<WalkOutcome, Error> {
-    if opts.roots.is_empty() {
-        return Ok(WalkOutcome {
-            files: Vec::new(),
-            truncated: false,
-        });
+    // Every root is checked before any is walked, so a bad root fails the
+    // walk even when a budget would stop it first.
+    let kinds = opts
+        .roots
+        .iter()
+        .map(|root| RootKind::of(root))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut found = Found::new(opts);
+    if kinds.is_empty() || opts.selection.is_empty_only() {
+        return Ok(found.finish());
     }
-
-    let multi = opts.roots.len() > 1;
     let include = if opts.include.is_empty() {
         None
     } else {
         Some(build_globset(&opts.include)?)
     };
     let exclude = build_globset(&opts.exclude)?;
-    let skip_paths = normalize_skip_paths(&opts.skip_paths);
+    let labels: Vec<String> = opts.roots.iter().map(|root| root_label(root)).collect();
+    let multi = kinds.len() > 1;
+    for (idx, (root, kind)) in opts.roots.iter().zip(kinds).enumerate() {
+        let scope = RootScope {
+            root,
+            absolute: make_absolute(root),
+            idx,
+            multi,
+            label: &labels[idx],
+        };
+        let more = match kind {
+            // A symlinked file named as a root is read only when links are
+            // followed.
+            RootKind::File { is_symlink, .. } if is_symlink && !opts.follow_links => true,
+            RootKind::File { meta, is_symlink } => found.offer(scope.file_root(&meta, is_symlink)),
+            RootKind::Dir => walk_dir(&scope, opts, include.as_ref(), &exclude, &mut found)?,
+        };
+        if !more {
+            break;
+        }
+    }
+    Ok(found.finish())
+}
 
-    let mut files: Vec<WalkedFile> = Vec::new();
-    let mut truncated = false;
-    for (idx, root) in opts.roots.iter().enumerate() {
+/// What a root names.
+enum RootKind {
+    /// A file named as a root, with its metadata (its target's, when the
+    /// root is a symlink) and whether the name is a symlink.
+    File {
+        meta: fs::Metadata,
+        is_symlink: bool,
+    },
+    Dir,
+}
+
+impl RootKind {
+    fn of(root: &Path) -> Result<Self, Error> {
         if !root.exists() {
             return Err(Error::path(root, "does not exist"));
         }
-        let remaining_bytes = opts
-            .max_total_bytes
-            .saturating_sub(files.iter().map(|f| f.size).sum::<u64>());
-        if remaining_bytes == 0 {
-            truncated = true;
-            break;
-        }
-        let Some(max_entries) = entry_budget(opts.max_entries, files.len()) else {
-            truncated = true;
-            break;
+        let meta = fs::symlink_metadata(root).map_err(|err| Error::path(root, err.to_string()))?;
+        let is_symlink = meta.file_type().is_symlink();
+        let meta = if is_symlink {
+            fs::metadata(root).map_err(|err| Error::path(root, err.to_string()))?
+        } else {
+            meta
         };
-        let (chunk, hit) = collect_root(
-            root,
-            idx,
-            opts,
-            multi,
-            include.as_ref(),
-            &exclude,
-            WalkLimits {
-                max_entries,
-                max_total_bytes: remaining_bytes,
-            },
-        )?;
-        files.extend(chunk);
-        if hit {
-            truncated = true;
-            break;
+        if meta.is_file() {
+            Ok(Self::File { meta, is_symlink })
+        } else if meta.is_dir() {
+            Ok(Self::Dir)
+        } else {
+            Err(Error::path(root, "not a file or directory"))
         }
     }
-    match &opts.selection {
-        crate::config::Selection::AllEligible => {}
-        crate::config::Selection::Only(ids) if ids.is_empty() => files.clear(),
-        crate::config::Selection::Only(ids) => {
-            let want: HashSet<&str> = ids.iter().map(String::as_str).collect();
-            files.retain(|file| {
-                want.contains(file.id.as_str()) || want.contains(file.relative.as_str())
-            });
+}
+
+/// Files the walk keeps, in the order it finds them.
+///
+/// Each file found must pass the selection, the skip paths, and the
+/// budgets, in that order: a file left out spends no budget.
+struct Found<'a> {
+    /// Selected names; `None` selects every file.
+    selection: Option<HashSet<&'a str>>,
+    skip_paths: Vec<PathBuf>,
+    budget: Budget,
+    files: Vec<WalkedFile>,
+}
+
+impl<'a> Found<'a> {
+    fn new(opts: &'a Options) -> Self {
+        let selection = match &opts.selection {
+            Selection::AllEligible => None,
+            Selection::Only(names) => Some(names.iter().map(String::as_str).collect()),
+        };
+        Self {
+            selection,
+            skip_paths: normalize_skip_paths(&opts.skip_paths),
+            budget: Budget::new(opts),
+            files: Vec::new(),
         }
     }
-    if !skip_paths.is_empty() {
-        files.retain(|file| !is_skipped_path(&file.absolute, &skip_paths));
+
+    /// Take the next file the walk found. Returns `false` once a file does
+    /// not fit the budgets: the walk stops there.
+    fn offer(&mut self, file: WalkedFile) -> bool {
+        if !self.is_selected(&file) || self.is_skipped(&file) {
+            return true;
+        }
+        if !self.budget.take(file.size) {
+            return false;
+        }
+        self.files.push(file);
+        true
     }
-    files.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(WalkOutcome { files, truncated })
+
+    /// Whether the selection names `file`, by id or by relative path.
+    fn is_selected(&self, file: &WalkedFile) -> bool {
+        let Some(names) = &self.selection else {
+            return true;
+        };
+        names.contains(file.id.as_str()) || names.contains(file.relative.as_str())
+    }
+
+    fn is_skipped(&self, file: &WalkedFile) -> bool {
+        !self.skip_paths.is_empty() && is_skipped_path(&file.absolute, &self.skip_paths)
+    }
+
+    fn finish(mut self) -> WalkOutcome {
+        self.files.sort_by(|a, b| a.id.cmp(&b.id));
+        WalkOutcome {
+            truncated: self.budget.is_cut(),
+            files: self.files,
+        }
+    }
 }
 
 /// Canonicalize skip destinations once so each candidate is compared cheaply.
@@ -124,70 +195,88 @@ pub fn normalize_skip_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-/// `None` when a finite cap is already spent. `usize::MAX` when there is no cap.
-fn entry_budget(max_entries: usize, seen: usize) -> Option<usize> {
-    if max_entries == 0 {
-        return Some(usize::MAX);
+fn is_skipped_path(path: &Path, skip: &[PathBuf]) -> bool {
+    skip.iter().any(|other| paths_equal(path, other))
+}
+
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
     }
-    let remaining = max_entries.saturating_sub(seen);
-    if remaining == 0 {
-        None
-    } else {
-        Some(remaining)
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
     }
 }
 
-#[derive(Clone, Copy)]
-struct WalkLimits {
-    max_entries: usize,
-    max_total_bytes: u64,
-}
-
-fn collect_root(
-    root: &Path,
-    root_idx: usize,
-    opts: &Options,
+/// One root of a walk and how its files are named.
+struct RootScope<'a> {
+    root: &'a Path,
+    /// `root` made absolute once, rather than asking for the working
+    /// directory for every file.
+    absolute: PathBuf,
+    idx: usize,
     multi: bool,
-    include: Option<&GlobSet>,
-    exclude: &GlobSet,
-    limits: WalkLimits,
-) -> Result<(Vec<WalkedFile>, bool), Error> {
-    let meta = fs::symlink_metadata(root).map_err(|err| Error::path(root, err.to_string()))?;
-    let is_symlink = meta.file_type().is_symlink();
-    let followed = if is_symlink {
-        fs::metadata(root).map_err(|err| Error::path(root, err.to_string()))?
-    } else {
-        meta.clone()
-    };
-
-    if followed.is_file() {
-        if is_symlink && !opts.follow_links {
-            return Ok((Vec::new(), false));
-        }
-        let file = walked_file(root, root, root_idx, multi, followed.len(), is_symlink);
-        let truncated = 1 > limits.max_entries || file.size > limits.max_total_bytes;
-        if truncated {
-            return Ok((Vec::new(), true));
-        }
-        return Ok((vec![file], false));
-    }
-
-    if !followed.is_dir() {
-        return Err(Error::path(root, "not a file or directory"));
-    }
-
-    walk_dir(root, root_idx, opts, multi, include, exclude, limits)
+    label: &'a str,
 }
 
+impl RootScope<'_> {
+    /// Display path for a file whose path under the root is `rel`.
+    fn relative(&self, rel: &str) -> String {
+        if self.multi {
+            if rel.is_empty() {
+                self.label.to_string()
+            } else {
+                format!("{}/{rel}", self.label)
+            }
+        } else if rel.is_empty() {
+            file_name_label(self.root).unwrap_or_default()
+        } else {
+            rel.to_string()
+        }
+    }
+
+    fn id(&self, relative: &str) -> String {
+        if self.multi {
+            format!("{}:{relative}", self.idx)
+        } else {
+            relative.to_string()
+        }
+    }
+
+    /// Absolute path of `path`, found by walking this root.
+    fn absolute_of(&self, path: &Path) -> PathBuf {
+        match path.strip_prefix(self.root) {
+            Ok(rest) if !rest.as_os_str().is_empty() => self.absolute.join(rest),
+            Ok(_) => self.absolute.clone(),
+            Err(_) => make_absolute(path),
+        }
+    }
+
+    /// The file this root names, when it names a file.
+    fn file_root(&self, meta: &fs::Metadata, is_symlink: bool) -> WalkedFile {
+        let relative = self.relative("");
+        WalkedFile {
+            id: self.id(&relative),
+            absolute: self.absolute.clone(),
+            relative,
+            size: meta.len(),
+            is_symlink,
+            modified: meta.modified().ok(),
+        }
+    }
+}
+
+/// Walk a directory root in path order, handing each file that passes the
+/// filters to `found`. Returns `false` once the budgets stop the walk.
 fn walk_dir(
-    root: &Path,
-    root_idx: usize,
+    scope: &RootScope<'_>,
     opts: &Options,
-    multi: bool,
     include: Option<&GlobSet>,
     exclude: &GlobSet,
-    limits: WalkLimits,
-) -> Result<(Vec<WalkedFile>, bool), Error> {
+    found: &mut Found<'_>,
+) -> Result<bool, Error> {
+    let root = scope.root;
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(!opts.hidden)
@@ -196,7 +285,7 @@ fn walk_dir(
         .git_exclude(opts.gitignore)
         .ignore(opts.gitignore)
         .follow_links(opts.follow_links)
-        .threads(opts.jobs)
+        .sort_by_file_name(|a, b| a.cmp(b))
         .filter_entry(|entry| entry.file_name() != OsStr::new(".git"));
 
     if !opts.exclude.is_empty() {
@@ -221,134 +310,41 @@ fn walk_dir(
         );
     }
 
-    let include = include.cloned().map(Arc::new);
-    let exclude = Arc::new(exclude.clone());
-    let follow_links = opts.follow_links;
-    let follow_archives = opts.follow_archives;
-    let root_buf = root.to_path_buf();
-    let count = Arc::new(AtomicUsize::new(0));
-    let bytes = Arc::new(AtomicU64::new(0));
-    let truncated = Arc::new(AtomicBool::new(false));
-
-    let (tx, rx) = crossbeam_channel::unbounded::<WalkedFile>();
-    builder.build_parallel().run(|| {
-        let tx = tx.clone();
-        let include = include.clone();
-        let exclude = Arc::clone(&exclude);
-        let root_buf = root_buf.clone();
-        let count = Arc::clone(&count);
-        let bytes = Arc::clone(&bytes);
-        let truncated = Arc::clone(&truncated);
-        Box::new(move |result| {
-            let Ok(entry) = result else {
-                return WalkState::Continue;
-            };
-            if entry.file_type().is_none_or(|ft| !ft.is_file()) {
-                return WalkState::Continue;
-            }
-            let is_symlink = entry.path_is_symlink();
-            if is_symlink && !follow_links {
-                return WalkState::Continue;
-            }
-            if is_in_git_dir(entry.path()) {
-                return WalkState::Continue;
-            }
-            let meta = match entry.metadata() {
-                Ok(meta) => meta,
-                Err(_) => return WalkState::Continue,
-            };
-            let size = meta.len();
-            let modified = meta.modified().ok();
-            let relative = relative_for(&root_buf, entry.path(), multi);
-            if !keep_for_walk(
-                &relative,
-                include.as_deref(),
-                exclude.as_ref(),
-                follow_archives,
-            ) {
-                return WalkState::Continue;
-            }
-            if count.load(Ordering::Relaxed) >= limits.max_entries {
-                truncated.store(true, Ordering::Relaxed);
-                return WalkState::Quit;
-            }
-            loop {
-                let cur = bytes.load(Ordering::Relaxed);
-                if cur.saturating_add(size) > limits.max_total_bytes {
-                    truncated.store(true, Ordering::Relaxed);
-                    return WalkState::Quit;
-                }
-                if bytes
-                    .compare_exchange_weak(
-                        cur,
-                        cur.saturating_add(size),
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    break;
-                }
-            }
-            let n = count.fetch_add(1, Ordering::Relaxed);
-            if n >= limits.max_entries {
-                truncated.store(true, Ordering::Relaxed);
-                return WalkState::Quit;
-            }
-            let file = WalkedFile {
-                id: file_id(root_idx, multi, &relative),
-                absolute: make_absolute(entry.path()),
-                relative,
-                size,
-                is_symlink,
-                modified,
-            };
-            if tx.send(file).is_err() {
-                return WalkState::Quit;
-            }
-            WalkState::Continue
-        })
-    });
-    drop(tx);
-
-    let mut files: Vec<WalkedFile> = rx.iter().collect();
-    files.retain(|file| {
-        keep_for_walk(
-            &file.relative,
-            include.as_deref(),
-            exclude.as_ref(),
-            follow_archives,
-        )
-    });
-    Ok((files, truncated.load(Ordering::Relaxed)))
-}
-
-fn walked_file(
-    root: &Path,
-    path: &Path,
-    root_idx: usize,
-    multi: bool,
-    size: u64,
-    is_symlink: bool,
-) -> WalkedFile {
-    let relative = relative_for(root, path, multi);
-    let modified = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-    WalkedFile {
-        id: file_id(root_idx, multi, &relative),
-        absolute: make_absolute(path),
-        relative,
-        size,
-        is_symlink,
-        modified,
+    for result in builder.build() {
+        let Ok(entry) = result else {
+            continue;
+        };
+        if entry.file_type().is_none_or(|ft| !ft.is_file()) {
+            continue;
+        }
+        let is_symlink = entry.path_is_symlink();
+        if is_symlink && !opts.follow_links {
+            continue;
+        }
+        let rel = rel_under(root, entry.path());
+        if rel.split('/').any(|part| part == ".git") {
+            continue;
+        }
+        let relative = scope.relative(&rel);
+        if !keep_for_walk(&relative, include, exclude, opts.follow_archives) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let file = WalkedFile {
+            id: scope.id(&relative),
+            absolute: scope.absolute_of(entry.path()),
+            relative,
+            size: meta.len(),
+            is_symlink,
+            modified: meta.modified().ok(),
+        };
+        if !found.offer(file) {
+            return Ok(false);
+        }
     }
-}
-
-fn file_id(root_idx: usize, multi: bool, relative: &str) -> String {
-    if multi {
-        format!("{root_idx}:{relative}")
-    } else {
-        relative.to_string()
-    }
+    Ok(true)
 }
 
 /// Whether a filesystem path may enter the pipeline (emit or traverse).
@@ -374,31 +370,10 @@ fn looks_like_archive(relative: &str) -> bool {
     n.ends_with(".zip") || n.ends_with(".tar") || n.ends_with(".tgz") || n.ends_with(".tar.gz")
 }
 
-fn relative_for(root: &Path, path: &Path, multi: bool) -> String {
+/// `path` under `root`, with `/` separators and no `.` parts.
+fn rel_under(root: &Path, path: &Path) -> String {
     let stripped = path.strip_prefix(root).unwrap_or(path);
-    let rel = normalize_rel(&stripped.to_string_lossy());
-    if multi {
-        let prefix = root_label(root);
-        if rel.is_empty() {
-            prefix
-        } else {
-            format!("{prefix}/{rel}")
-        }
-    } else if rel.is_empty() {
-        root.file_name()
-            .map(|name| name.to_string_lossy().replace('\\', "/"))
-            .filter(|name| !name.is_empty())
-            .unwrap_or(rel)
-    } else {
-        rel
-    }
-}
-
-fn root_label(root: &Path) -> String {
-    root.file_name()
-        .map(|name| name.to_string_lossy().replace('\\', "/"))
-        .filter(|name| !name.is_empty() && name != ".")
-        .unwrap_or_else(|| "root".to_string())
+    normalize_rel(&stripped.to_string_lossy())
 }
 
 fn normalize_rel(path: &str) -> String {
@@ -413,6 +388,20 @@ fn normalize_rel(path: &str) -> String {
     parts.join("/")
 }
 
+/// The last normal component of `path`, if it has one.
+fn file_name_label(path: &Path) -> Option<String> {
+    path.file_name()
+        .map(|name| name.to_string_lossy().replace('\\', "/"))
+        .filter(|name| !name.is_empty())
+}
+
+fn root_label(root: &Path) -> String {
+    root.file_name()
+        .map(|name| name.to_string_lossy().replace('\\', "/"))
+        .filter(|name| !name.is_empty() && name != ".")
+        .unwrap_or_else(|| "root".to_string())
+}
+
 fn make_absolute(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -421,24 +410,6 @@ fn make_absolute(path: &Path) -> PathBuf {
             .map(|cwd| cwd.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
     }
-}
-
-fn is_skipped_path(path: &Path, skip: &[PathBuf]) -> bool {
-    skip.iter().any(|other| paths_equal(path, other))
-}
-
-fn paths_equal(a: &Path, b: &Path) -> bool {
-    if a == b {
-        return true;
-    }
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => false,
-    }
-}
-
-fn is_in_git_dir(path: &Path) -> bool {
-    path.components().any(|c| c.as_os_str() == ".git")
 }
 
 #[cfg(test)]
@@ -683,6 +654,113 @@ mod tests {
             rels.contains(&"secret.txt"),
             "--no-gitignore must also disable .ignore, got {rels:?}"
         );
+    }
+
+    fn rels(files: &[WalkedFile]) -> Vec<&str> {
+        files.iter().map(|f| f.relative.as_str()).collect()
+    }
+
+    #[test]
+    fn test_collect_detailed_with_files_over_max_file_size_keeps_every_small_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..40 {
+            write(&dir.path().join(format!("src/f{i:02}.rs")), b"fn f() {}\n");
+        }
+        // Sparse files: 1.8 GiB on paper, no disk space. Each is over the
+        // per-file cap, so none is ever read.
+        fs::create_dir_all(dir.path().join("data")).unwrap();
+        for i in 0..3 {
+            let file = fs::File::create(dir.path().join(format!("data/w{i}.safetensors")));
+            file.unwrap().set_len(600 * 1024 * 1024).unwrap();
+        }
+        let mut seen = Vec::new();
+        for jobs in [1, 2, 8, 0] {
+            let opts = Options {
+                roots: vec![dir.path().to_path_buf()],
+                jobs,
+                ..Options::default()
+            };
+            let outcome = collect_detailed(&opts).unwrap();
+            assert!(!outcome.truncated, "jobs={jobs}");
+            assert_eq!(outcome.files.len(), 43, "jobs={jobs}");
+            seen.push(outcome.files);
+        }
+        assert!(seen.windows(2).all(|w| w[0] == w[1]));
+    }
+
+    #[test]
+    fn test_collect_detailed_with_byte_budget_returns_same_prefix_for_any_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..40 {
+            write(&dir.path().join(format!("f{i:02}.txt")), &[b'x'; 100]);
+        }
+        let expected: Vec<String> = (0..10).map(|i| format!("f{i:02}.txt")).collect();
+        for jobs in [1, 3, 8, 1, 8] {
+            let opts = Options {
+                roots: vec![dir.path().to_path_buf()],
+                max_total_bytes: 1000,
+                jobs,
+                ..Options::default()
+            };
+            let outcome = collect_detailed(&opts).unwrap();
+            assert!(outcome.truncated, "jobs={jobs}");
+            assert_eq!(rels(&outcome.files), expected, "jobs={jobs}");
+        }
+    }
+
+    #[test]
+    fn test_collect_detailed_with_max_entries_returns_first_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["d.rs", "b.rs", "a.rs", "c.rs"] {
+            write(&dir.path().join(name), b"fn x() {}\n");
+        }
+        for jobs in [1, 8] {
+            let opts = Options {
+                roots: vec![dir.path().to_path_buf()],
+                max_entries: 2,
+                jobs,
+                ..Options::default()
+            };
+            let outcome = collect_detailed(&opts).unwrap();
+            assert!(outcome.truncated);
+            assert_eq!(rels(&outcome.files), ["a.rs", "b.rs"], "jobs={jobs}");
+        }
+    }
+
+    #[test]
+    fn test_collect_detailed_with_selection_spends_budget_on_selected_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a_big.txt"), &[b'x'; 900]);
+        write(&dir.path().join("b_small.txt"), &[b'y'; 50]);
+        let opts = Options {
+            roots: vec![dir.path().to_path_buf()],
+            max_total_bytes: 100,
+            selection: crate::config::Selection::Only(vec!["b_small.txt".into()]),
+            ..Options::default()
+        };
+        let outcome = collect_detailed(&opts).unwrap();
+        assert!(!outcome.truncated);
+        assert_eq!(rels(&outcome.files), ["b_small.txt"]);
+    }
+
+    #[test]
+    fn test_collect_detailed_with_max_entries_keeps_first_file_in_depth_first_order() {
+        let dir = tempfile::tempdir().unwrap();
+        // As strings `a-c.txt` < `a.txt` < `a/b.txt`, but a walk visits the
+        // directory `a` first: it sorts before both names.
+        for name in ["a.txt", "a-c.txt", "a/b.txt"] {
+            write(&dir.path().join(name), b"x\n");
+        }
+        for (max_entries, want) in [(1, &["a/b.txt"][..]), (2, &["a-c.txt", "a/b.txt"][..])] {
+            let outcome = collect_detailed(&Options {
+                roots: vec![dir.path().to_path_buf()],
+                max_entries,
+                ..Options::default()
+            })
+            .unwrap();
+            assert!(outcome.truncated);
+            assert_eq!(rels(&outcome.files), want, "max_entries={max_entries}");
+        }
     }
 
     #[test]

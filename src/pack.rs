@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 use crate::classify::{Kind, classify, looks_binary};
-use crate::config::{Options, TreeMode};
+use crate::config::{Options, TreeMode, apply_budgets, cmp_path_order};
 use crate::error::Error;
 use crate::extract::isolate::panic_message;
 use crate::extract::{ExtractOpts, expand_archive, extract};
@@ -257,8 +257,10 @@ pub(crate) fn pack_manifest_entry(entry: &ManifestEntry, opts: &Options) -> Vec<
 
 /// Pack an in-memory file set (browser / virtual trees). No filesystem reads.
 ///
-/// Enforces [`Options::selection`], include/exclude, hidden, and the byte budget.
-/// A `max_entries` of `0` does not stop the pack.
+/// Enforces [`Options::selection`], include/exclude, hidden, and the entry
+/// and byte budgets. The budgets are spent in path order whatever order
+/// `entries` come in, so they keep the files a walk of the same folder keeps
+/// (see [`crate::config::Budget`]).
 pub fn pack_entries(
     entries: &[MemoryFile<'_>],
     opts: &Options,
@@ -278,31 +280,21 @@ pub fn pack_entries(
     let policy = crate::filter::PathPolicy::from_options(opts)?;
     let extract_opts = ExtractOpts::from_options(opts);
     let bytes_read = AtomicU64::new(0);
+    let mut chosen: Vec<&MemoryFile<'_>> = entries
+        .iter()
+        .filter(|entry| {
+            (opts.selection.allows(entry.id) || opts.selection.allows(entry.relative))
+                && policy.keep_walk(entry.relative)
+        })
+        .collect();
+    chosen.sort_by(|a, b| cmp_path_order(a.relative, b.relative).then_with(|| a.id.cmp(b.id)));
+    let truncated = apply_budgets(&mut chosen, opts, |entry| entry.bytes.len() as u64);
     let mut files: Vec<PackedFile> = Vec::new();
-    let mut kept = 0usize;
-    let mut total = 0u64;
-    let mut truncated = false;
-    for entry in entries {
+    for entry in chosen {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             break;
         }
-        if !opts.selection.allows(entry.id) && !opts.selection.allows(entry.relative) {
-            continue;
-        }
-        if !policy.keep_walk(entry.relative) {
-            continue;
-        }
         let size = entry.bytes.len() as u64;
-        if opts.max_entries != 0 && kept >= opts.max_entries {
-            truncated = true;
-            break;
-        }
-        if total.saturating_add(size) > opts.max_total_bytes {
-            truncated = true;
-            continue;
-        }
-        kept += 1;
-        total = total.saturating_add(size);
         if size > opts.max_file_size {
             files.push(packed_too_large(
                 entry.id.to_string(),

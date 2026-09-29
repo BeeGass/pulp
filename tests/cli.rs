@@ -24,6 +24,32 @@ fn write(path: &Path, body: &[u8]) {
     fs::write(path, body).unwrap();
 }
 
+#[test]
+fn test_pulp_with_any_job_count_returns_identical_dump() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..60 {
+        write(
+            &dir.path().join(format!("pkg{}/m{i:02}.py", i % 7)),
+            format!("VALUE_{i} = {i}\n").as_bytes(),
+        );
+    }
+    fs::create_dir_all(dir.path().join("weights")).unwrap();
+    for i in 0..3 {
+        let file = fs::File::create(dir.path().join(format!("weights/w{i}.safetensors")));
+        file.unwrap().set_len(600 * 1024 * 1024).unwrap();
+    }
+    let mut dumps = Vec::new();
+    for jobs in ["1", "2", "8", "1", "8"] {
+        let out = run(pulp().args(["-q", "-f", "xml", "-j", jobs]).arg(dir.path()));
+        assert!(out.status.success(), "{}", stderr(&out));
+        dumps.push(out.stdout);
+    }
+    assert!(dumps.windows(2).all(|w| w[0] == w[1]));
+    let dump = String::from_utf8(dumps.remove(0)).unwrap();
+    assert_eq!(dump.matches("<document index=").count(), 63, "{dump}");
+    assert!(dump.contains("VALUE_59 = 59"), "{dump}");
+}
+
 #[cfg(unix)]
 #[test]
 fn test_pulp_with_control_bytes_in_names_and_content_writes_well_formed_xml() {

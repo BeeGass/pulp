@@ -29,7 +29,10 @@ pub use classify::{
     Kind, classify, is_default_selected, kind_from_label, language_label, language_name,
     looks_binary,
 };
-pub use config::{Options, OutputFormat, Selection, TreeMode, default_exclude_globs};
+pub use config::{
+    Budget, Options, OutputFormat, Selection, TreeMode, apply_budgets, cmp_path_order,
+    default_exclude_globs,
+};
 pub use error::Error;
 pub use filter::PathPolicy;
 #[cfg(feature = "native")]

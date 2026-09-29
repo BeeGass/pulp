@@ -405,6 +405,92 @@ fn test_pack_with_empty_only_returns_no_files() {
     assert!(packed.files.is_empty());
 }
 
+/// The relative paths a walk of `root` and a `pack_entries` of the same
+/// files keep under `opts`, plus whether each was cut. The in-memory files
+/// arrive in `order`, not in path order.
+fn kept_by_walk_and_pack_entries(
+    root: &Path,
+    files: &[(&str, &[u8])],
+    order: &[usize],
+    opts: &Options,
+) -> ((Vec<String>, bool), (Vec<String>, bool)) {
+    for (name, body) in files {
+        let path = root.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+    let walked = pulp::walk::collect_detailed(&Options {
+        roots: vec![root.to_path_buf()],
+        ..opts.clone()
+    })
+    .unwrap();
+    let mut from_walk: Vec<String> = walked.files.into_iter().map(|f| f.relative).collect();
+    from_walk.sort();
+    let entries: Vec<MemoryFile<'_>> = order
+        .iter()
+        .map(|&i| MemoryFile {
+            id: files[i].0,
+            relative: files[i].0,
+            bytes: files[i].1,
+        })
+        .collect();
+    let packed = pack_entries(&entries, opts, None).unwrap();
+    let mut from_entries: Vec<String> = packed.files.into_iter().map(|f| f.relative).collect();
+    from_entries.sort();
+    (
+        (from_walk, walked.truncated),
+        (from_entries, packed.stats.truncated),
+    )
+}
+
+#[test]
+fn test_budgets_with_big_then_small_file_keep_same_files_in_walk_and_pack_entries() {
+    let big = [b'x'; 900];
+    let small = [b'y'; 50];
+    let files: [(&str, &[u8]); 2] = [("a_big.txt", &big), ("b_small.txt", &small)];
+    let opts = Options {
+        max_total_bytes: 100,
+        ..Options::default()
+    };
+    for order in [[0, 1], [1, 0]] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (walk, entries) = kept_by_walk_and_pack_entries(tmp.path(), &files, &order, &opts);
+        assert_eq!(walk, (Vec::<String>::new(), true), "{order:?}");
+        assert_eq!(entries, walk, "{order:?}");
+    }
+
+    let files: [(&str, &[u8]); 3] = [
+        ("a_empty.txt", b""),
+        ("b_full.txt", b"data\n"),
+        ("c_empty.txt", b""),
+    ];
+    let opts = Options {
+        max_total_bytes: 0,
+        ..Options::default()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (walk, entries) = kept_by_walk_and_pack_entries(tmp.path(), &files, &[2, 1, 0], &opts);
+    assert_eq!(walk, (vec!["a_empty.txt".to_string()], true));
+    assert_eq!(entries, walk);
+}
+
+#[test]
+fn test_budgets_with_directory_sorting_between_names_keep_same_files_in_walk_and_pack_entries() {
+    // A walk visits `a/b.txt` before `a-c.txt`, though as strings it sorts last.
+    let files: [(&str, &[u8]); 3] = [("a.txt", b"1\n"), ("a-c.txt", b"2\n"), ("a/b.txt", b"3\n")];
+    let opts = Options {
+        max_entries: 2,
+        ..Options::default()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (walk, entries) = kept_by_walk_and_pack_entries(tmp.path(), &files, &[0, 1, 2], &opts);
+    assert_eq!(
+        walk,
+        (vec!["a-c.txt".to_string(), "a/b.txt".to_string()], true)
+    );
+    assert_eq!(entries, walk);
+}
+
 #[test]
 fn test_from_path_with_dump_md_returns_markdown() {
     assert_eq!(

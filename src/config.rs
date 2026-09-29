@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::PathBuf;
 
 /// How the directory map at the top of the dump is produced.
@@ -67,7 +68,9 @@ pub struct Options {
     pub hidden: bool,
     pub follow_links: bool,
     pub max_file_size: u64,
-    /// `0` means Rayon's default (usually available parallelism).
+    /// Threads that extract files. `0` means Rayon's default (usually
+    /// available parallelism). The walk runs on one thread, so the order it
+    /// finds files in, and what the budgets keep, never depends on this.
     pub jobs: usize,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
@@ -141,6 +144,82 @@ impl Default for Options {
             max_total_bytes: 1 << 30,
         }
     }
+}
+
+/// Order `/`-separated paths the way a walk visits them: depth first, with
+/// each directory's entries in name order. `a/b.txt` comes before `a-c.txt`,
+/// since the directory `a` sorts before the name `a-c.txt`.
+#[must_use]
+pub fn cmp_path_order(a: &str, b: &str) -> Ordering {
+    a.split('/').cmp(b.split('/'))
+}
+
+/// The entry and byte budgets of one pack, spent file by file in path order
+/// ([`cmp_path_order`]).
+///
+/// Files are kept until the first that does not fit; that file and every
+/// one after it are left out, so a folder keeps the same files in the walk,
+/// in [`crate::pack_entries`], and in the browser mill. A file over
+/// [`Options::max_file_size`] is never read, so it spends no bytes, but it
+/// still counts as an entry.
+#[derive(Debug, Clone)]
+pub struct Budget {
+    max_entries: usize,
+    max_total_bytes: u64,
+    max_file_size: u64,
+    entries: usize,
+    bytes: u64,
+    cut: bool,
+}
+
+impl Budget {
+    #[must_use]
+    pub fn new(opts: &Options) -> Self {
+        Self {
+            max_entries: opts.max_entries,
+            max_total_bytes: opts.max_total_bytes,
+            max_file_size: opts.max_file_size,
+            entries: 0,
+            bytes: 0,
+            cut: false,
+        }
+    }
+
+    /// Spend the budgets on the next file, `size` bytes long. `false` when it
+    /// does not fit: leave it out, and every file after it.
+    pub fn take(&mut self, size: u64) -> bool {
+        if self.cut {
+            return false;
+        }
+        let cost = if size > self.max_file_size { 0 } else { size };
+        let bytes = self.bytes.saturating_add(cost);
+        let full = self.max_entries != 0 && self.entries >= self.max_entries;
+        if full || bytes > self.max_total_bytes {
+            self.cut = true;
+            return false;
+        }
+        self.entries += 1;
+        self.bytes = bytes;
+        true
+    }
+
+    /// Whether a file has been left out.
+    #[must_use]
+    pub fn is_cut(&self) -> bool {
+        self.cut
+    }
+}
+
+/// Keep the longest prefix of `items`, already in path order, that fits the
+/// budgets in `opts` (see [`Budget`]). Returns whether anything was cut.
+pub fn apply_budgets<T>(items: &mut Vec<T>, opts: &Options, size: impl Fn(&T) -> u64) -> bool {
+    let mut budget = Budget::new(opts);
+    let kept = items
+        .iter()
+        .take_while(|item| budget.take(size(item)))
+        .count();
+    items.truncate(kept);
+    budget.is_cut()
 }
 
 /// Parse a human size like `8MiB`, `1m`, or `500k` into bytes (1024-based).
@@ -320,6 +399,53 @@ mod tests {
         assert!(Selection::AllEligible.allows("src/lib.rs"));
         assert!(Selection::Only(vec!["src/lib.rs".into()]).allows("src/lib.rs"));
         assert!(!Selection::Only(vec!["src/lib.rs".into()]).allows("src/main.rs"));
+    }
+
+    #[test]
+    fn test_cmp_path_order_with_directory_and_names_returns_walk_order() {
+        let mut paths = vec!["a.txt", "a/b.txt", "a-c.txt", "B.txt", "a/a/z.txt"];
+        paths.sort_by(|a, b| cmp_path_order(a, b));
+        assert_eq!(paths, ["B.txt", "a/a/z.txt", "a/b.txt", "a-c.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn test_apply_budgets_with_file_that_does_not_fit_stops_there() {
+        let opts = Options {
+            max_total_bytes: 100,
+            max_file_size: 1000,
+            ..Options::default()
+        };
+        let mut sizes = vec![60, 50, 10];
+        assert!(apply_budgets(&mut sizes, &opts, |size| *size));
+        assert_eq!(sizes, [60]);
+
+        // Over the per-file cap: never read, so no bytes, but one entry.
+        let mut sizes = vec![5000, 100, 1];
+        assert!(apply_budgets(&mut sizes, &opts, |size| *size));
+        assert_eq!(sizes, [5000, 100]);
+
+        let entries = Options {
+            max_entries: 2,
+            ..Options::default()
+        };
+        let mut sizes = vec![1, 2];
+        assert!(!apply_budgets(&mut sizes, &entries, |size| *size));
+        let mut sizes = vec![1, 2, 3];
+        assert!(apply_budgets(&mut sizes, &entries, |size| *size));
+        assert_eq!(sizes, [1, 2]);
+    }
+
+    #[test]
+    fn test_budget_with_refused_file_refuses_every_later_one() {
+        let mut budget = Budget::new(&Options {
+            max_total_bytes: 10,
+            ..Options::default()
+        });
+        assert!(budget.take(10));
+        assert!(!budget.is_cut());
+        assert!(!budget.take(1));
+        assert!(!budget.take(0));
+        assert!(budget.is_cut());
     }
 
     #[test]
