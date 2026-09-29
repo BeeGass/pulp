@@ -1187,6 +1187,7 @@ dependencies = [
  "http-body-util",
  "ignore",
  "infer",
+ "libc",
  "opener",
  "pdf-extract",
  "pretty_assertions",

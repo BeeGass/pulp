@@ -446,14 +446,7 @@ fn process_entry(
         return vec![list_only_file(entry, opts)];
     }
     if let Some(msg) = changed_since_scan(entry) {
-        return vec![PackedFile {
-            id: entry.id.clone(),
-            relative: entry.relative.clone(),
-            kind: entry.kind,
-            size: entry.size,
-            text: format!("[{msg}]"),
-            status: FileStatus::Changed,
-        }];
+        return vec![packed_changed(entry, msg)];
     }
     if entry.size > opts.max_file_size {
         return vec![packed_too_large(
@@ -464,9 +457,9 @@ fn process_entry(
             opts.max_file_size,
         )];
     }
-    let bytes = match read_limited(&entry.absolute, opts.max_file_size) {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(size)) => {
+    let bytes = match read_limited(entry, opts.follow_links, opts.max_file_size) {
+        Ok(EntryRead::Bytes(bytes)) => bytes,
+        Ok(EntryRead::TooLarge(size)) => {
             return vec![packed_too_large(
                 entry.id.clone(),
                 entry.relative.clone(),
@@ -475,6 +468,7 @@ fn process_entry(
                 opts.max_file_size,
             )];
         }
+        Ok(EntryRead::Changed(msg)) => return vec![packed_changed(entry, msg)],
         Err(err) => {
             return vec![packed_error(
                 entry.id.clone(),
@@ -500,16 +494,78 @@ fn process_entry(
     )
 }
 
+/// What reading a scanned entry found.
 #[cfg(feature = "native")]
-fn read_limited(path: &Path, max: u64) -> std::io::Result<Result<Vec<u8>, u64>> {
-    let file = std::fs::File::open(path)?;
+enum EntryRead {
+    Bytes(Vec<u8>),
+    /// Grew past the per-file cap; holds its size.
+    TooLarge(u64),
+    /// Not the file the scan saw; holds why.
+    Changed(String),
+}
+
+/// Read the file behind `entry`, up to `max` bytes.
+///
+/// The file is opened first, refusing the swaps [`open_entry`] names, and
+/// its type, size, and modification time are then checked on the open
+/// file, so nothing done to the path after the open changes what is read.
+#[cfg(feature = "native")]
+fn read_limited(entry: &ManifestEntry, follow_links: bool, max: u64) -> std::io::Result<EntryRead> {
+    let file = match open_entry(entry, follow_links)? {
+        Ok(file) => file,
+        Err(msg) => return Ok(EntryRead::Changed(msg.into())),
+    };
+    if let Some(msg) = changed_from(entry, &file.metadata()?) {
+        return Ok(EntryRead::Changed(msg));
+    }
     let mut buf = Vec::new();
-    let n = file.take(max.saturating_add(1)).read_to_end(&mut buf)?;
+    let n = (&file).take(max.saturating_add(1)).read_to_end(&mut buf)?;
     if n as u64 > max {
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(n as u64);
-        Ok(Err(size))
-    } else {
-        Ok(Ok(buf))
+        let size = file.metadata().map_or(n as u64, |meta| meta.len());
+        return Ok(EntryRead::TooLarge(size));
+    }
+    Ok(EntryRead::Bytes(buf))
+}
+
+/// Open the file behind `entry` for reading, or say how its path changed
+/// since the scan.
+///
+/// On Unix, unless the scan followed links, no symlink is followed anywhere
+/// between the scanned root and the file (see
+/// [`crate::walk::open_beneath`]): a folder on the way that became a
+/// symlink to another folder cannot pass that folder's file off as this
+/// one. With `--follow-links`, or elsewhere, the file's own name is guarded,
+/// and a symlink the scan found there is followed.
+#[cfg(feature = "native")]
+fn open_entry(
+    entry: &ManifestEntry,
+    follow_links: bool,
+) -> std::io::Result<Result<std::fs::File, &'static str>> {
+    #[cfg(unix)]
+    if !follow_links && !entry.is_symlink {
+        use crate::walk::PathChange;
+        let depth = entry.root_relative.split('/').count();
+        let opened = crate::walk::open_beneath(&entry.absolute, depth)?;
+        return Ok(opened.map_err(|change| match change {
+            PathChange::Symlink => "changed since scan: replaced by a symlink",
+            PathChange::Gone => "changed since scan: no longer there",
+            PathChange::NotFolder => {
+                "changed since scan: a folder on its path is no longer a folder"
+            }
+        }));
+    }
+    #[cfg(not(unix))]
+    let _ = follow_links;
+    match crate::walk::open_for_read(&entry.absolute, entry.is_symlink) {
+        Ok(file) => Ok(Ok(file)),
+        Err(err) => {
+            let now_link = std::fs::symlink_metadata(&entry.absolute)
+                .is_ok_and(|meta| meta.file_type().is_symlink());
+            if now_link && !entry.is_symlink {
+                return Ok(Err("changed since scan: replaced by a symlink"));
+            }
+            Err(err)
+        }
     }
 }
 
@@ -539,9 +595,38 @@ fn process_item(item: WorkItem, opts: &Options, extract_opts: &ExtractOpts) -> V
     )]
 }
 
+/// Why the file at `entry.absolute` is no longer the one the scan saw, if
+/// it is not, judged from its path before anything opens it, so a path that
+/// has become a device or a FIFO is never opened. A path that has gone is
+/// left for the read to report.
 #[cfg(feature = "native")]
 fn changed_since_scan(entry: &ManifestEntry) -> Option<String> {
-    let meta = std::fs::metadata(&entry.absolute).ok()?;
+    let link = std::fs::symlink_metadata(&entry.absolute).ok()?;
+    if link.file_type().is_symlink() != entry.is_symlink {
+        return Some(if entry.is_symlink {
+            "changed since scan: no longer a symlink".into()
+        } else {
+            "changed since scan: replaced by a symlink".into()
+        });
+    }
+    let meta = if entry.is_symlink {
+        std::fs::metadata(&entry.absolute).ok()?
+    } else {
+        link
+    };
+    changed_from(entry, &meta)
+}
+
+/// Why a file whose metadata is `meta` is not the one the scan saw.
+///
+/// The type, size, and modification time decide, as they do for `make`.
+/// The device and inode do not: a remount, a network share reconnecting
+/// after sleep, or an overlay copy-up gives unchanged files new ones.
+#[cfg(feature = "native")]
+fn changed_from(entry: &ManifestEntry, meta: &std::fs::Metadata) -> Option<String> {
+    if !meta.is_file() {
+        return Some("changed since scan: no longer a regular file".into());
+    }
     if meta.len() != entry.size {
         return Some(format!(
             "changed since scan: size {} -> {}",
@@ -555,6 +640,18 @@ fn changed_since_scan(entry: &ManifestEntry) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(feature = "native")]
+fn packed_changed(entry: &ManifestEntry, msg: String) -> PackedFile {
+    PackedFile {
+        id: entry.id.clone(),
+        relative: entry.relative.clone(),
+        kind: entry.kind,
+        size: entry.size,
+        text: format!("[{msg}]"),
+        status: FileStatus::Changed,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1431,6 +1528,249 @@ mod tests {
             zw.write_all(data).unwrap();
         }
         zw.finish().unwrap().into_inner()
+    }
+
+    /// A manifest entry the scan made for a regular file at `path`, with
+    /// its current size and modification time.
+    #[cfg(unix)]
+    fn scanned_entry(path: &Path) -> ManifestEntry {
+        let meta = fs::metadata(path).unwrap();
+        ManifestEntry {
+            id: "a.txt".into(),
+            relative: "a.txt".into(),
+            root_relative: "a.txt".into(),
+            absolute: path.to_path_buf(),
+            size: meta.len(),
+            kind: Kind::Text,
+            language: "text".into(),
+            default_on: true,
+            oversized: false,
+            is_symlink: false,
+            modified: meta.modified().ok(),
+        }
+    }
+
+    /// Scan `dir`, then let `swap` replace `name` before the pack reads it.
+    /// Returns what packing that entry gives, failing if it blocks.
+    #[cfg(unix)]
+    fn pack_after_swap(dir: &Path, name: &str, swap: impl FnOnce(&Path)) -> Vec<PackedFile> {
+        let opts = Options {
+            roots: vec![dir.to_path_buf()],
+            ..Options::default()
+        };
+        let manifest = crate::manifest::scan_manifest(&opts).unwrap();
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == name)
+            .unwrap()
+            .clone();
+        swap(&dir.join(name));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(pack_manifest_entry(&entry, &opts));
+        });
+        rx.recv_timeout(Duration::from_secs(20))
+            .expect("packing a swapped file must not block")
+    }
+
+    /// Give `path` the modification time of `reference`, following links.
+    #[cfg(unix)]
+    fn copy_mtime(reference: &Path, path: &Path) {
+        let status = std::process::Command::new("touch")
+            .arg("-r")
+            .arg(reference)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_manifest_entry_with_file_swapped_for_fifo_returns_changed_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("x.txt"), b"");
+        let keep = dir.path().join("keep");
+        let files = pack_after_swap(dir.path(), "x.txt", |path| {
+            fs::rename(path, &keep).unwrap();
+            let made = std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(made.success());
+            copy_mtime(&keep, path);
+        });
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Changed, "{:?}", files[0]);
+        assert!(
+            files[0].text.contains("no longer a regular file"),
+            "{}",
+            files[0].text
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_limited_with_fifo_after_the_check_returns_changed_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        write(&path, b"");
+        let entry = scanned_entry(&path);
+        // The swap lands after the path check, so only the read can see it.
+        fs::remove_file(&path).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(match read_limited(&entry, false, 1024) {
+                Ok(EntryRead::Changed(msg)) => msg,
+                Ok(_) => "read".into(),
+                Err(err) => err.to_string(),
+            });
+        });
+        let msg = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("open blocked");
+        assert!(msg.contains("no longer a regular file"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_limited_with_symlink_swapped_in_after_the_check_returns_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        write(&path, b"scanned\n");
+        let entry = scanned_entry(&path);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let secret = elsewhere.path().join("secret.txt");
+        write(&secret, b"private\n");
+        copy_mtime(&path, &secret);
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&secret, &path).unwrap();
+        match read_limited(&entry, false, 1024) {
+            Ok(EntryRead::Changed(msg)) => assert!(msg.contains("replaced by a symlink"), "{msg}"),
+            Ok(EntryRead::Bytes(bytes)) => panic!("read {:?}", String::from_utf8_lossy(&bytes)),
+            Ok(EntryRead::TooLarge(size)) => panic!("too large: {size}"),
+            Err(err) => panic!("{err}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_changed_since_scan_with_same_size_and_mtime_on_new_inode_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        write(&path, b"scanned\n");
+        let entry = scanned_entry(&path);
+        // The same bytes, size, and time on a new inode: what a remount or
+        // an overlay copy-up leaves behind.
+        let copy = dir.path().join("a.copy");
+        fs::copy(&path, &copy).unwrap();
+        copy_mtime(&path, &copy);
+        fs::rename(&copy, &path).unwrap();
+        assert_eq!(changed_since_scan(&entry), None);
+        match read_limited(&entry, false, 1024).unwrap() {
+            EntryRead::Bytes(bytes) => assert_eq!(bytes, b"scanned\n"),
+            EntryRead::Changed(msg) => panic!("{msg}"),
+            EntryRead::TooLarge(size) => panic!("too large: {size}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_manifest_entry_with_file_swapped_for_symlink_returns_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.txt"), b"scanned\n");
+        let elsewhere = tempfile::tempdir().unwrap();
+        let other = elsewhere.path().join("secret.txt");
+        write(&other, b"private\n");
+        let files = pack_after_swap(dir.path(), "a.txt", |path| {
+            copy_mtime(path, &other);
+            fs::remove_file(path).unwrap();
+            std::os::unix::fs::symlink(&other, path).unwrap();
+        });
+        assert_eq!(files[0].status, FileStatus::Changed, "{:?}", files[0]);
+        assert!(!files[0].text.contains("private"), "{}", files[0].text);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_manifest_entry_with_same_size_and_mtime_copy_returns_extracted() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a.txt"), b"scanned\n");
+        let files = pack_after_swap(dir.path(), "a.txt", |path| {
+            let copy = path.with_extension("copy");
+            fs::copy(path, &copy).unwrap();
+            copy_mtime(path, &copy);
+            fs::rename(&copy, path).unwrap();
+        });
+        assert_eq!(files[0].status, FileStatus::Extracted, "{:?}", files[0]);
+        assert_eq!(files[0].text, "scanned\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_manifest_entry_with_folder_swapped_for_symlink_returns_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        write(&outside.path().join("b.txt"), b"outside\n");
+        write(&dir.path().join("sub/b.txt"), b"inside!\n");
+        // The same name, size, and time: only the path to it tells them apart.
+        copy_mtime(&outside.path().join("b.txt"), &dir.path().join("sub/b.txt"));
+        let files = pack_after_swap(dir.path(), "sub/b.txt", |path| {
+            let sub = path.parent().unwrap();
+            fs::rename(sub, sub.with_file_name("sub.old")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), sub).unwrap();
+        });
+        assert_eq!(files[0].status, FileStatus::Changed, "{:?}", files[0]);
+        assert!(
+            files[0].text.contains("replaced by a symlink"),
+            "{}",
+            files[0].text
+        );
+        assert!(!files[0].text.contains("outside"), "{}", files[0].text);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_manifest_entry_with_folder_gone_returns_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("sub/b.txt"), b"inside!\n");
+        let files = pack_after_swap(dir.path(), "sub/b.txt", |path| {
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        });
+        assert_eq!(files[0].status, FileStatus::Changed, "{:?}", files[0]);
+        assert!(
+            files[0].text.contains("no longer there"),
+            "{}",
+            files[0].text
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_with_follow_links_reads_file_in_symlinked_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        write(&elsewhere.path().join("b.txt"), b"linked in\n");
+        std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("sub")).unwrap();
+        let packed = pack(&Options {
+            roots: vec![dir.path().to_path_buf()],
+            follow_links: true,
+            ..Options::default()
+        })
+        .unwrap();
+        let file = packed
+            .files
+            .iter()
+            .find(|f| f.relative == "sub/b.txt")
+            .unwrap();
+        assert_eq!(file.status, FileStatus::Extracted, "{file:?}");
+        assert_eq!(file.text, "linked in\n");
     }
 
     #[test]

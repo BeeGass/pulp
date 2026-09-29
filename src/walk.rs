@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -255,6 +256,185 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
+    }
+}
+
+/// Open `path` for reading without blocking and, unless `follow`, without
+/// following a symlink.
+///
+/// A path that was a regular file at scan time may since have become a
+/// FIFO, a device, or a symlink to a file outside the folder. On Unix the
+/// open never blocks (`O_NONBLOCK`: a FIFO does not wait for a writer) and
+/// fails on a symlink (`O_NOFOLLOW`) unless the scan found one there and
+/// `follow` says so. Check the opened file's metadata rather than the
+/// path's: a swap after the open cannot change what is read.
+pub(crate) fn open_for_read(path: &Path, follow: bool) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let nofollow = if follow { 0 } else { libc::O_NOFOLLOW };
+        options.custom_flags(libc::O_NONBLOCK | nofollow);
+    }
+    // Without those flags, check the type first, so a path that is no
+    // longer a regular file is not opened at all.
+    #[cfg(not(unix))]
+    {
+        let _ = follow;
+        if !fs::metadata(path)?.is_file() {
+            return Err(not_regular_file());
+        }
+    }
+    options.open(path)
+}
+
+/// [`open_for_read`], refusing anything but a regular file.
+pub(crate) fn open_regular_file(path: &Path, follow: bool) -> io::Result<fs::File> {
+    let file = open_for_read(path, follow)?;
+    if !file.metadata()?.is_file() {
+        return Err(not_regular_file());
+    }
+    Ok(file)
+}
+
+fn not_regular_file() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "not a regular file; it changed after the scan",
+    )
+}
+
+/// How the path to a scanned file changed, as [`open_beneath`] found it.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathChange {
+    /// The file, or a folder on its path, is now a symlink.
+    Symlink,
+    /// The file, or a folder on its path, is gone.
+    Gone,
+    /// A folder on its path is no longer a folder.
+    NotFolder,
+}
+
+/// Open `path` for reading without following a symlink in its last `depth`
+/// components: the steps from the scanned root down to the file.
+///
+/// `O_NOFOLLOW` on a whole path guards only its last component, so a folder
+/// on the way that became a symlink to somewhere outside the root would
+/// still be followed. Instead the root is opened, each folder below it is
+/// opened from the one above with `O_NOFOLLOW | O_DIRECTORY`, and the file
+/// itself with `O_NOFOLLOW | O_NONBLOCK`, so a FIFO does not wait for a
+/// writer. A step that is now a symlink, gone, or no longer a folder comes
+/// back as that [`PathChange`]. The caller checks the opened file's type.
+#[cfg(unix)]
+pub(crate) fn open_beneath(path: &Path, depth: usize) -> io::Result<Result<fs::File, PathChange>> {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut root = path.to_path_buf();
+    let mut steps = Vec::with_capacity(depth);
+    for _ in 0..depth {
+        let name = root.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path is shorter than its depth",
+            )
+        })?;
+        steps.push(c_name(name)?);
+        root.pop();
+    }
+    steps.reverse();
+    let Some((file, folders)) = steps.split_last() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no file to open",
+        ));
+    };
+    let opened = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(&root);
+    let mut dir = match opened {
+        Ok(dir) => OwnedFd::from(dir),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Err(PathChange::Gone)),
+        Err(err) if err.kind() == io::ErrorKind::NotADirectory => {
+            return Ok(Err(PathChange::NotFolder));
+        }
+        Err(err) => return Err(err),
+    };
+    for folder in folders {
+        match open_at(&dir, folder, libc::O_DIRECTORY) {
+            Ok(next) => dir = next,
+            Err(err) => return step_change(&dir, folder, true, err).map(Err),
+        }
+    }
+    match open_at(&dir, file, libc::O_NONBLOCK) {
+        Ok(fd) => Ok(Ok(fs::File::from(fd))),
+        Err(err) => step_change(&dir, file, false, err).map(Err),
+    }
+}
+
+#[cfg(unix)]
+fn c_name(name: &OsStr) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "file name holds a NUL byte"))
+}
+
+/// `openat(dir, name)` for reading, never following a symlink at `name`.
+#[cfg(unix)]
+fn open_at(
+    dir: &std::os::fd::OwnedFd,
+    name: &std::ffi::CStr,
+    flags: libc::c_int,
+) -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let flags = flags | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `dir` is an open descriptor and `name` a NUL-terminated
+    // string; both outlive the call.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `openat` just returned `fd`, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// How the step `name` in `dir`, which failed to open with `err`, changed:
+/// it is a symlink, it is gone, or a folder step is no longer a folder.
+/// Any other failure comes back as `err`.
+#[cfg(unix)]
+fn step_change(
+    dir: &std::os::fd::OwnedFd,
+    name: &std::ffi::CStr,
+    folder: bool,
+    err: io::Error,
+) -> io::Result<PathChange> {
+    use std::os::fd::AsRawFd;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `dir` is open, `name` is NUL-terminated, and `stat` points to
+    // writable memory the size of a `stat`.
+    let status = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status != 0 {
+        let gone = io::Error::last_os_error().kind() == io::ErrorKind::NotFound;
+        return if gone { Ok(PathChange::Gone) } else { Err(err) };
+    }
+    // SAFETY: `fstatat` succeeded, so it filled in `stat`.
+    let kind = unsafe { stat.assume_init() }.st_mode & libc::S_IFMT;
+    if kind == libc::S_IFLNK {
+        Ok(PathChange::Symlink)
+    } else if folder && kind != libc::S_IFDIR {
+        Ok(PathChange::NotFolder)
+    } else {
+        Err(err)
     }
 }
 
@@ -1119,6 +1299,121 @@ mod tests {
             last.contains(&format!("d{:04}", MAX_WALK_WARNINGS - 1)),
             "{last}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_open_regular_file_with_symlink_for_non_symlink_entry_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        write(&real, b"real\n");
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(open_regular_file(&link, false).is_err());
+        assert!(open_regular_file(&link, true).is_ok());
+        assert!(open_regular_file(&real, false).is_ok());
+    }
+
+    /// What `open_beneath` gives for `path`, read to text when it opens.
+    #[cfg(unix)]
+    fn beneath(path: &Path, depth: usize) -> Result<String, PathChange> {
+        use std::io::Read;
+        open_beneath(path, depth).unwrap().map(|mut file| {
+            let mut text = String::new();
+            file.read_to_string(&mut text).unwrap();
+            text
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_open_beneath_with_folder_swapped_for_symlink_returns_symlink_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        write(&dir.path().join("sub/b.txt"), b"inside!\n");
+        write(&outside.path().join("b.txt"), b"outside\n");
+        let path = dir.path().join("sub/b.txt");
+        assert_eq!(beneath(&path, 2), Ok("inside!\n".to_string()));
+        fs::rename(dir.path().join("sub"), dir.path().join("sub.old")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("sub")).unwrap();
+        assert_eq!(beneath(&path, 2), Err(PathChange::Symlink));
+        // Only the last `depth` steps are checked; the path to the root is
+        // the caller's to trust.
+        assert_eq!(beneath(&path, 1), Ok("outside\n".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_open_beneath_with_file_swapped_for_symlink_returns_symlink_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        write(&outside.path().join("secret.txt"), b"private\n");
+        let path = dir.path().join("a/b/c.txt");
+        write(&path, b"scanned\n");
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), &path).unwrap();
+        assert_eq!(beneath(&path, 3), Err(PathChange::Symlink));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_open_beneath_with_missing_step_or_file_in_place_of_folder_returns_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a/b/c.txt");
+        write(&path, b"x\n");
+        fs::remove_file(&path).unwrap();
+        assert_eq!(beneath(&path, 3), Err(PathChange::Gone));
+        fs::remove_dir(dir.path().join("a/b")).unwrap();
+        assert_eq!(beneath(&path, 3), Err(PathChange::Gone));
+        write(&dir.path().join("a/b"), b"a file now\n");
+        assert_eq!(beneath(&path, 3), Err(PathChange::NotFolder));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_open_beneath_with_fifo_returns_it_without_blocking() {
+        use std::os::unix::fs::FileTypeExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("sub/pipe");
+        fs::create_dir_all(dir.path().join("sub")).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let opened = open_beneath(&fifo, 2).unwrap().unwrap();
+            let _ = tx.send(opened.metadata().unwrap().file_type().is_fifo());
+        });
+        let is_fifo = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("opening a FIFO must not wait for a writer");
+        assert!(is_fifo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_open_regular_file_with_fifo_after_type_check_returns_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                open_regular_file(&fifo, false)
+                    .map(|_| ())
+                    .map_err(|e| e.kind()),
+            );
+        });
+        let opened = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("opening a FIFO must not wait for a writer");
+        assert_eq!(opened, Err(io::ErrorKind::InvalidInput));
     }
 
     #[cfg(unix)]

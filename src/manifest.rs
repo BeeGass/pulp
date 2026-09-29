@@ -75,7 +75,7 @@ fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestE
     walked
         .into_iter()
         .map(|wf| {
-            let sniff = sniff_prefix(&wf.absolute);
+            let sniff = sniff_prefix(&wf.absolute, wf.is_symlink);
             let kind = classify(&wf.absolute, sniff.as_deref());
             let oversized = wf.size > opts.max_file_size;
             // Judge generated and virtualenv paths under the scanned root
@@ -101,13 +101,14 @@ fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestE
         .collect()
 }
 
-/// Read a short prefix when the name alone does not decide the kind.
+/// Read a short prefix when the name alone does not decide the kind. A
+/// symlink is followed only when the walk found one there.
 #[cfg(feature = "native")]
-fn sniff_prefix(path: &std::path::Path) -> Option<Vec<u8>> {
+fn sniff_prefix(path: &std::path::Path, is_symlink: bool) -> Option<Vec<u8>> {
     if kind_from_name(path).is_some() {
         return None;
     }
-    let mut file = std::fs::File::open(path).ok()?;
+    let mut file = walk::open_regular_file(path, is_symlink).ok()?;
     let mut buf = vec![0u8; 8192];
     use std::io::Read;
     let n = file.read(&mut buf).ok()?;
