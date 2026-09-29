@@ -73,9 +73,6 @@ pub fn collect_detailed(opts: &Options) -> Result<WalkOutcome, Error> {
             label: &labels[idx],
         };
         let more = match kind {
-            // A symlinked file named as a root is read only when links are
-            // followed.
-            RootKind::File { is_symlink, .. } if is_symlink && !opts.follow_links => true,
             RootKind::File { meta, is_symlink } => found.offer(scope.file_root(&meta, is_symlink)),
             RootKind::Dir => walk_dir(&scope, opts, &globs, &mut found)?,
         };
@@ -253,6 +250,8 @@ impl RootScope<'_> {
 
     /// The file this root names, when it names a file.
     fn file_root(&self, meta: &fs::Metadata, is_symlink: bool) -> WalkedFile {
+        // A file named on the command line is read even when it is a
+        // symlink, the way a symlinked directory root is walked.
         let relative = self.relative("");
         let root_relative = file_name_label(self.root).unwrap_or_else(|| relative.clone());
         WalkedFile {
@@ -972,6 +971,19 @@ mod tests {
         })
         .unwrap();
         assert_eq!(rels(&files), ["p/a/b/x.txt", "a/b/x.txt", "r/b/y.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_with_symlink_file_root_returns_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("real.rs"), b"fn real() {}\n");
+        let link = dir.path().join("link.rs");
+        std::os::unix::fs::symlink(dir.path().join("real.rs"), &link).unwrap();
+        let files = collect(&opts_for(link)).unwrap();
+        assert_eq!(rels(&files), ["link.rs"]);
+        assert!(files[0].is_symlink);
+        assert_eq!(files[0].size, 13);
     }
 
     #[test]
