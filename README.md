@@ -1,146 +1,234 @@
 # pulp
 
-Grind a local folder into one LLM-ready dump.
+[![CI](https://github.com/BeeGass/pulp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/BeeGass/pulp/actions/workflows/ci.yml?query=branch%3Amain)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/tools/install)
 
-Pulp walks a tree, pulls text out of mixed documents in parallel, and writes a single file you can hand a model. The name is a triple entendre: paper pulp; the verb *to pulp* (extract the juice); and pulp fiction — disposable reading.
+**Grind a local folder into one LLM-ready dump.**
 
-**Files never leave the machine.** There is no upload, no account, and no cloud packer. The mill binds `127.0.0.1` only.
+Pulp walks a folder, pulls the text out of everything in it (code, PDFs, Word, PowerPoint, and Excel files, notebooks, archives) in parallel, and writes a single file you can hand a language model. Run it from the command line, from a local web app, or in your browser with nothing to install.
 
-Product site: [pulp.onlygass.dev](https://pulp.onlygass.dev) · Source: [github.com/BeeGass/pulp](https://github.com/BeeGass/pulp)
+**Your files never leave your machine.** There is no upload, no account, and no cloud service. The local mill listens on `127.0.0.1` only, and the browser mill works inside the tab.
 
+The name is a triple entendre: paper pulp; the verb *to pulp*, to extract the juice; and pulp fiction, disposable reading.
+
+[Website](https://pulp.onlygass.dev) · [Browser mill](https://pulp.onlygass.dev/mill) · [Usage guide](docs/usage.md) · [Report a bug](https://github.com/BeeGass/pulp/issues)
+
+## Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Common tasks](#common-tasks)
+- [Output formats](#output-formats)
+- [What goes in](#what-goes-in)
+- [Options](#options)
+- [The two mills](#the-two-mills)
+- [Use it from Rust](#use-it-from-rust)
+- [Privacy and security](#privacy-and-security)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Citation](#citation)
+- [License](#license)
+
+## Features
+
+- **One file out.** Plain text, Markdown, or XML, with a map of the folder on top, ready to paste into a chat or attach to a prompt.
+- **Reads real folders.** Source code and text in any language, plus PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, RTF, HTML, XML, JSON, CSV, Jupyter notebooks, NumPy arrays, and zip or tar archives.
+- **Leaves the noise out.** Honors `.gitignore`, and skips `node_modules/`, build output, virtualenvs, caches, secrets such as `.env` files and keys, and binary media.
+- **Same folder, same dump.** Files go in path order, and size budgets stop at the same file every run.
+- **Fast.** Extraction runs on every core. In `pulp ui`, pulping again re-reads only the files that changed.
+- **Hard to break.** A damaged or encrypted file gets a one-line note and the run goes on; a mislabelled one is read as what it really holds. Parsers that could hang run in a child process with a time limit.
+- **Three ways to run it.** A CLI for scripts, a point-and-click mill on localhost (`pulp ui`), and the same mill in your browser, built to WebAssembly.
+
+## Installation
+
+Pulp is written in Rust and installs with Cargo. It needs Rust 1.88 or newer.
+
+**1. Install Rust** (skip this if `cargo --version` already works):
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
+
+On Windows, use the installer from [rustup.rs](https://rustup.rs). To update an existing Rust, run `rustup update stable`.
+
+**2. Install pulp:**
+
+```sh
 cargo install --git https://github.com/BeeGass/pulp --locked
+```
+
+Cargo downloads the source, builds it (a few minutes the first time), and puts `pulp` in `~/.cargo/bin`, which rustup adds to your `PATH`.
+
+**3. Check that it works:**
+
+```sh
+pulp --version
+```
+
+```text
+pulp 0.1.0
+```
+
+### Updating and uninstalling
+
+To update, run the install command again; it rebuilds from the latest commit on `main` (add `--force` if Cargo says pulp is already installed). To remove pulp:
+
+```sh
+cargo uninstall pulp
+```
+
+### Building from a clone
+
+```sh
+git clone https://github.com/BeeGass/pulp
+cd pulp
+cargo install --path . --locked
+```
+
+On macOS, a build inside the clone links with the Command Line Tools; install them with `xcode-select --install` if you have not. [docs/development.md](docs/development.md) covers the rest of the build tooling.
+
+### Platform notes
+
+| Platform | Notes |
+| --- | --- |
+| macOS (Apple Silicon or Intel) | **Browse** in the mill opens Finder. |
+| Linux (x86_64 or aarch64) | **Browse** uses `zenity`, then `kdialog`; install one for a folder dialog, or type a path. Runs on desktops, servers, and ARM boards such as a Raspberry Pi. |
+| Windows (x86_64 or ARM) | **Browse** opens the Explorer folder dialog. Windows is not covered by CI yet. |
+| Headless or SSH | Use the CLI, or run `pulp ui --no-open` and open its link through an SSH port forward ([how](docs/usage.md#the-local-mill)). |
+
+### No install at all
+
+The [browser mill](https://pulp.onlygass.dev/mill) runs the same packer inside your browser tab. Choose or drop a folder, tick what goes in, and copy or download the dump. Nothing is uploaded.
+
+## Quick start
+
+Point pulp at a folder. Take this small project:
+
+```text
+tides/
+├── README.md
+└── src/
+    └── main.rs
+```
+
+<details>
+<summary>Create it to follow along</summary>
+
+```sh
+mkdir -p tides/src
+printf '# tides\n\nFinds the high tide in a day of gauge readings.\n' > tides/README.md
+printf 'fn main() {\n    println!("high tide: 4.02 m at 18:37");\n}\n' > tides/src/main.rs
+```
+
+</details>
+
+```sh
+pulp -f md tides
+```
+
+Pulp prints one Markdown document: a map of the folder, then each file under its own heading.
+
+````markdown
+# Directory structure
+
+```
+tides/
+├── README.md
+└── src/
+    └── main.rs
+```
+
+## README.md
+
+```markdown
+# tides
+
+Finds the high tide in a day of gauge readings.
+```
+
+## src/main.rs
+
+```rust
+fn main() {
+    println!("high tide: 4.02 m at 18:37");
+}
+```
+````
+
+A summary goes to stderr, so it never lands in the dump:
+
+```text
+pulped 2 files (115 B read, 161 chars, ~31 tokens) in 26ms
+```
+
+To save the dump instead, name a file. The layout follows its extension:
+
+```sh
+pulp -o tides.xml tides
+```
+
+Then paste or attach the file wherever you talk to your model.
+
+### Or click through it
+
+```sh
 pulp ui
-pulp -o dump.xml .
 ```
 
-Requires [Rust](https://rustup.rs/) 1.88 or newer.
+This opens the local mill in your browser, on `127.0.0.1:8747` or the next free port. **Browse** to a folder (or paste its path), tick the files you want, pick a format, and press **Pulp**, then copy or download the result. **Try a sample** loads a small built-in project if you want to look around first.
 
----
+## Common tasks
 
-## Local mill
-
-```
-pulp ui
-```
-
-Opens a localhost mill at `http://127.0.0.1:8747` (the next free port if 8747 is busy) in your browser, and prints its link, `open http://127.0.0.1:8747/?token=…`. The bare address shows a locked page, so other programs and other users on the machine cannot use the mill. Browse picks a folder in the OS file manager, or paste a path. Tick files, choose **Readable** or **Source** content and XML / Markdown / plain text, then Pulp. **Try a sample** loads a small built-in project.
-
-- A checkbox includes a file or a whole folder; the file name previews what pulp extracts; language chips tick every file of a kind; `/` filters.
-- Changing format or the directory map redraws the last extraction. Other changes mark the dump out of date, and Copy and Download stay off until you pulp again.
-- Files that could not be extracted are flagged in the tree. Select one to see why, untick it, or open a GitHub issue with the error text.
-- A scan that could not read some folders (no read permission, say) names the first few and counts the rest.
-- Pulping reads each ticked file as it is now, so a file edited since the scan goes in as edited. One that has disappeared or been swapped for a link, a folder, or a device is flagged as changed rather than read; scan again to pick up the folder as it is now.
-- Pulping again reuses what the last pulp extracted from each file whose size and modification time have not changed since, so after an edit only the edited files are read and extracted again. A change of content, archives, or notebook outputs extracts every file afresh.
-- One pack job at a time. Cancel (or Esc) asks it to stop between files. File previews run beside a pack and read only the chosen file from the last scan.
-- Lockfiles, images, and virtualenv trees (`.venv/`, `venv/`) start unticked.
-- The mill follows your OS light or dark setting and works on a phone.
-- Nothing is uploaded. The page opens only from the printed link, and every API call carries its per-process session token.
-
-```
-pulp ui --port 9000 --no-open    # headless or remote; then open the printed link yourself
+```sh
+pulp                               # the current folder, plain text to stdout
+pulp -o dump.xml .                 # the current folder into dump.xml
+pulp src docs -o dump.md           # several folders in one Markdown dump
+pulp --list .                      # what would go in, without reading anything
+pulp --include '*.py' .            # only Python files
+pulp --exclude 'tests/**' .        # everything except tests/
+pulp -q --tokens .                 # only the token estimate
+pulp --archives project.zip        # an archive, and the archives inside it
+pulp --notebook-outputs analysis/  # keep Jupyter cell outputs
+pulp . | pbcopy                    # straight to the clipboard on macOS
 ```
 
-The in-browser mill at [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill) packs files you choose or drop in this tab (no gitignore walk, no OS folder dialog). It shares its interface with `pulp ui` and produces the same dump for the same files; `pulp ui` still wins for `.gitignore` discovery and typed paths.
+## Output formats
 
----
+| Format | Select with | Layout |
+| --- | --- | --- |
+| Plain text (default) | `-f txt` or `-o dump.txt` | A directory map, then a `FILE:` header before each file |
+| Markdown | `-f md` or `-o dump.md` | A directory map, then a `## path` heading and a fenced block per file |
+| XML | `-f xml` or `-o dump.xml` | `<documents>` with one `<document>` per file (`<source>`, `<document_content>`) |
 
-## On your machine
+`--tree none` drops the directory map. The [usage guide](docs/usage.md#output-formats) shows each layout in full.
 
-Pulp is meant to feel the same on a laptop, a workstation, a Pi-class ARM board, or a headless box. It detects OS and CPU count; you do not need a named host.
+## What goes in
 
-| You are on | What you get |
+| Kind | What you get |
 | --- | --- |
-| **macOS** (Apple Silicon or Intel) | `pulp ui` Browse opens Finder. Building from source uses the Command Line Tools compiler when that SDK is present, so an unsigned Xcode license does not block the link. |
-| **Linux** (x86_64 or aarch64) | Browse uses `zenity`, then `kdialog`. Install one of those for a graphical picker; otherwise type a path. Works on desktops, servers, and ARM boards (Raspberry Pi and similar). |
-| **Windows** (x86_64 or ARM) | Browse opens the Explorer folder dialog. Paths can be typed if the dialog cannot open. |
-| **Headless / SSH** | Skip the browser with `pulp ui --no-open` and open the printed `…/?token=…` link through a local forward on the same port (`ssh -L 8747:127.0.0.1:8747 host`), or stay on the CLI (`pulp -o dump.xml .`). |
-| **Any other OS** | The CLI still packs if the crate builds. The graphical folder picker is macOS, Linux, or Windows only. |
+| Source code and text | As is: Rust, Python, TypeScript, Lean, TOML, Markdown, and any other text |
+| PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, RTF | The document's text |
+| HTML, XML, JSON | Readable text, or the source with `--source` |
+| CSV, TSV | Tables as text |
+| Jupyter notebooks | Cells; `--notebook-outputs` keeps outputs |
+| NumPy `.npy`, `.npz` | Type and shape, and a small preview |
+| Zip, tar | The archive's members; archives nested inside need `--archives` |
 
-**Hardware.** Extraction uses as many threads as the OS reports, unless you pass `-j N`; the walk runs in one thread so its order never changes. A phone-class ARM board, a 4-core laptop, and a 32-thread desktop all work; more cores mainly shorten large trees. Release builds on macOS and Linux can use the host CPU (`cargo xtask build --release`). PDF, Office, EPUB, and RTF extractors run in a child `pulp` process with a timeout so a stuck parser does not take down the mill; so does HTML whose nesting pulp cannot vouch for. HTML nested too deep to lay out is reduced to its text by a linear tag stripper.
-
-**Building from source.** `cargo xtask` sets job count from available parallelism and, on macOS, prefers Command Line Tools clang when it is installed. Named-lab overrides exist for a few boxes; everyone else is `unknown` and still gets a sensible default. `PULP_HOST` is only needed if you are deliberately pretending to be one of those boxes.
-
-```
-cargo xtask doctor    # OS, arch, detected jobs
-cargo xtask build
-cargo xtask test
-cargo xtask ui
-cargo xtask site      # copy the shared mill UI from web/ into site/
-cargo xtask ui-test   # mill browser tests; needs Chrome or Chromium
-```
-
-The mill's interface lives in `web/` (`pulp.css`, `mill.css`, `mill.js`, and the sample project). `pulp ui` embeds it; `cargo xtask site` copies it into `site/` for the browser mill, and `cargo xtask test` fails if the copies drift. Its browser tests live in `web/test/`: `cargo xtask ui-test` runs them, along with the landing page and the browser mill from `site/`, in headless Chrome or Chromium (`PULP_CHROME` picks the binary; `--serve` serves the pages to your own browser instead). It also builds pulp and runs `web/test/local.test.html` against a real `pulp ui`, which it starts on a free port and stops afterwards.
-
----
-
-## CLI
-
-```
-pulp                         # cwd → stdout, plain text
-pulp -o dump.xml .
-pulp -o dump.md src          # markdown from the extension
-pulp -f md src
-pulp --archives project.zip
-pulp --list src
-pulp --tree none -o dump.txt
-```
-
-Omit `-o` to write to stdout. If `-f` is omitted, layout follows the `-o` extension (`.txt`, `.md`, `.xml`) and otherwise defaults to plain text.
-
-The dump never packs itself: a file that `-o` names, or that stdout is redirected into, is left out of the walk and spends none of the budget. `-o` refuses a file that is one of the inputs, and checks before any work that its folder exists and can be written. The dump goes to a temporary file beside FILE (`.pulp-<pid>-<n>.tmp`) and replaces FILE only once it is complete, so a failed or interrupted run leaves an old FILE, or a symlink's target, as it was, and no temporary file. A FIFO or a device is written in place. If the reader of a pipe goes away (`pulp . | head`), pulp stops quietly.
-
-| How to select | Layout |
-| --- | --- |
-| `-f txt` / `-o dump.txt` | `FILE:` headers and an optional directory map |
-| `-f md` / `-o dump.md` | `## path` headings and fenced code |
-| `-f xml` / `-o dump.xml` | `<documents>` / `<document_content>` |
-
-Unless `--quiet`, stderr looks like:
-
-```
-pulped 12 files (48.2 KiB read, 12100 chars, ~12100 tokens) in 35ms
-```
-
-When some files do not make it in, the line ends with counts such as `, 1 unreadable, 2 skipped`. An unreadable file (a damaged or encrypted PDF, say) keeps a one-line note in the dump in place of its text; it is not counted as pulped and is left out of the directory map. So does an archive member that cannot be read out: unsupported compression, encryption, damage, or data shared with another member. A PDF, Office file, or EPUB whose bytes are really a web page or plain text, as a failed download often leaves, is read as what it holds, under a note that says so: `[not a PDF: it holds an HTML page ("Preparing to download ...")]`. If it holds something else, an image say, it is unreadable, and its note names what it holds. Skipped binary media gets no section at all; a file over `--max-file-size` keeps a one-line note.
-
-Folders pulp cannot open, such as one without read permission or a symlink loop, print a `warning:` line each before the summary (the first ten, then a count); the rest of the tree is still pulped. `--list` ends with `listed N files` instead. `-q` hides the summary but not the warnings, and with `--tokens` prints the estimate alone.
-
-Names with control, bidi, or invisible format characters appear escaped (`\n`, `\u{202e}`) in headers, notes, the directory map, and `--list`, so a name cannot break a header or forge one. In XML, characters XML 1.0 cannot hold become U+FFFD.
-
----
-
-## What gets pulped
-
-| Kind | Notes |
-| --- | --- |
-| Source | Rust, Lean, Python, TypeScript, TOML, Markdown, and other text |
-| NumPy | `.npy` / `.npz` metadata and a small preview (not treated as binary) |
-| HTML / XML / JSON | Readable text, or decoded source with `--source` |
-| CSV / TSV | Tabular text |
-| PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, RTF | Extracted text |
-| Jupyter | Cells; `--notebook-outputs` keeps outputs |
-| Zip / tar | A root archive always expands; nested members need `--archives` |
-
-Binary media (images, audio, wasm, …) is skipped unless `--binaries`, and so is a file whose name says text but whose bytes are binary: more than 1 in 32 of its first 8 KiB are NULs or control characters that text does not use. A few, as text copied out of a PDF often holds, do not make a file binary. `--list` leaves binaries out too, except such a file, since listing reads no file.
-
-Noisy trees stay out even when they are tracked: `node_modules/`, `.next/`, `out/`, `runs/`, `target/`, `dist/`, `build/`, `toolchains/`, virtualenvs, `__pycache__/`, VCS dirs, lockfiles, `.env`, keys, object files, and similar. Rust `.rs`, Lean `.lean`, and NumPy arrays next to a skipped `target/` are still included. Generated paths that do show up start unchecked.
-
-Inside a git repository, pulp honors its `.gitignore` files, `.git/info/exclude`, and your global excludes, as `git status` does; `.ignore` files count anywhere. `--no-gitignore` turns all of them off. `--exclude GLOB` adds patterns and `--no-default-excludes` drops the built-in list. With several roots, the built-in list matches paths under each root, while your `--include` and `--exclude` globs match either that path or the path the dump prints (`secrets/**` or `app/secrets/**`).
-
-Budgets follow path order: depth first, each folder's entries sorted by name. The walk stops at the first file that does not fit `--max-entries` or `--max-total-bytes`, so the same tree always yields the same dump.
-
----
+Images, audio, and other binary files are skipped (`--binaries` keeps a placeholder for each). Inside a git repository, pulp honors `.gitignore` as `git status` does. Built-in excludes keep out dependency and build folders, virtualenvs, caches, JavaScript lockfiles, minified files, `.env` files, and keys; `--no-default-excludes` turns them off. Pulp does not run OCR, so a scanned PDF with no text layer comes out empty. The [usage guide](docs/usage.md#what-gets-pulped) has the details.
 
 ## Options
+
+`pulp [OPTIONS] [PATHS]...` packs the given files, folders, or archives (default: the current folder).
 
 | Flag | Meaning |
 | --- | --- |
 | `-o, --output FILE` | Write the dump here (default: stdout, as is `-o -`) |
-| `-f, --format FMT` | `txt` / `md` / `xml` |
-| `--tree MODE` | `selected` (default), `full`, `none` |
+| `-f, --format FMT` | `txt`, `md`, or `xml` (default: from the `-o` extension, else `txt`) |
+| `--tree MODE` | Directory map: `selected` (default), `full`, or `none` |
 | `--no-tree` | Same as `--tree none` |
-| `-j, --jobs N` | Extraction threads (`0` = all available cores) |
+| `-j, --jobs N` | Extraction threads (`0`, the default, uses every core) |
 | `--max-file-size SIZE` | Cap per file (default `8MiB`) |
 | `--max-entries N` | Keep only the first N files in path order (`0`, the default, means no cap) |
 | `--max-total-bytes SIZE` | Cap summed input, filled in path order (default `1GiB`) |
@@ -148,52 +236,105 @@ Budgets follow path order: depth first, each folder's entries sorted by name. Th
 | `--exclude GLOB` | Repeatable extra deny-list |
 | `--no-default-excludes` | Do not apply the built-in deny-list |
 | `--hidden` | Include hidden files (`.git` is still skipped) |
-| `--no-gitignore` | Ignore `.gitignore` / `.ignore` |
+| `--no-gitignore` | Ignore `.gitignore` and `.ignore` |
 | `--follow-links` | Follow symlinks |
-| `--archives` | Expand nested zip/tar |
+| `--archives` | Expand nested zip and tar members |
 | `--binaries` | Keep binary placeholders instead of skipping |
 | `--notebook-outputs` | Include Jupyter cell outputs |
 | `--source` | Keep HTML, XML, and JSON as source |
 | `--tokens` | With `-q`, print only the token estimate (not with `--list`) |
 | `--list` | Print the paths that would be pulped (to `-o` when given) |
 | `-q, --quiet` | No stderr summary; warnings still print |
-| `ui` | Local mill (`--port`, `--no-open`) |
+| `-V, --version` | Print the version |
+| `-h, --help` | Print help |
 
----
+`pulp ui` opens the local mill:
 
-## Library
+| Flag | Meaning |
+| --- | --- |
+| `-p, --port PORT` | Port on localhost (default `8747`, or the next free port if it is busy) |
+| `--no-open` | Print the link instead of opening a browser |
+
+## The two mills
+
+The mill is pulp's point-and-click interface. It comes in two builds that share one interface and produce the same dump for the same files.
+
+| | Local mill (`pulp ui`) | Browser mill ([/mill](https://pulp.onlygass.dev/mill)) |
+| --- | --- | --- |
+| Setup | Install pulp | None |
+| Choosing files | OS folder dialog, or any typed path | Folder or file picker, or drag and drop |
+| `.gitignore` | Honored | Not read |
+| Built-in excludes | Applied | Applied |
+| Where it runs | A server on `127.0.0.1` only | WebAssembly inside the tab |
+| Files uploaded | Never | Never |
+
+[docs/wasm-mill.md](docs/wasm-mill.md) compares them in detail.
+
+## Use it from Rust
+
+Pulp is also a library. It is not on crates.io yet, so depend on the repository:
+
+```toml
+[dependencies]
+pulp = { git = "https://github.com/BeeGass/pulp" }
+```
 
 ```rust
-use pulp::{pack, Options, OutputFormat, Selection};
+use pulp::{Options, OutputFormat, pack, render};
 
-let opts = Options {
-    roots: vec!["src".into()],
-    format: OutputFormat::Markdown,
-    selection: Selection::AllEligible,
-    ..Options::default()
-};
-let packed = pack(&opts)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let opts = Options {
+        roots: vec!["src".into()],
+        format: OutputFormat::Markdown,
+        ..Options::default()
+    };
+    let packed = pack(&opts)?;
+    render::write_all(&mut std::io::stdout().lock(), &packed, &opts)?;
+    Ok(())
+}
 ```
 
-`Selection::Only(vec![])` matches nothing; it never becomes “all files”, and an id is matched before a path. `Options::exclude` holds your own globs; the built-in list applies while `default_excludes` is on, and `exclude_globs()` gives both. Render with `pulp::render::write_all`, which leaves skipped binaries out. `scan_manifest` is the shared discovery step for scan, tree, and pack; `scan_manifest_with_warnings` also returns the paths the walk could not read. `pack_manifest` reads each file as it is now; `pack_manifest_cached` also takes the `ExtractCache` an earlier pack returned and reuses what it extracted from files whose path, size, and modification time are unchanged, for the same dump. The local mill keeps the cache of its last pack; the CLI reads every file. `apply_budgets` and `cmp_path_order` apply the same budgets in the same order to any file list.
+The [usage guide](docs/usage.md#using-pulp-as-a-library) covers selections, caching, and budgets.
 
----
+## Privacy and security
 
-## Branches
+- Pulp reads your files and writes the dump. It makes no network requests of its own and has no telemetry.
+- The local mill binds `127.0.0.1` only. Its page opens only from the link `pulp ui` prints, and every request carries a per-process session token, so other programs and other users on the machine cannot use it.
+- The browser mill works on files inside the tab. Nothing is sent to a server.
+- Secrets such as `.env` files and private keys stay out by default. Check what goes in with `pulp --list` before you share a dump.
+- A dump is written to a temporary file and moved into place once complete, so an interrupted run never leaves half a dump behind.
 
-Work lands on `dev`. `main` is the published line and only moves when `dev` is merged into it — not by a direct push.
+## Documentation
 
+- [Usage guide](docs/usage.md): every option, the mill, output details, platforms, the library, and troubleshooting
+- [Browser mill](docs/wasm-mill.md): how the in-browser mill works and how it differs from `pulp ui`
+- [Development](docs/development.md): building from source, running the checks, and the website
+- [pulp.onlygass.dev](https://pulp.onlygass.dev): the project's website
+
+## Contributing
+
+Bug reports and pull requests are welcome. If a file will not extract, the mill's **Report** button opens an issue with the error text filled in; otherwise [open an issue](https://github.com/BeeGass/pulp/issues/new) with the command you ran and what you expected. Work lands on the `dev` branch, and [docs/development.md](docs/development.md) lists the checks to run before a pull request.
+
+## Citation
+
+If you use pulp in research, please cite it. GitHub's **Cite this repository** button reads [CITATION.cff](CITATION.cff), or use this BibTeX:
+
+```bibtex
+@software{gass_pulp_2026,
+  author  = {Gass, Bryan},
+  title   = {pulp: Grind a local folder into one LLM-ready dump},
+  year    = {2026},
+  version = {0.1.0},
+  url     = {https://github.com/BeeGass/pulp},
+  license = {MIT}
+}
 ```
-git checkout dev
-git pull
-# …commits…
-git push origin dev
-```
-
-Then open a pull request from `dev` into `main` and merge it.
-
----
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Pulp is released under the [MIT License](LICENSE). Copyright (c) 2026 Bryan Gass.
+
+It includes third-party work under its own terms:
+
+- `vendor/pdf-extract/`: a patched copy of [pdf-extract](https://github.com/jrmuizel/pdf-extract) by Jeff Muizelaar, MIT License.
+- `web/fonts/`: IBM Plex Sans and a subset of IBM Plex Mono, SIL Open Font License 1.1 ([details](web/fonts/LICENSE.md)).
