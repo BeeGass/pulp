@@ -12,11 +12,14 @@ env:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest, which moves to Ubuntu 26 in October
+    # 2026: a new image should be a change made on purpose, with the browser
+    # tests watching.
+    runs-on: ubuntu-24.04
     # A hung browser or server fails the run instead of holding a runner for hours.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -35,7 +38,7 @@ jobs:
         run: cargo test --workspace --locked
       - name: site copies match web/
         run: cargo xtask site --check
-      # ubuntu-latest ships google-chrome, which the harness finds on PATH. The
+      # The runner image ships google-chrome, which the harness finds on PATH. The
       # harness also builds pulp and runs web/test/local.test.html against a
       # real `pulp ui`, which it stops, with Chrome, however the step ends.
       - name: mill browser tests
@@ -45,13 +48,13 @@ jobs:
   # The toolchain is the rust-version Cargo.toml declares, so CI checks the claim as written.
   msrv:
     name: minimum Rust
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       # Warnings on the oldest supported compiler count too, the vendored crate included.
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: read rust-version
         id: msrv
         run: |
