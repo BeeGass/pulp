@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use pulp, please cite it as below."
+type: software
+title: "pulp: Grind a local folder into one LLM-ready dump"
+abstract: >-
+  Pulp walks a local folder, extracts the text from source code, PDFs,
+  Office documents, notebooks, and archives in parallel, and writes a single
+  plain-text, Markdown, or XML file to hand a large language model. It runs
+  on the user's machine, from the command line, a localhost web interface,
+  or a WebAssembly build in the browser, and uploads nothing.
+authors:
+  - family-names: Gass
+    given-names: Bryan
+    alias: BeeGass
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/BeeGass/pulp"
+url: "https://pulp.onlygass.dev"
+keywords:
+  - large language models
+  - text extraction
+  - document conversion
+  - command-line tool
+  - rust
+  - webassembly
