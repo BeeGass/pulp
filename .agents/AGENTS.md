@@ -4,42 +4,39 @@ Operating contract for agents editing this checkout. Read this file before chang
 
 ## Do not copy the human handbook
 
-Do not copy human handbooks into `.agents/`. Human docs stay in [`README.md`](../README.md) and [`docs/`](../docs/). There is no CONTRIBUTING file. If a human document and a note under `.agents/` disagree, the human document wins.
+Do not copy human handbooks into `.agents/`. Human docs stay in [`README.md`](../README.md) and [`docs/`](../docs/). There is no CONTRIBUTING file; [`docs/development.md`](../docs/development.md) plays that role. If a human document and a note under `.agents/` disagree, the human document wins.
 
 ## Where to look
 
 | Path | What it is |
 | --- | --- |
-| [`README.md`](../README.md) | What pulp is, the local mill, and the CLI |
-| [`docs/wasm-mill.md`](../docs/wasm-mill.md) | The only file under `docs/` |
-| [`crates/`](../crates/) | Present. The README sections used here do not name crate directories |
-| [`src/`](../src/) | Present. Not named in those README sections |
-| [`tests/`](../tests/) | Present. The documented test command is `cargo xtask test` |
-| [`testdata/`](../testdata/) | Present. Not named in those README sections |
-| [`xtask/`](../xtask/) | The README's from-source commands are `cargo xtask` |
-| [`site/`](../site/) | Present. The README links pulp.onlygass.dev |
-| [`web/`](../web/) | Mill UI source of truth, embedded by `pulp ui` and copied into `site/` by `cargo xtask site` |
-| [`vendor/`](../vendor/) | Present. Not named in those README sections |
-| [`Cargo.toml`](../Cargo.toml) | Workspace manifest |
-| [`LICENSE`](../LICENSE) | License |
+| [`README.md`](../README.md) | The landing page: install, quick start, options, citation, license |
+| [`docs/usage.md`](../docs/usage.md) | The full user guide: CLI, output, what goes in, the local mill, the library, troubleshooting |
+| [`docs/development.md`](../docs/development.md) | Building from source, `cargo xtask`, the CI checks, the mill's interface, the website, branches |
+| [`docs/wasm-mill.md`](../docs/wasm-mill.md) | The browser mill: design, its differences from `pulp ui`, rebuilding its package |
+| [`src/`](../src/) | The `pulp` crate: CLI, walk, extract, pack, render, and the local mill |
+| [`crates/pulp-wasm/`](../crates/pulp-wasm/) | The browser mill's WebAssembly bindings |
+| [`web/`](../web/) | Mill UI source of truth, embedded by `pulp ui` and copied into `site/` by `cargo xtask site`; browser tests in `web/test/` |
+| [`site/`](../site/) | The static website and the browser mill at `/mill` |
+| [`tests/`](../tests/), [`testdata/`](../testdata/) | Integration tests and fixtures |
+| [`vendor/pdf-extract/`](../vendor/pdf-extract/) | Patched pdf-extract |
+| [`xtask/`](../xtask/) | `cargo xtask` |
+| [`CITATION.cff`](../CITATION.cff), [`LICENSE`](../LICENSE) | Citation metadata and the MIT license |
 
-Pulp grinds a local folder into one LLM-ready dump. The README says files never leave the machine, and the mill binds `127.0.0.1` only. Default mill port is 8747. Product site: pulp.onlygass.dev.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) maps the code and its data flow.
 
-Commands the README documents:
+Pulp grinds a local folder into one LLM-ready dump. Files never leave the machine, and the local mill binds `127.0.0.1` only (default port 8747). Product site: pulp.onlygass.dev.
+
+## Commands
+
+Build, test, and check commands are in [`docs/development.md`](../docs/development.md); CI runs the list under its "Checks" heading, and every change must pass all of it. Do not invent a separate lint command. [`memory/verification.md`](memory/verification.md) covers what trips agents running them, and two scripts run them for you:
 
 ```bash
-cargo install --git https://github.com/BeeGass/pulp --locked
-pulp ui
-pulp -o dump.xml .
-cargo xtask doctor
-cargo xtask build
-cargo xtask test
-cargo xtask ui
-cargo xtask site
-cargo xtask ui-test
+.agents/scripts/verify-commit.sh [REV]   # every CI gate on one commit, in a scratch worktree
+.agents/scripts/linux-ci/run.sh [msrv]   # CI's steps in an Ubuntu x86_64 container
 ```
 
-It also documents `pulp ui --port 9000 --no-open` and `cargo xtask ui-test --serve`. Rust 1.88 or newer is required, as written there. Do not invent a separate lint command.
+Commits, pushes, and merges follow [`memory/commits-and-merging.md`](memory/commits-and-merging.md).
 
 ## Where agent material goes
 
