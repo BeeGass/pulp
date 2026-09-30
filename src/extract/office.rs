@@ -57,10 +57,10 @@ pub fn extract_spreadsheet(bytes: &[u8]) -> Result<String, crate::error::Error> 
     let mut workbook = match calamine::open_workbook_auto_from_rs(cursor) {
         Ok(wb) => wb,
         Err(err) => {
-            if let Ok(text) = extract_opendocument(bytes) {
-                if !text.trim().is_empty() {
-                    return Ok(text);
-                }
+            if let Ok(text) = extract_opendocument(bytes)
+                && !text.trim().is_empty()
+            {
+                return Ok(text);
             }
             return Err(crate::error::Error::msg(err.to_string()));
         }
@@ -162,21 +162,26 @@ fn docx_from_xml(xml: &str) -> Result<String, crate::error::Error> {
     let mut reader = XmlReader::from_str(xml);
     let mut out = String::new();
     let mut in_t = false;
+    // `<w:tabs>` lists a paragraph's tab stops; its `<w:tab/>` children are
+    // settings, not tab characters.
+    let mut in_tab_stops = false;
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => match e.local_name().as_ref() {
                 "t" => in_t = true,
-                "tab" => out.push('\t'),
-                "br" => out.push('\n'),
+                "tabs" => in_tab_stops = true,
+                "tab" if !in_tab_stops => out.push('\t'),
+                "br" | "cr" => out.push('\n'),
                 _ => {}
             },
             Ok(Event::Empty(e)) => match e.local_name().as_ref() {
-                "tab" => out.push('\t'),
-                "br" | "p" => out.push('\n'),
+                "tab" if !in_tab_stops => out.push('\t'),
+                "br" | "cr" | "p" => out.push('\n'),
                 _ => {}
             },
             Ok(Event::End(e)) => match e.local_name().as_ref() {
                 "t" => in_t = false,
+                "tabs" => in_tab_stops = false,
                 "p" => out.push('\n'),
                 _ => {}
             },
@@ -223,14 +228,22 @@ fn opendocument_from_xml(xml: &str) -> Result<String, crate::error::Error> {
     let mut reader = XmlReader::from_str(xml);
     let mut out = String::new();
     let mut para_depth: u32 = 0;
+    let mut spaces_left = MAX_ODF_SPACES_TOTAL;
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => match e.local_name().as_ref() {
                 "p" | "h" => para_depth = para_depth.saturating_add(1),
                 "line-break" => out.push('\n'),
+                "s" if para_depth > 0 => push_odf_spaces(&mut out, &e, &mut spaces_left),
+                "tab" if para_depth > 0 => out.push('\t'),
                 _ => {}
             },
-            Ok(Event::Empty(e)) if e.local_name().as_ref() == "line-break" => out.push('\n'),
+            Ok(Event::Empty(e)) => match e.local_name().as_ref() {
+                "line-break" => out.push('\n'),
+                "s" if para_depth > 0 => push_odf_spaces(&mut out, &e, &mut spaces_left),
+                "tab" if para_depth > 0 => out.push('\t'),
+                _ => {}
+            },
             Ok(Event::End(e)) => {
                 if matches!(e.local_name().as_ref(), "p" | "h") {
                     para_depth = para_depth.saturating_sub(1);
@@ -246,6 +259,33 @@ fn opendocument_from_xml(xml: &str) -> Result<String, crate::error::Error> {
         }
     }
     Ok(out)
+}
+
+/// Most spaces one `<text:s text:c="N"/>` may add. Real documents use a
+/// handful; the cap keeps a hostile count from asking for gigabytes.
+const MAX_ODF_SPACES: usize = 256;
+
+/// Most spaces all of a document's `<text:s/>` elements may add together,
+/// so a small file of many capped elements cannot swell the text either.
+const MAX_ODF_SPACES_TOTAL: usize = 64 * 1024;
+
+/// Write the spaces an OpenDocument `<text:s/>` stands for: `text:c` of
+/// them, one when the count is missing, drawn from `spaces_left`.
+fn push_odf_spaces(
+    out: &mut String,
+    e: &quick_xml::events::BytesStart<'_>,
+    spaces_left: &mut usize,
+) {
+    let count = e
+        .attributes()
+        .flatten()
+        .find(|attr| attr.key.local_name().as_ref() == "c")
+        .and_then(|attr| attr.value.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .min(MAX_ODF_SPACES)
+        .min(*spaces_left);
+    *spaces_left -= count;
+    out.extend(std::iter::repeat_n(' ', count));
 }
 
 fn write_sheet(out: &mut String, range: &calamine::Range<calamine::Data>) {
@@ -352,6 +392,62 @@ mod tests {
         let bytes = zip_bytes(&[("content.xml", xml)]);
         let text = extract_opendocument(&bytes).expect("odt extract");
         assert_eq!(text, "Title\nHello\nWorld");
+    }
+
+    #[test]
+    fn test_extract_opendocument_with_space_and_tab_elements_keeps_word_breaks() {
+        let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content
+  xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body>
+    <text:p><text:span>bold</text:span><text:s/>and<text:tab/>tab<text:s text:c="3"/>three</text:p>
+    <text:p>huge<text:s text:c="4000000000"/>end</text:p>
+  </office:body>
+</office:document-content>"#;
+        let bytes = zip_bytes(&[("content.xml", xml)]);
+        let text = extract_opendocument(&bytes).expect("odt extract");
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("bold and\ttab   three"));
+        let huge = lines.next().unwrap();
+        assert_eq!(huge.len(), "huge".len() + MAX_ODF_SPACES + "end".len());
+    }
+
+    #[test]
+    fn test_extract_opendocument_with_many_space_elements_caps_total_spaces() {
+        let body = "<text:s text:c=\"256\"/>x".repeat(2000);
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <office:document-content \
+             xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" \
+             xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\">\
+             <office:body><text:p>{body}</text:p></office:body></office:document-content>"
+        );
+        let bytes = zip_bytes(&[("content.xml", xml.as_bytes())]);
+        let text = extract_opendocument(&bytes).expect("odt extract");
+        assert_eq!(text.matches('x').count(), 2000);
+        let spaces = text.matches(' ').count();
+        assert!(spaces <= MAX_ODF_SPACES_TOTAL, "{spaces} spaces");
+        assert!(
+            spaces >= MAX_ODF_SPACES_TOTAL - MAX_ODF_SPACES,
+            "{spaces} spaces"
+        );
+    }
+
+    #[test]
+    fn test_extract_docx_with_tab_stops_and_cr_returns_text_without_extra_tabs() {
+        let xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/><w:tab w:val="right" w:pos="9000"/></w:tabs></w:pPr>
+      <w:r><w:t>Name</w:t><w:tab/><w:t>Value</w:t><w:cr/><w:t>Next</w:t></w:r>
+    </w:p>
+  </w:body>
+</w:document>"#;
+        let bytes = zip_bytes(&[("word/document.xml", xml)]);
+        let text = extract_docx(&bytes).expect("docx extract");
+        assert_eq!(text, "Name\tValue\nNext");
     }
 
     #[test]

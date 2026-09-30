@@ -70,17 +70,16 @@ fn write_outputs(out: &mut String, cell: &Value) {
 fn output_text(output: &Value) -> Option<String> {
     let obj = output.as_object()?;
     let mut chunks = Vec::new();
-    if let Some(text) = obj.get("text").and_then(join_source) {
-        if !text.is_empty() {
-            chunks.push(text);
-        }
+    if let Some(text) = obj.get("text").and_then(join_source)
+        && !text.is_empty()
+    {
+        chunks.push(text);
     }
-    if let Some(data) = obj.get("data").and_then(Value::as_object) {
-        if let Some(plain) = data.get("text/plain").and_then(join_source) {
-            if !plain.is_empty() {
-                chunks.push(plain);
-            }
-        }
+    if let Some(data) = obj.get("data").and_then(Value::as_object)
+        && let Some(plain) = data.get("text/plain").and_then(join_source)
+        && !plain.is_empty()
+    {
+        chunks.push(plain);
     }
     if chunks.is_empty() {
         None

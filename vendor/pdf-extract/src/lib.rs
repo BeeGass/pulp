@@ -1,3 +1,15 @@
+// Vendored from pdf-extract 0.12.1 with pulp's fixes. The upstream code keeps
+// helpers, fields, and bindings it does not use; allow them rather than
+// diverge from upstream. (The lifetime lint is newer than the 1.88 MSRV.)
+#![allow(unknown_lints)]
+#![allow(
+    dead_code,
+    unused_variables,
+    non_upper_case_globals,
+    hidden_glob_reexports,
+    mismatched_lifetime_syntaxes
+)]
+
 extern crate lopdf;
 
 use adobe_cmap_parser::{ByteMapping, CodeRange, CIDRange};
@@ -792,7 +804,7 @@ trait PdfFont : Debug {
 }
 
 impl<'a> dyn PdfFont + 'a {
-    fn char_codes(&'a self, chars: &'a [u8]) -> PdfFontIter {
+    fn char_codes(&'a self, chars: &'a [u8]) -> PdfFontIter<'a> {
         PdfFontIter{i: chars.iter(), font: self}
     }
     fn decode(&self, chars: &[u8]) -> String {
@@ -916,6 +928,41 @@ struct PdfCIDFont<'a> {
     to_unicode: Option<HashMap<u32, String>>,
     widths: HashMap<CharCode, f64>, // should probably just use i32 here
     default_width: Option<f64>, // only used for CID fonts and we should probably brake out the different font types
+    /// The font's CMap is a Unicode one, so a code with no ToUnicode entry is
+    /// the text's own UTF-16 (pulp's patch).
+    unicode_codes: bool,
+}
+
+/// Predefined CMaps whose codes are UTF-16 code units: `Uni*-UCS2-H/V` hold
+/// one unit per code, and `Uni*-UTF16-H/V` also use four-byte surrogate pairs.
+/// Returns the byte mapping, or `None` for any other name.
+fn unicode_cmap(name: &str) -> Option<ByteMapping> {
+    let writing = name.ends_with("-H") || name.ends_with("-V");
+    if !name.starts_with("Uni") || !writing {
+        return None;
+    }
+    // `next_char` adds `dst_CID_lo` to the code, so 0 keeps every code as is,
+    // as the Identity-H mapping does.
+    let identity = |lo: u32, hi: u32| CIDRange { src_code_lo: lo, src_code_hi: hi, dst_CID_lo: 0 };
+    if name.contains("-UCS2-") {
+        return Some(ByteMapping {
+            codespace: vec![CodeRange { width: 2, start: 0, end: 0xffff }],
+            cid: vec![identity(0, 0xffff)],
+        });
+    }
+    if name.contains("-UTF16-") {
+        // A high surrogate is never a whole code, so the reader takes two
+        // more bytes and finds the four-byte pair.
+        return Some(ByteMapping {
+            codespace: vec![
+                CodeRange { width: 2, start: 0, end: 0xd7ff },
+                CodeRange { width: 2, start: 0xe000, end: 0xffff },
+                CodeRange { width: 4, start: 0xd800_dc00, end: 0xdbff_dfff },
+            ],
+            cid: vec![identity(0, 0xd7ff), identity(0xe000, 0xffff), identity(0xd800_dc00, 0xdbff_dfff)],
+        });
+    }
+    None
 }
 
 fn get_unicode_map<'a>(doc: &'a Document, font: &'a Dictionary) -> Option<HashMap<u32, String>> {
@@ -977,12 +1024,16 @@ impl<'a> PdfCIDFont<'a> {
         let encoding = maybe_get_obj(doc, font, b"Encoding").expect("Encoding required in type0 fonts");
         dlog!("base_name {} {:?}", base_name, font);
 
+        let mut unicode_codes = false;
         let encoding = match encoding {
             &Object::Name(ref name) => {
                 let name = pdf_to_utf8(name);
                 dlog!("encoding {:?}", name);
                 if name == "Identity-H" || name == "Identity-V" {
                     ByteMapping { codespace: vec![CodeRange{width: 2, start: 0, end: 0xffff }], cid: vec![CIDRange{ src_code_lo: 0, src_code_hi: 0xffff, dst_CID_lo: 0 }]}
+                } else if let Some(mapping) = unicode_cmap(&name) {
+                    unicode_codes = true;
+                    mapping
                 } else {
                     panic!("unsupported encoding {}", name);
                 }
@@ -1034,7 +1085,7 @@ impl<'a> PdfCIDFont<'a> {
                 }
             }
         }
-        PdfCIDFont{doc, font, widths, to_unicode: unicode_map, encoding, default_width: Some(default_width as f64) }
+        PdfCIDFont{doc, font, widths, to_unicode: unicode_map, encoding, default_width: Some(default_width as f64), unicode_codes }
     }
 }
 
@@ -1083,6 +1134,13 @@ impl<'a> PdfFont for PdfCIDFont<'a> {
         let s = self.to_unicode.as_ref().and_then(|x| x.get(&char));
         if let Some(s) = s {
             s.clone()
+        } else if self.unicode_codes {
+            let units: Vec<u16> = if char > 0xffff {
+                vec![(char >> 16) as u16, char as u16]
+            } else {
+                vec![char as u16]
+            };
+            String::from_utf16(&units).unwrap_or_default()
         } else {
             dlog!("Unknown character {:?} in {:?} {:?}", char, self.font, self.to_unicode);
             "".to_string()
@@ -1236,6 +1294,15 @@ fn as_num(o: &Object) -> f64 {
         &Object::Integer(i) => { i as f64 }
         &Object::Real(f) => { f.into() }
         _ => { panic!("not a number") }
+    }
+}
+
+/// `as_num` for operands that may be malformed: `None` instead of a panic.
+fn number(o: &Object) -> Option<f64> {
+    match o {
+        &Object::Integer(i) => Some(i as f64),
+        &Object::Real(f) => Some(f.into()),
+        _ => None,
     }
 }
 
@@ -1569,14 +1636,26 @@ fn make_colorspace<'a>(doc: &'a Document, name: &[u8], resources: &'a Dictionary
     }
 }
 
+/// Deepest nesting of form XObjects drawn inside one another (pulp's patch).
+const MAX_FORM_DEPTH: usize = 32;
+/// Form XObjects one page may draw in all (pulp's patch). Forms that each draw
+/// the next several times would otherwise grow exponentially.
+const MAX_FORMS_PER_PAGE: usize = 10_000;
+
 struct Processor<'a> {
     font_table: HashMap<Vec<u8>, Rc<dyn PdfFont + 'a>>,
+    /// The form XObjects being drawn, innermost last. A form that draws
+    /// itself, directly or through others, is skipped instead of recursing
+    /// until the stack runs out.
+    forms: Vec<*const Stream>,
+    /// Form draws left on the current page.
+    forms_left: usize,
     _none: PhantomData<&'a ()>,
 }
 
 impl<'a> Processor<'a> {
     fn new() -> Processor<'a> {
-        Processor { font_table: HashMap::new(), _none: PhantomData }
+        Processor { font_table: HashMap::new(), forms: Vec::new(), forms_left: MAX_FORMS_PER_PAGE, _none: PhantomData }
     }
 
     fn process_stream(&mut self, doc: &'a Document, content: Vec<u8>, resources: &'a Dictionary, media_box: &MediaBox, output: &mut dyn OutputDev, page_num: u32) -> Result<(), OutputError> {
@@ -1781,6 +1860,26 @@ impl<'a> Processor<'a> {
                     dlog!("T* matrix {:?}", gs.ts.tm);
                     output.end_line()?;
                 }
+                // `string '` is `T* string Tj`, and `aw ac string "` also sets
+                // the word and character spacing first. Upstream skipped both,
+                // so text that Ghostscript writes kept only its first line.
+                "'" | "\"" => {
+                    if let [aw, ac, _] = &operation.operands[..] {
+                        if let (Some(aw), Some(ac)) = (number(aw), number(ac)) {
+                            gs.ts.word_spacing = aw;
+                            gs.ts.character_spacing = ac;
+                        }
+                    }
+                    tlm = tlm.pre_transform(&Transform2D::create_translation(0., -gs.ts.leading));
+                    gs.ts.tm = tlm;
+                    output.end_line()?;
+                    match operation.operands.last() {
+                        Some(Object::String(s, _)) => {
+                            show_text(&mut gs, s, &tlm, &flip_ctm, output)?;
+                        }
+                        _ => { dlog!("unexpected {} operands {:?}", operation.operator, operation); }
+                    }
+                }
                 "q" => { gs_stack.push(gs.clone()); }
                 "Q" => {
                     let s = gs_stack.pop();
@@ -1864,9 +1963,23 @@ impl<'a> Processor<'a> {
                     let xobject: &Dictionary = get(&doc, resources, b"XObject");
                     let name = operation.operands[0].as_name().unwrap();
                     let xf: &Stream = get(&doc, xobject, name);
-                    let resources = maybe_get_obj(&doc, &xf.dict, b"Resources").and_then(|n| n.as_dict().ok()).unwrap_or(resources);
-                    let contents = get_contents(xf);
-                    self.process_stream(&doc, contents, resources, &media_box, output, page_num)?;
+                    // pulp's patch: an image or PostScript XObject holds no content
+                    // to draw (an image's pixels would be read as operators), and a
+                    // form already being drawn, a nesting past MAX_FORM_DEPTH, or a
+                    // page past its form budget is skipped.
+                    let not_form = matches!(xf.dict.get(b"Subtype"), Ok(Object::Name(ref subtype)) if subtype.as_slice() == b"Image" || subtype.as_slice() == b"PS");
+                    let key = xf as *const Stream;
+                    if not_form || self.forms.contains(&key) || self.forms.len() >= MAX_FORM_DEPTH || self.forms_left == 0 {
+                        dlog!("skipping xobject {:?}", name);
+                    } else {
+                        self.forms_left -= 1;
+                        self.forms.push(key);
+                        let resources = maybe_get_obj(&doc, &xf.dict, b"Resources").and_then(|n| n.as_dict().ok()).unwrap_or(resources);
+                        let contents = get_contents(xf);
+                        let drawn = self.process_stream(&doc, contents, resources, &media_box, output, page_num);
+                        self.forms.pop();
+                        drawn?;
+                    }
                 }
                 _ => { dlog!("unknown operation {:?}", operation); }
 
@@ -2407,6 +2520,8 @@ fn output_doc_inner<'a>(page_num: u32, object_id: ObjectId, doc: &'a Document, p
     // Reset the font cache per page so a stale entry from an earlier page isn't
     // reused, which would decode text with the wrong font's ToUnicode CMap.
     p.font_table.clear();
+    p.forms.clear();
+    p.forms_left = MAX_FORMS_PER_PAGE;
     // XXX: Some pdfs lack a Resources directory
     let resources = get_inherited(doc, page_dict, b"Resources").unwrap_or(empty_resources);
     dlog!("resources {:?}", resources);

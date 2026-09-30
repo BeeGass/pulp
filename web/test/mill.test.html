@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mill.js tests</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/web/pulp.css">
+  <link rel="stylesheet" href="/web/mill.css">
+  <style>
+    body { padding: 16px; }
+    #results { margin: 0 0 16px; font: 12px/1.5 var(--mono, monospace); white-space: pre-wrap; }
+    #results[data-status="fail"] { color: var(--bad, #b3261e); }
+    #stage { --mill-h: 640px; }
+  </style>
+</head>
+<body>
+  <!-- Run with `cargo xtask ui-test`, or open by hand from `cargo xtask ui-test --serve`. -->
+  <pre id="results" data-status="running"></pre>
+  <div id="stage"></div>
+  <!-- Headless Chrome prints this page when its load event fires; the server
+       answers this frame once the tests post /__ui-test/done. -->
+  <iframe src="/__ui-test/hold" hidden title="test gate"></iframe>
+  <script type="module" src="/web/test/harness.js"></script>
+  <script type="module" src="/web/test/mill.test.js"></script>
+</body>
+</html>

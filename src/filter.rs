@@ -16,6 +16,8 @@ pub struct PathPolicy {
 }
 
 impl PathPolicy {
+    /// The filters for files that each have one path to match: the built-in
+    /// excludes when `opts.default_excludes` is on, then the caller's own.
     pub fn from_options(opts: &Options) -> Result<Self, Error> {
         let include = if opts.include.is_empty() {
             None
@@ -24,7 +26,7 @@ impl PathPolicy {
         };
         Ok(Self {
             include,
-            exclude: build_globset(&opts.exclude)?,
+            exclude: build_globset(&opts.exclude_globs())?,
             hidden: opts.hidden,
             follow_archives: opts.follow_archives,
         })
@@ -106,10 +108,10 @@ fn add_glob(builder: &mut GlobSetBuilder, pat: &str) -> Result<(), Error> {
     let trimmed = pat.trim_start_matches('/');
     if !pat.starts_with("**/") && !trimmed.is_empty() {
         let nested = format!("**/{trimmed}");
-        if nested != pat {
-            if let Ok(glob) = Glob::new(&nested) {
-                builder.add(glob);
-            }
+        if nested != pat
+            && let Ok(glob) = Glob::new(&nested)
+        {
+            builder.add(glob);
         }
     }
     Ok(())
@@ -176,6 +178,21 @@ mod tests {
         assert!(p.keep_emit("src/build.rs"));
         assert!(p.keep_emit("content/index.math"));
         assert!(p.keep_emit("app/page.tsx"));
+    }
+
+    #[test]
+    fn test_from_options_with_default_excludes_off_keeps_only_user_globs() {
+        let with = |default_excludes| Options {
+            exclude: vec!["*.log".to_string()],
+            default_excludes,
+            ..Options::default()
+        };
+        let on = PathPolicy::from_options(&with(true)).unwrap();
+        assert!(!on.keep_emit("node_modules/pkg/index.js"));
+        assert!(!on.keep_emit("debug.log"));
+        let off = PathPolicy::from_options(&with(false)).unwrap();
+        assert!(off.keep_emit("node_modules/pkg/index.js"));
+        assert!(!off.keep_emit("debug.log"));
     }
 
     #[test]

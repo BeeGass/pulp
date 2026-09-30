@@ -400,15 +400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-channel"
-version = "0.5.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-deque"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1187,7 +1178,6 @@ dependencies = [
  "calamine",
  "chardetng",
  "clap",
- "crossbeam-channel",
  "csv",
  "encoding_rs",
  "flate2",
@@ -1197,12 +1187,12 @@ dependencies = [
  "http-body-util",
  "ignore",
  "infer",
+ "libc",
  "opener",
  "pdf-extract",
  "pretty_assertions",
  "quick-xml 0.42.0",
  "rayon",
- "rtf-parser",
  "serde",
  "serde_json",
  "tar",
@@ -1335,15 +1325,6 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
-
-[[package]]
-name = "rtf-parser"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c3147b4eb521eae5e29b781bdc30ab98bbaed784bfcb8376cda60ba4b2e0e3d"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "rustix"
@@ -1940,6 +1921,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
+ "signal-hook-registry",
 ]
 
 [[package]]

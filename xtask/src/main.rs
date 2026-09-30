@@ -5,6 +5,8 @@ use clap::{Parser, Subcommand};
 
 mod cargo;
 mod host;
+mod site;
+mod uitest;
 
 use host::Host;
 
@@ -40,6 +42,20 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
+    /// Copy the shared mill UI (web/) into the static site (site/).
+    Site {
+        /// Fail instead of copying when site/ is out of date.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Run the mill's browser tests (web/test/) in headless Chrome or Chromium,
+    /// including the local mill's tests against a real `pulp ui`.
+    UiTest {
+        /// Serve web/, site/, and the local mill for a browser of your own
+        /// instead of running Chrome.
+        #[arg(long)]
+        serve: bool,
+    },
     /// `cargo run --` with trailing args (`cargo xtask run -- ui`).
     Run {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -57,6 +73,8 @@ fn main() -> anyhow::Result<()> {
         Command::Clippy => clippy(&host),
         Command::Fmt { check } => fmt(&host, check),
         Command::Ui { port, no_open } => ui(&host, port, no_open),
+        Command::Site { check } => sync_site(check),
+        Command::UiTest { serve } => uitest::run(&cargo::workspace_root(), &host, serve),
         Command::Run { args } => run_bin(&host, &args),
     }
 }
@@ -139,6 +157,26 @@ fn ui(host: &Host, port: Option<u16>, no_open: bool) -> anyhow::Result<()> {
     }
     eprintln!("xtask ui on {}", host.label());
     cargo::run(host, &args)
+}
+
+fn sync_site(check: bool) -> anyhow::Result<()> {
+    if check {
+        let stale = site::stale(&cargo::workspace_root());
+        if stale.is_empty() {
+            eprintln!("xtask site: site/ matches web/");
+            return Ok(());
+        }
+        anyhow::bail!("site/ is out of date for {stale:?}; run `cargo xtask site`");
+    }
+    let changed = site::sync(&cargo::workspace_root())?;
+    if changed.is_empty() {
+        eprintln!("xtask site: site/ already matches web/");
+    } else {
+        for path in &changed {
+            eprintln!("xtask site: updated {path}");
+        }
+    }
+    Ok(())
 }
 
 fn run_bin(host: &Host, rest: &[String]) -> anyhow::Result<()> {

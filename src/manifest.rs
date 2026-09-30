@@ -18,6 +18,9 @@ use crate::walk::{self, WalkedFile};
 pub struct ManifestEntry {
     pub id: String,
     pub relative: String,
+    /// Path under its own root, without the multi-root label. Globs and the
+    /// hidden rule judge archive members by it, as the walk judges files.
+    pub root_relative: String,
     pub absolute: PathBuf,
     pub size: u64,
     pub kind: Kind,
@@ -40,6 +43,16 @@ pub struct ScanManifest {
 /// Walk roots with `opts` and record every eligible entry once.
 #[cfg(feature = "native")]
 pub fn scan_manifest(opts: &Options) -> Result<ScanManifest, Error> {
+    Ok(scan_manifest_with_warnings(opts)?.0)
+}
+
+/// [`scan_manifest`], plus the paths the walk could not read (a directory
+/// without read permission, a dangling link), so a caller can say which
+/// files are missing and why.
+#[cfg(feature = "native")]
+pub fn scan_manifest_with_warnings(
+    opts: &Options,
+) -> Result<(ScanManifest, walk::WalkWarnings), Error> {
     let walked = walk::collect_detailed(opts)?;
     let entries = entries_from_walked(walked.files, opts);
     let bytes = entries.iter().map(|e| e.size).sum();
@@ -48,12 +61,13 @@ pub fn scan_manifest(opts: &Options) -> Result<ScanManifest, Error> {
         .first()
         .cloned()
         .unwrap_or_else(|| PathBuf::from("."));
-    Ok(ScanManifest {
+    let manifest = ScanManifest {
         root,
         entries,
         bytes,
         truncated: walked.truncated,
-    })
+    };
+    Ok((manifest, walked.warnings))
 }
 
 #[cfg(feature = "native")]
@@ -61,16 +75,21 @@ fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestE
     walked
         .into_iter()
         .map(|wf| {
-            let sniff = sniff_prefix(&wf.absolute);
+            let sniff = sniff_prefix(&wf.absolute, wf.is_symlink);
             let kind = classify(&wf.absolute, sniff.as_deref());
             let oversized = wf.size > opts.max_file_size;
+            // Judge generated and virtualenv paths under the scanned root
+            // only: a project that lives in `~/build/app` or `~/venv-work`
+            // is not itself generated.
+            let default_on = is_default_selected(std::path::Path::new(&wf.root_relative), kind)
+                && !oversized
+                && (!kind.is_archive() || opts.follow_archives);
             ManifestEntry {
                 id: wf.id,
-                relative: wf.relative.clone(),
+                relative: wf.relative,
+                root_relative: wf.root_relative,
                 language: language_name(&wf.absolute, kind),
-                default_on: is_default_selected(&wf.absolute, kind)
-                    && !oversized
-                    && (!kind.is_archive() || opts.follow_archives),
+                default_on,
                 oversized,
                 is_symlink: wf.is_symlink,
                 modified: wf.modified,
@@ -82,13 +101,14 @@ fn entries_from_walked(walked: Vec<WalkedFile>, opts: &Options) -> Vec<ManifestE
         .collect()
 }
 
-/// Read a short prefix when the name alone does not decide the kind.
+/// Read a short prefix when the name alone does not decide the kind. A
+/// symlink is followed only when the walk found one there.
 #[cfg(feature = "native")]
-fn sniff_prefix(path: &std::path::Path) -> Option<Vec<u8>> {
+fn sniff_prefix(path: &std::path::Path, is_symlink: bool) -> Option<Vec<u8>> {
     if kind_from_name(path).is_some() {
         return None;
     }
-    let mut file = std::fs::File::open(path).ok()?;
+    let mut file = walk::open_regular_file(path, is_symlink).ok()?;
     let mut buf = vec![0u8; 8192];
     use std::io::Read;
     let n = file.read(&mut buf).ok()?;
@@ -177,7 +197,7 @@ mod tests {
             roots: vec![dir.path().to_path_buf()],
             hidden: true,
             gitignore: false,
-            exclude: Vec::new(),
+            default_excludes: false,
             ..Options::default()
         };
         let manifest = scan_manifest(&opts).unwrap();
@@ -266,6 +286,35 @@ mod tests {
             .unwrap();
         assert!(zip.kind.is_archive());
         assert!(!zip.default_on);
+    }
+
+    #[test]
+    fn test_scan_manifest_with_root_inside_generated_dir_names_sets_default_on_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("build/venv/app");
+        write(&root.join("src/main.rs"), b"fn main() {}\n");
+        write(&root.join("dist/bundle.js"), b"x\n");
+        let opts = Options {
+            roots: vec![root],
+            default_excludes: false,
+            ..Options::default()
+        };
+        let manifest = scan_manifest(&opts).unwrap();
+        let main = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == "src/main.rs")
+            .unwrap();
+        assert!(main.default_on, "a project under build/venv starts ticked");
+        let bundle = manifest
+            .entries
+            .iter()
+            .find(|e| e.relative == "dist/bundle.js")
+            .unwrap();
+        assert!(
+            !bundle.default_on,
+            "dist/ inside the root still starts unticked"
+        );
     }
 
     #[test]

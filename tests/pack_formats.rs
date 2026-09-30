@@ -158,7 +158,7 @@ fn test_classify_with_rs_lean_npz_returns_expected_kinds() {
 }
 
 #[test]
-fn test_default_exclude_globs_does_not_drop_rs_lean_npz() {
+fn test_default_exclude_globs_with_source_extensions_keeps_rs_lean_npz() {
     let g = default_exclude_globs().join(" ");
     assert!(!g.contains("*.rs"));
     assert!(!g.contains("*.lean"));
@@ -181,7 +181,7 @@ fn tiny_npz() -> Vec<u8> {
 fn tiny_f32_npy() -> Vec<u8> {
     let mut header = "{'descr': '<f4', 'fortran_order': False, 'shape': (3,), }".to_string();
     let prefix = 10;
-    while (prefix + header.len()) % 16 != 0 {
+    while !(prefix + header.len()).is_multiple_of(16) {
         header.push(' ');
     }
     header.pop();

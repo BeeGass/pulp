@@ -100,12 +100,61 @@ pub fn kind_from_label(label: &str) -> Option<Kind> {
     }
 }
 
-/// True when the first 8 KiB contain a NUL, which almost never happens
-/// in text we want to dump as source.
+/// Bytes examined when deciding whether a file is binary.
+const SNIFF_BYTES: usize = 8192;
+
+/// True when more than 1 in 32 of the first 8 KiB are bytes text does not
+/// use: NUL, and the C0 controls other than tab, LF, VT, FF, CR, and ESC.
+///
+/// A few such bytes do not make a file binary: text pulled out of a PDF
+/// often carries stray NULs and control codes. Bytes of 0x80 and above
+/// count as text, since legacy encodings use them.
+///
+/// UTF-16 and UTF-32 text holds NUL bytes by design, so bytes that carry a
+/// UTF-16/32 byte order mark and decode, or that have the NUL layout of
+/// UTF-16 text, are not binary.
 #[must_use]
 pub fn looks_binary(bytes: &[u8]) -> bool {
-    let n = bytes.len().min(8192);
-    bytes[..n].contains(&0)
+    let sample = &bytes[..bytes.len().min(SNIFF_BYTES)];
+    let odd = sample.iter().filter(|byte| !is_text_byte(**byte)).count();
+    if odd * 32 <= sample.len() {
+        return false;
+    }
+    if has_wide_bom(bytes) {
+        return !wide_text_decodes(bytes);
+    }
+    crate::extract::sniff_wide_text(bytes).is_none()
+}
+
+/// Whether `byte` can appear in text: anything but NUL and the C0 controls
+/// other than tab, LF, VT, FF, CR, and ESC.
+fn is_text_byte(byte: u8) -> bool {
+    byte >= 0x20 || matches!(byte, b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | 0x1b)
+}
+
+/// Whether `bytes` open with a UTF-16 or UTF-32 byte order mark.
+fn has_wide_bom(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xFE])
+        || bytes.starts_with(&[0xFE, 0xFF])
+        || bytes.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
+}
+
+/// Whether bytes behind a UTF-16 or UTF-32 byte order mark decode to text.
+///
+/// The mark names the encoding outright, so control characters count as
+/// text: a terminal log saved as UTF-16 (PowerShell's `>` and `Out-File`)
+/// holds ANSI escapes on every line. Only code units that do not decode,
+/// and NULs, count against it.
+fn wide_text_decodes(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(SNIFF_BYTES + 4)];
+    let text = crate::extract::decode_bytes(sample);
+    let chars = text.chars().count();
+    let bad = text
+        .chars()
+        .filter(|c| matches!(*c, '\0' | char::REPLACEMENT_CHARACTER))
+        .count();
+    // A cut at the end of the sample can leave one partial code unit.
+    bad.saturating_sub(1) * 100 <= chars
 }
 
 #[must_use]
@@ -684,6 +733,101 @@ mod tests {
             classify(Path::new("blob"), Some(&[b'a', 0, b'b'])),
             Kind::Binary
         );
+    }
+
+    #[test]
+    fn test_classify_with_utf16_bytes_and_no_extension_returns_text() {
+        let mut bom = vec![0xFF, 0xFE];
+        bom.extend("hello\n".encode_utf16().flat_map(u16::to_le_bytes));
+        assert!(!looks_binary(&bom));
+        assert_eq!(classify(Path::new("NOTES"), Some(&bom)), Kind::Text);
+
+        let bare: Vec<u8> = "plain words in utf-16\n"
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect();
+        assert!(!looks_binary(&bare));
+        assert_eq!(classify(Path::new("NOTES"), Some(&bare)), Kind::Text);
+
+        assert!(looks_binary(&[
+            0x47, 0x40, 0x00, 0x10, 0x00, 0x00, 0xb0, 0x0d
+        ]));
+    }
+
+    #[test]
+    fn test_looks_binary_with_utf16_bom_and_ansi_escapes_returns_false() {
+        // A test log saved by PowerShell 5.1: UTF-16 with a BOM, and colour
+        // codes on every line.
+        let log = "\u{1b}[32mPASS\u{1b}[0m test_one\r\n".repeat(300);
+        let mut le = vec![0xFF, 0xFE];
+        le.extend(log.encode_utf16().flat_map(u16::to_le_bytes));
+        assert!(!looks_binary(&le));
+        let mut be = vec![0xFE, 0xFF];
+        be.extend(log.encode_utf16().flat_map(u16::to_be_bytes));
+        assert!(!looks_binary(&be));
+
+        // A mark alone does not make bytes text: NULs and code units that do
+        // not decode still count against it.
+        let mut nuls = vec![0xFF, 0xFE];
+        nuls.extend([0u8; 512]);
+        assert!(looks_binary(&nuls));
+        let mut noise = vec![0xFF, 0xFE];
+        noise.extend((0..=255u8).cycle().take(4096));
+        assert!(looks_binary(&noise));
+    }
+
+    /// Bytes from a small xorshift generator, the same on every run.
+    fn noise(len: usize) -> Vec<u8> {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_looks_binary_with_random_bytes_returns_true() {
+        assert!(looks_binary(&noise(8192)));
+        assert!(looks_binary(&noise(300)));
+    }
+
+    #[test]
+    fn test_looks_binary_with_little_endian_floats_returns_true() {
+        let singles: Vec<u8> = (0..2048u16)
+            .map(|i| (f32::from(i) * 0.37).sin())
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        assert!(looks_binary(&singles));
+        let doubles: Vec<u8> = (0..1024u16)
+            .map(|i| f64::from(i) * 0.5)
+            .flat_map(f64::to_le_bytes)
+            .collect();
+        assert!(looks_binary(&doubles));
+    }
+
+    #[test]
+    fn test_looks_binary_with_control_bytes_up_to_one_in_32_returns_false() {
+        let mut sample = vec![b'a'; 3200];
+        for at in (0..sample.len()).step_by(32) {
+            sample[at] = if at % 64 == 0 { 0 } else { 0x10 };
+        }
+        assert!(!looks_binary(&sample), "exactly 1 in 32 is still text");
+        sample[1] = 0x01;
+        assert!(looks_binary(&sample), "more than 1 in 32 is binary");
+    }
+
+    #[test]
+    fn test_looks_binary_with_high_bytes_and_whitespace_controls_returns_false() {
+        // Latin-1 prose is mostly bytes past 0x7F; tab, LF, VT, FF, CR, and
+        // ESC are text however many there are.
+        let latin1: Vec<u8> = b"caf\xe9 cr\xe8me br\xfbl\xe9e \xbd \xa9\n".repeat(200);
+        assert!(!looks_binary(&latin1));
+        let spacing = b"\t\n\x0b\x0c\r\x1b[1m".repeat(500);
+        assert!(!looks_binary(&spacing));
     }
 
     #[test]

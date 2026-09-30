@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// How the directory map at the top of the dump is produced.
@@ -67,10 +69,21 @@ pub struct Options {
     pub hidden: bool,
     pub follow_links: bool,
     pub max_file_size: u64,
-    /// `0` means Rayon's default (usually available parallelism).
+    /// Threads that extract files. `0` means Rayon's default (usually
+    /// available parallelism). The walk runs on one thread, so the order it
+    /// finds files in, and what the budgets keep, never depends on this.
     pub jobs: usize,
+    /// Include globs. A file is kept when one matches the path under its
+    /// root or, with several roots, the labelled path the dump prints
+    /// (`app/src/a.rs`). Empty keeps every file.
     pub include: Vec<String>,
+    /// Exclude globs, matched like [`Self::include`], on top of the
+    /// built-in list that [`Self::default_excludes`] turns on.
     pub exclude: Vec<String>,
+    /// Apply [`default_exclude_globs`]. They match only the path under each
+    /// root, never a root's own name, so a root named `build` or `runs` is
+    /// still walked.
+    pub default_excludes: bool,
     pub follow_archives: bool,
     pub skip_binaries: bool,
     pub tree: TreeMode,
@@ -84,6 +97,10 @@ pub struct Options {
     pub selection: Selection,
     /// Skip these filesystem paths (canonical or as given), e.g. the output file.
     pub skip_paths: Vec<PathBuf>,
+    /// Skip files with these device and inode numbers (Unix), such as a
+    /// redirected stdout. Taken from open descriptors, they name a file
+    /// that a path like `/dev/stdout` cannot on every platform.
+    pub skip_identities: Vec<(u64, u64)>,
     /// Preserve HTML/XML/JSON as source instead of converting to readable text.
     pub source_mode: bool,
     /// Cap on discovered file entries. `0` means no cap.
@@ -113,6 +130,63 @@ impl Selection {
     pub fn is_empty_only(&self) -> bool {
         matches!(self, Self::Only(ids) if ids.is_empty())
     }
+
+    /// This selection resolved against every id of one file set; see
+    /// [`SelectionFilter`].
+    #[must_use]
+    pub fn resolve<'a, 'i>(
+        &'a self,
+        ids: impl IntoIterator<Item = &'i str>,
+    ) -> SelectionFilter<'a> {
+        match self {
+            Self::AllEligible => SelectionFilter {
+                names: None,
+                by_path: HashSet::new(),
+            },
+            Self::Only(names) => SelectionFilter::only(names, ids),
+        }
+    }
+}
+
+/// A selection resolved against every id of one file set.
+///
+/// A selected name picks the file whose id it is. Only a name that is no
+/// file's id falls back to picking files by relative path, so ticking one
+/// of two files whose names print alike picks that one alone.
+#[derive(Debug, Clone)]
+pub struct SelectionFilter<'a> {
+    /// `None` selects every file.
+    names: Option<HashSet<&'a str>>,
+    /// Names that are no file's id, matched against relative paths.
+    by_path: HashSet<&'a str>,
+}
+
+impl<'a> SelectionFilter<'a> {
+    /// Only the files `names` picks among a set with these `ids`.
+    #[must_use]
+    pub fn only<'i>(names: &'a [String], ids: impl IntoIterator<Item = &'i str>) -> Self {
+        let names: HashSet<&'a str> = names.iter().map(String::as_str).collect();
+        let mut by_path = names.clone();
+        for id in ids {
+            if by_path.is_empty() {
+                break;
+            }
+            by_path.remove(id);
+        }
+        Self {
+            names: Some(names),
+            by_path,
+        }
+    }
+
+    /// Whether the file with this id and relative path is selected.
+    #[must_use]
+    pub fn contains(&self, id: &str, relative: &str) -> bool {
+        match &self.names {
+            None => true,
+            Some(names) => names.contains(id) || self.by_path.contains(relative),
+        }
+    }
 }
 
 impl Default for Options {
@@ -125,7 +199,8 @@ impl Default for Options {
             max_file_size: 8 * 1024 * 1024,
             jobs: 0,
             include: Vec::new(),
-            exclude: default_exclude_globs(),
+            exclude: Vec::new(),
+            default_excludes: true,
             follow_archives: false,
             skip_binaries: true,
             tree: TreeMode::Selected,
@@ -136,11 +211,104 @@ impl Default for Options {
             tokens: false,
             selection: Selection::AllEligible,
             skip_paths: Vec::new(),
+            skip_identities: Vec::new(),
             source_mode: false,
             max_entries: 0,
             max_total_bytes: 1 << 30,
         }
     }
+}
+
+impl Options {
+    /// Every exclude glob, for matching one path per file where the path
+    /// under the root is the only path (one root, or an in-memory file set):
+    /// the built-in list when it is on, then [`Self::exclude`].
+    #[must_use]
+    pub fn exclude_globs(&self) -> Vec<String> {
+        let mut globs = if self.default_excludes {
+            default_exclude_globs()
+        } else {
+            Vec::new()
+        };
+        globs.extend(self.exclude.iter().cloned());
+        globs
+    }
+}
+
+/// Order `/`-separated paths the way a walk visits them: depth first, with
+/// each directory's entries in name order. `a/b.txt` comes before `a-c.txt`,
+/// since the directory `a` sorts before the name `a-c.txt`.
+#[must_use]
+pub fn cmp_path_order(a: &str, b: &str) -> Ordering {
+    a.split('/').cmp(b.split('/'))
+}
+
+/// The entry and byte budgets of one pack, spent file by file in path order
+/// ([`cmp_path_order`]).
+///
+/// Files are kept until the first that does not fit; that file and every
+/// one after it are left out, so a folder keeps the same files in the walk,
+/// in [`crate::pack_entries`], and in the browser mill. A file over
+/// [`Options::max_file_size`] is never read, so it spends no bytes, but it
+/// still counts as an entry.
+#[derive(Debug, Clone)]
+pub struct Budget {
+    max_entries: usize,
+    max_total_bytes: u64,
+    max_file_size: u64,
+    entries: usize,
+    bytes: u64,
+    cut: bool,
+}
+
+impl Budget {
+    #[must_use]
+    pub fn new(opts: &Options) -> Self {
+        Self {
+            max_entries: opts.max_entries,
+            max_total_bytes: opts.max_total_bytes,
+            max_file_size: opts.max_file_size,
+            entries: 0,
+            bytes: 0,
+            cut: false,
+        }
+    }
+
+    /// Spend the budgets on the next file, `size` bytes long. `false` when it
+    /// does not fit: leave it out, and every file after it.
+    pub fn take(&mut self, size: u64) -> bool {
+        if self.cut {
+            return false;
+        }
+        let cost = if size > self.max_file_size { 0 } else { size };
+        let bytes = self.bytes.saturating_add(cost);
+        let full = self.max_entries != 0 && self.entries >= self.max_entries;
+        if full || bytes > self.max_total_bytes {
+            self.cut = true;
+            return false;
+        }
+        self.entries += 1;
+        self.bytes = bytes;
+        true
+    }
+
+    /// Whether a file has been left out.
+    #[must_use]
+    pub fn is_cut(&self) -> bool {
+        self.cut
+    }
+}
+
+/// Keep the longest prefix of `items`, already in path order, that fits the
+/// budgets in `opts` (see [`Budget`]). Returns whether anything was cut.
+pub fn apply_budgets<T>(items: &mut Vec<T>, opts: &Options, size: impl Fn(&T) -> u64) -> bool {
+    let mut budget = Budget::new(opts);
+    let kept = items
+        .iter()
+        .take_while(|item| budget.take(size(item)))
+        .count();
+    items.truncate(kept);
+    budget.is_cut()
 }
 
 /// Parse a human size like `8MiB`, `1m`, or `500k` into bytes (1024-based).
@@ -313,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn test_selection_only_empty_allows_nothing() {
+    fn test_selection_with_empty_only_allows_nothing() {
         let sel = Selection::Only(Vec::new());
         assert!(sel.is_empty_only());
         assert!(!sel.allows("src/lib.rs"));
@@ -323,7 +491,88 @@ mod tests {
     }
 
     #[test]
-    fn test_default_exclude_globs_include_next_out_and_toolchains() {
+    fn test_selection_filter_with_name_that_is_an_id_returns_only_that_file() {
+        // Two files whose names print alike: one relative path, two ids.
+        let ids = ["a\\xff.txt", "a\\xff.txt#2"];
+        let pick = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+            let filter = SelectionFilter::only(&names, ids);
+            ids.map(|id| filter.contains(id, "a\\xff.txt"))
+        };
+        assert_eq!(pick(&["a\\xff.txt"]), [true, false]);
+        assert_eq!(pick(&["a\\xff.txt#2"]), [false, true]);
+        let names = ["app/x.rs".to_string()];
+        let by_path = SelectionFilter::only(&names, ["0:app/x.rs"]);
+        assert!(by_path.contains("0:app/x.rs", "app/x.rs"));
+        let all = Selection::AllEligible.resolve(ids);
+        assert!(all.contains("anything", "else"));
+    }
+
+    #[test]
+    fn test_cmp_path_order_with_directory_and_names_returns_walk_order() {
+        let mut paths = vec!["a.txt", "a/b.txt", "a-c.txt", "B.txt", "a/a/z.txt"];
+        paths.sort_by(|a, b| cmp_path_order(a, b));
+        assert_eq!(paths, ["B.txt", "a/a/z.txt", "a/b.txt", "a-c.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn test_apply_budgets_with_file_that_does_not_fit_stops_there() {
+        let opts = Options {
+            max_total_bytes: 100,
+            max_file_size: 1000,
+            ..Options::default()
+        };
+        let mut sizes = vec![60, 50, 10];
+        assert!(apply_budgets(&mut sizes, &opts, |size| *size));
+        assert_eq!(sizes, [60]);
+
+        // Over the per-file cap: never read, so no bytes, but one entry.
+        let mut sizes = vec![5000, 100, 1];
+        assert!(apply_budgets(&mut sizes, &opts, |size| *size));
+        assert_eq!(sizes, [5000, 100]);
+
+        let entries = Options {
+            max_entries: 2,
+            ..Options::default()
+        };
+        let mut sizes = vec![1, 2];
+        assert!(!apply_budgets(&mut sizes, &entries, |size| *size));
+        let mut sizes = vec![1, 2, 3];
+        assert!(apply_budgets(&mut sizes, &entries, |size| *size));
+        assert_eq!(sizes, [1, 2]);
+    }
+
+    #[test]
+    fn test_budget_with_refused_file_refuses_every_later_one() {
+        let mut budget = Budget::new(&Options {
+            max_total_bytes: 10,
+            ..Options::default()
+        });
+        assert!(budget.take(10));
+        assert!(!budget.is_cut());
+        assert!(!budget.take(1));
+        assert!(!budget.take(0));
+        assert!(budget.is_cut());
+    }
+
+    #[test]
+    fn test_exclude_globs_with_defaults_off_returns_only_user_globs() {
+        let opts = Options {
+            exclude: vec!["*.log".into()],
+            ..Options::default()
+        };
+        let globs = opts.exclude_globs();
+        assert!(globs.iter().any(|g| g == "node_modules/**"));
+        assert_eq!(globs.last().map(String::as_str), Some("*.log"));
+        let bare = Options {
+            default_excludes: false,
+            ..opts
+        };
+        assert_eq!(bare.exclude_globs(), ["*.log"]);
+    }
+
+    #[test]
+    fn test_default_exclude_globs_with_generated_dirs_returns_next_out_and_toolchains() {
         let globs = default_exclude_globs();
         for pat in [
             ".next/**",

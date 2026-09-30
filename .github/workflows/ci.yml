@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    # Pinned rather than ubuntu-latest, which moves to Ubuntu 26 in October
+    # 2026: a new image should be a change made on purpose, with the browser
+    # tests watching.
+    runs-on: ubuntu-24.04
+    # A hung browser or server fails the run instead of holding a runner for hours.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - name: rustfmt
+        run: cargo fmt --all --check
+      # --locked: Cargo.lock must already match the manifests, as `cargo install --locked` needs.
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The browser mill builds pulp without its native features, for wasm32.
+      - name: clippy (pulp without native features)
+        run: cargo clippy -p pulp --no-default-features --lib --locked -- -D warnings
+      - name: clippy (browser mill, wasm32)
+        run: cargo clippy -p pulp-wasm --target wasm32-unknown-unknown --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --locked
+      - name: site copies match web/
+        run: cargo xtask site --check
+      # The runner image ships google-chrome, which the harness finds on PATH. The
+      # harness also builds pulp and runs web/test/local.test.html against a
+      # real `pulp ui`, which it stops, with Chrome, however the step ends.
+      - name: mill browser tests
+        timeout-minutes: 20
+        run: cargo xtask ui-test
+
+  # The toolchain is the rust-version Cargo.toml declares, so CI checks the claim as written.
+  msrv:
+    name: minimum Rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # Warnings on the oldest supported compiler count too, the vendored crate included.
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v7
+      - name: read rust-version
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version = "\([0-9.]*\)"$/\1/p' Cargo.toml)
+          test -n "$version" || { echo "Cargo.toml declares no rust-version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          targets: wasm32-unknown-unknown
+      - name: check
+        run: cargo check --workspace --all-targets --locked
+      - name: check (pulp without native features)
+        run: cargo check -p pulp --no-default-features --lib --locked
+      - name: check (browser mill, wasm32)
+        run: cargo check -p pulp-wasm --target wasm32-unknown-unknown --locked

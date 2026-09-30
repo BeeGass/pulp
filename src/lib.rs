@@ -4,6 +4,7 @@
 //! fiction: disposable reading you hand a model. Everything runs on the
 //! machine you point it at. Nothing is uploaded.
 
+pub mod cache;
 pub mod classify;
 pub mod config;
 pub mod error;
@@ -15,6 +16,8 @@ pub mod pack;
 mod pick;
 pub mod render;
 #[cfg(feature = "native")]
+mod sample;
+#[cfg(feature = "native")]
 mod store;
 pub mod tokens;
 pub mod tree;
@@ -23,11 +26,15 @@ pub mod ui;
 #[cfg(feature = "native")]
 pub mod walk;
 
+pub use cache::{CacheEntry, ExtractCache, ExtractFingerprint};
 pub use classify::{
     Kind, classify, is_default_selected, kind_from_label, language_label, language_name,
     looks_binary,
 };
-pub use config::{Options, OutputFormat, Selection, TreeMode, default_exclude_globs};
+pub use config::{
+    Budget, Options, OutputFormat, Selection, SelectionFilter, TreeMode, apply_budgets,
+    cmp_path_order, default_exclude_globs,
+};
 pub use error::Error;
 pub use filter::PathPolicy;
 #[cfg(feature = "native")]
@@ -36,4 +43,4 @@ pub use manifest::{ManifestEntry, ScanManifest};
 pub use pack::MemoryFile;
 pub use pack::{FileStatus, Packed, PackedFile, Stats, pack_entries};
 #[cfg(feature = "native")]
-pub use pack::{pack, pack_manifest, pack_with_cancel};
+pub use pack::{pack, pack_manifest, pack_manifest_cached, pack_with_cancel};

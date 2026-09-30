@@ -1,0 +1,1131 @@
+/* pulp mill layout. Shared by the local mill (pulp ui) and the browser mill (/mill).
+   Source of truth lives in web/; `cargo xtask site` copies it to site/mill/. */
+
+.mill {
+  container: mill / inline-size;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: var(--mill-h, 100dvh);
+  min-height: 0;
+  overflow: hidden;
+  padding-top: var(--safe-t);
+  padding-inline: var(--safe-l, 0px) var(--safe-r, 0px);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+/* Engines without dvh would drop the whole height and collapse the shell. */
+@supports not (height: 1dvh) {
+  .mill {
+    height: var(--mill-h, 100vh);
+  }
+}
+
+.mill-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* header */
+.mill-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 50px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  flex: 0 0 auto;
+}
+.mill-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: inherit;
+  text-decoration: none;
+}
+.mill-priv {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.mill-priv .p-icon {
+  color: var(--label);
+}
+
+/* source bar */
+.mill-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  flex: 0 0 auto;
+}
+.mill-path {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.mill-path .p-meta {
+  white-space: nowrap;
+}
+/* Enter scans; the hint shows while the field is empty. */
+.mill-path-kbd {
+  display: none;
+}
+.mill-path input:placeholder-shown ~ .mill-path-kbd {
+  display: inline-block;
+}
+.mill-grant {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: var(--key);
+  padding: 0 10px;
+  border-radius: var(--r-md);
+  border: 1px dashed var(--line-2);
+  color: var(--text-2);
+  font: 400 12.5px/1.3 var(--mono);
+}
+.mill-grant span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mill-grant .p-icon {
+  color: var(--text-3);
+}
+.mill-alert {
+  padding: 0 16px 12px;
+  flex: 0 0 auto;
+}
+.mill-alert .p-note {
+  background: color-mix(in srgb, var(--c) 10%, var(--panel));
+}
+
+/* panes */
+.mill-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  gap: 12px;
+  padding: 0 16px 12px;
+  /* the files column is about 320px at 1280 and grows on wider screens, where deep trees need it */
+  grid-template-columns: minmax(280px, 26%) minmax(0, 1fr) minmax(250px, 270px);
+  grid-template-areas: "files out insp";
+}
+.mill-files {
+  grid-area: files;
+}
+.mill-out {
+  grid-area: out;
+}
+.mill-insp {
+  grid-area: insp;
+}
+.mill-pane-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+/* files */
+.mill-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px 4px;
+  flex: 0 0 auto;
+}
+.mill-filter .p-field {
+  flex: 1 1 auto;
+}
+.mill-filter-keys {
+  display: none;
+}
+.mill-filter .p-field {
+  min-height: 28px;
+}
+.mill-filter input[type="search"]::-webkit-search-cancel-button {
+  display: none;
+}
+.mill-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 6px 10px 5px;
+  flex: 0 0 auto;
+  /* Four rows of chips (6 + 4 x 22 + 3 x 5 + 5); a folder with dozens of languages
+     scrolls here instead of pushing the tree off screen. */
+  max-height: 114px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.mill-chips:empty {
+  display: none;
+}
+.mill-tree {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 4px 6px 10px;
+  border-top: 1px solid var(--line);
+}
+.mill-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--row);
+  /* 16px per level for the first three, then 10px, so deep names keep their room */
+  padding: 0 6px 0 calc(4px + min(var(--d, 0), 3) * 16px + max(var(--d, 0) - 3, 0) * 10px);
+  border-radius: var(--r-sm);
+  font: 400 12.5px/1.2 var(--mono);
+  color: var(--text);
+  white-space: nowrap;
+}
+.mill-row:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+.mill-row.is-off .mill-name {
+  color: var(--text-3);
+}
+.mill-row.is-active {
+  background: var(--acc-tint);
+  box-shadow: inset 2px 0 0 var(--acc);
+}
+.mill-row.is-flag .mill-name {
+  color: var(--warn);
+}
+.mill-row > .p-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-3);
+}
+.mill-row.is-dir > .p-icon {
+  color: var(--label);
+}
+.mill-check {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+.mill-twist {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 20px;
+  flex: 0 0 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.mill-twist:hover {
+  color: var(--text);
+}
+.mill-twist .p-icon {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  transition: transform 0.12s ease;
+}
+.mill-twist[aria-expanded="false"] .p-icon {
+  transform: rotate(-90deg);
+}
+span.mill-twist {
+  cursor: default;
+}
+.mill-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mill-name:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--line-3);
+  text-underline-offset: 3px;
+}
+.mill-flag {
+  color: var(--warn);
+}
+.mill-n,
+.mill-lang,
+.mill-size {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.mill-lang {
+  width: auto;
+  max-width: 62px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+.mill-size {
+  width: 58px;
+  text-align: right;
+}
+/* an over-cap file's tag says more than its language, and needs the room */
+.mill-row .p-tag + .mill-lang {
+  display: none;
+}
+.mill-row .p-tag {
+  flex: 0 0 auto;
+  font: 500 9.5px/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+/* empty and loading states */
+.mill-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px 28px;
+  overflow: auto;
+}
+.mill-steps {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mill-steps li {
+  display: grid;
+  grid-template-columns: 38px 1fr;
+  gap: 12px;
+}
+.mill-steps b {
+  font: 500 22px/1 var(--mono);
+  letter-spacing: -0.02em;
+  color: var(--acc-text);
+}
+.mill-steps strong {
+  display: block;
+  font: 600 14px/1.3 var(--ui);
+  color: var(--text);
+}
+.mill-steps span {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.mill-nofiles {
+  display: grid;
+  gap: 6px;
+}
+.mill-nofiles strong {
+  font: 600 14px/1.3 var(--ui);
+  color: var(--text);
+}
+.mill-nofiles span {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.mill-empty-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.mill-empty-keys .p-key {
+  flex: 1 1 auto;
+}
+.mill-fine {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.mill-fine .p-icon {
+  margin-top: 2px;
+}
+.mill-loading {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-3);
+  font: 500 12px var(--mono);
+}
+
+/* output */
+.mill-views {
+  flex: 0 0 auto;
+}
+.mill-viewtabs {
+  display: flex;
+  align-items: stretch;
+  gap: 18px;
+}
+.mill-outkeys {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-left: 6px;
+}
+.mill-views .mill-outkeys .p-key {
+  align-self: center;
+}
+.mill-outnote {
+  padding: 10px 10px 0;
+  flex: 0 0 auto;
+}
+.mill-sheet {
+  flex: 1 1 auto;
+  margin: 10px;
+}
+.mill-sheet .p-ledger {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.mill-sheet .p-ledger.is-blank {
+  overflow: hidden;
+}
+.mill-sheet .p-ledger:focus-visible {
+  outline-offset: -2px;
+}
+.mill-watermark {
+  position: absolute;
+  left: 56px;
+  right: 20px;
+  top: 38%;
+  font: 650 24px/1.2 var(--ui);
+  letter-spacing: -0.03em;
+  color: color-mix(in srgb, var(--paper-ink) 30%, transparent);
+  pointer-events: none;
+}
+.mill-watermark small {
+  display: block;
+  margin-top: 8px;
+  font: 500 11px/1.4 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.mill-prevhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--paper-rule);
+  font: 500 11.5px/1.3 var(--mono);
+  color: var(--paper-muted);
+  overflow-wrap: anywhere;
+}
+.mill-prevhead b {
+  color: var(--paper-ink);
+  font-weight: 500;
+}
+/* The note lines up with the text column, past the margin rule. The paper is
+   light in both themes, so the note keeps light-theme tints, with heading inks
+   dark enough for 5:1 on the dimmer dark-theme paper. */
+.mill-prevnote {
+  padding: 10px 12px 2px 56px;
+}
+.mill-prevnote .p-note {
+  --c: #9c2f14;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  color: var(--paper-ink);
+  background: color-mix(in srgb, #b23a1c 9%, var(--paper));
+  border-color: color-mix(in srgb, #b23a1c 45%, transparent);
+}
+.mill-prevnote .p-note[data-tone="warn"] {
+  --c: #7a4d00;
+  background: color-mix(in srgb, #8a5700 9%, var(--paper));
+  border-color: color-mix(in srgb, #8a5700 45%, transparent);
+}
+.mill-prevnote .p-note > .p-icon {
+  display: none;
+}
+.mill-prevnote .p-note-body b {
+  display: block;
+  margin-bottom: 3px;
+  font: 600 10.5px/1.3 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--c);
+  overflow-wrap: anywhere;
+}
+.mill-prevnote .p-key {
+  color: var(--paper-ink);
+  background: color-mix(in srgb, var(--paper) 70%, #fff);
+  border-color: rgba(0, 0, 0, 0.18);
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.1);
+}
+.mill-prevnote .p-key.is-quiet {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.mill-muted {
+  color: var(--paper-muted);
+  font-style: italic;
+  white-space: pre-wrap;
+}
+.mill-issues {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 12px 16px;
+}
+.mill-issue {
+  display: grid;
+  gap: 6px;
+  padding: 14px 2px;
+  border-bottom: 1px solid var(--line);
+}
+.mill-issue-path {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font: 500 12.5px/1.3 var(--mono);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.mill-issue-path .p-icon {
+  color: var(--warn);
+}
+.mill-issue-status {
+  font: 500 10.5px/1.2 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+.mill-issue p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+.mill-issue-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mill-none {
+  padding: 28px 8px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+/* inspector */
+.mill-insp > .mill-pane-h {
+  min-height: 0;
+  padding: 14px 14px 0;
+  border-bottom: 0;
+}
+.mill-insp-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+}
+/* On a short screen the settings scroll and the run block below them keeps
+   Pulp and the stats in view. */
+.mill-insp-sets {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.mill-set {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  min-width: 0;
+}
+.mill-set > .p-label {
+  margin: 0;
+}
+.mill-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-3);
+}
+.mill-opts-toggle {
+  display: none;
+}
+.mill-opts {
+  display: grid;
+  gap: 2px;
+}
+.mill-opt {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 2px 9px;
+  padding: 5px 0;
+  cursor: pointer;
+}
+.mill-opt .p-check {
+  margin-top: 2px;
+}
+.mill-opt b {
+  font: 500 12px/1.3 var(--ui);
+  color: var(--text);
+}
+.mill-opt small {
+  display: block;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-3);
+}
+.mill-opt.is-disabled {
+  cursor: not-allowed;
+}
+.mill-opt.is-disabled b {
+  color: var(--text-3);
+}
+.mill-run {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.mill-run .p-key.is-lg {
+  min-height: 42px;
+}
+.mill-statusline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mill-statmeta {
+  display: none;
+}
+.mill-why {
+  margin: -4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-3);
+}
+.mill-why:empty {
+  display: none;
+}
+.mill-stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 12px;
+  margin: 0;
+  font: 400 12px/1.3 var(--mono);
+}
+.mill-stats dt {
+  color: var(--text-3);
+}
+.mill-stats dd {
+  margin: 0;
+  text-align: right;
+  color: var(--text);
+}
+.mill-sum {
+  display: none;
+}
+
+/* footer, tabs, dock */
+.mill-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 28px;
+  padding: 0 16px calc(var(--safe-b) * 0.5);
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  font: 400 11px/1.2 var(--mono);
+  color: var(--text-3);
+  flex: 0 0 auto;
+}
+.mill-foot b {
+  color: var(--text);
+  font-weight: 500;
+}
+.mill-tabs,
+.mill-dock {
+  display: none;
+}
+
+/* drop overlay (browser mill) */
+.mill-drop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+}
+.mill-drop div {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 32px 40px;
+  border: 1.5px dashed var(--acc);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  box-shadow: 0 24px 60px -20px var(--shadow);
+  text-align: center;
+}
+.mill-drop .p-icon {
+  width: 36px;
+  height: 36px;
+  color: var(--acc-text);
+}
+.mill-drop strong {
+  font: 650 24px/1.15 var(--ui);
+  letter-spacing: -0.03em;
+}
+
+/* The narrowest three-column widths leave no room for the full key spacing. */
+@container mill (min-width: 1180px) and (max-width: 1219.98px) {
+  .mill-outkeys {
+    gap: 12px;
+  }
+}
+
+/* medium: settings become a strip above the output, each label beside its keys,
+   with Pulp and the status on the row below */
+@container mill (width < 1180px) {
+  .mill-grid {
+    grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
+    grid-template-rows: max-content minmax(0, 1fr);
+    grid-template-areas:
+      "files insp"
+      "files out";
+  }
+  .mill-insp {
+    overflow: visible;
+  }
+  .mill-insp > .mill-pane-h {
+    display: none;
+  }
+  .mill-statmeta {
+    display: inline;
+  }
+  .mill-insp-body {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 20px;
+    overflow: visible;
+    padding: 10px 12px;
+  }
+  .mill-insp-sets {
+    display: contents;
+  }
+  .mill-set {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .mill-set-opts {
+    position: relative;
+  }
+  .mill-set-opts > .p-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .mill-opts-toggle {
+    display: inline-flex;
+  }
+  .mill-opts {
+    display: none;
+    position: absolute;
+    z-index: 20;
+    top: calc(100% + 6px);
+    right: 0;
+    width: min(300px, calc(100cqw - 32px));
+    padding: 10px 12px;
+    border-radius: var(--r-lg);
+    border: 1px solid var(--line-2);
+    background: var(--panel-2);
+    box-shadow: 0 24px 48px -18px var(--shadow);
+  }
+  .mill-opts.is-open {
+    display: grid;
+  }
+  .mill-hint {
+    display: none;
+  }
+  .mill-run {
+    flex: 1 1 100%;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding-top: 10px;
+  }
+  .mill-run .p-key.is-block {
+    width: auto;
+  }
+  .mill-run .p-key.is-lg {
+    min-height: var(--key);
+  }
+  .mill-stats,
+  .mill-why {
+    display: none;
+  }
+}
+
+/* phone: files and output become tabs, actions pin to a dock */
+@container mill (width < 960px) {
+  .mill-top {
+    min-height: 52px;
+  }
+  .mill-priv {
+    display: none;
+  }
+  .mill-source {
+    padding: 8px 12px;
+    flex-wrap: wrap;
+  }
+  .mill-path .p-meta,
+  .mill-path input:placeholder-shown ~ .mill-path-kbd {
+    display: none;
+  }
+  /* local mill: the field first, then a labelled Browse; Enter in the field scans */
+  .mill-source.is-path [data-act="scan"] {
+    display: none;
+  }
+  .mill-source.is-path [data-act="browse"] {
+    order: 2;
+  }
+  .mill-source.is-path [data-act="browse"] .p-icon {
+    display: none;
+  }
+  .mill-grant {
+    flex-basis: 100%;
+    order: 3;
+  }
+  .mill-alert {
+    padding: 0 12px 8px;
+  }
+  .mill-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3px;
+    margin: 0 12px 10px;
+    padding: 3px;
+    border-radius: var(--r-md);
+    border: 1px solid var(--line-2);
+    background: var(--sunken);
+    flex: 0 0 auto;
+  }
+  .mill-tabs button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 38px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-3);
+    font: 500 11px/1 var(--mono);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .mill-tabs button[aria-selected="true"] {
+    background: var(--panel-3);
+    color: var(--text);
+    box-shadow: inset 0 1px 0 var(--hi), inset 0 -2px 0 var(--lip), 0 0 0 1px var(--line-2);
+  }
+  .mill-tabs .mill-tabcount {
+    color: var(--text-3);
+    font-weight: 400;
+  }
+  .mill-tabs .mill-tabdot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--c, var(--ok));
+  }
+  .mill-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas:
+      "insp"
+      "out";
+    gap: 10px;
+    padding: 0 12px 10px;
+    /* on a short screen the panes leave room for the pinned dock */
+    --short-chrome: calc(76px + var(--safe-b));
+  }
+  .mill[data-tab="files"] .mill-grid {
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "files";
+  }
+  .mill[data-tab="output"] .mill-grid {
+    grid-template-rows: max-content minmax(340px, 1fr);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .mill[data-tab="files"] .mill-out,
+  .mill[data-tab="files"] .mill-insp,
+  .mill[data-tab="output"] .mill-files {
+    display: none;
+  }
+  /* The tabs already frame the files and settings; they sit on the page, unboxed. */
+  .mill-files,
+  .mill-insp {
+    background: transparent;
+    border-color: transparent;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .mill-files .mill-pane-h {
+    display: none;
+  }
+  .mill-filter-keys {
+    display: flex;
+  }
+  .mill-filter {
+    padding: 8px 0 4px;
+  }
+  .mill-chips {
+    padding: 6px 0 8px;
+  }
+  .mill-tree {
+    padding: 4px 0 10px;
+  }
+  .mill-empty-keys {
+    display: none;
+  }
+  .mill-insp {
+    overflow: visible;
+  }
+  .mill-insp-body {
+    padding: 0;
+    gap: 10px;
+    align-items: center;
+  }
+  .mill-sum {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+  }
+  .mill-sum .p-meta {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mill-insp:not(.is-open) .mill-set {
+    display: none;
+  }
+  .mill-insp.is-open .mill-set {
+    width: 100%;
+  }
+  .mill-insp.is-open .mill-set > .p-label {
+    min-width: 64px;
+  }
+  .mill-insp.is-open .mill-set-opts {
+    display: grid;
+    gap: 6px;
+  }
+  .mill-set-opts > .p-label {
+    position: static;
+    width: auto;
+    height: auto;
+    clip: auto;
+  }
+  .mill-opts-toggle {
+    display: none;
+  }
+  .mill-opts {
+    display: grid;
+    position: static;
+    width: auto;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  .mill-run {
+    width: 100%;
+    padding-top: 10px;
+  }
+  .mill-run [data-act="pulp"],
+  .mill-run [data-act="cancel"] {
+    display: none;
+  }
+  .mill-outkeys {
+    display: none;
+  }
+  .mill-views {
+    padding-right: 12px;
+  }
+  .mill-sheet {
+    margin: 8px;
+  }
+  .mill-foot {
+    display: none;
+  }
+  .mill-dock {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px calc(10px + var(--safe-b));
+    border-top: 1px solid var(--line);
+    background: color-mix(in srgb, var(--panel) 94%, transparent);
+    flex: 0 0 auto;
+  }
+  .mill-dock .p-key {
+    flex: 1 1 0;
+    min-height: 46px;
+    font-size: 12px;
+  }
+  .mill-dock .p-key.is-sq {
+    flex: 0 0 46px;
+    width: 46px;
+  }
+  .mill-lang {
+    display: none;
+  }
+  .mill-row {
+    font-size: 14px;
+  }
+  .mill-chips {
+    flex-wrap: nowrap;
+    max-height: none;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .mill-chips::-webkit-scrollbar {
+    display: none;
+  }
+  .p-toasts {
+    bottom: calc(84px + var(--safe-b));
+  }
+}
+
+@media (pointer: coarse) {
+  .mill-row {
+    border-bottom: 1px solid var(--line);
+    border-radius: 0;
+  }
+  .mill-check {
+    width: 44px;
+    height: 44px;
+    margin: 0 -10px 0 -8px;
+  }
+  .mill-twist {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
+  }
+  .mill-lang {
+    display: none;
+  }
+  /* the whole row height opens the preview, not only the text */
+  .mill-name {
+    align-self: stretch;
+  }
+  .mill-source .p-key {
+    min-width: 44px;
+  }
+  .mill-chips {
+    max-height: 153px; /* three rows of 44px chips */
+  }
+  .mill-tabs button {
+    min-height: 44px;
+  }
+  .mill-brand,
+  .mill-issue-path {
+    min-height: 44px;
+  }
+  .mill-opt {
+    padding: 7px 0;
+  }
+}
+
+/* keyboard hints mean nothing on a touch screen */
+@media (hover: none) and (pointer: coarse) {
+  .mill .p-kbdhint,
+  .mill-filter .p-kbd,
+  .mill-path-kbd {
+    display: none !important;
+  }
+}
+
+/* short windows (a phone on its side, or a page zoomed to 200%): the page
+   scrolls and the panes get the screen, instead of squeezing every pane into a
+   few pixels */
+@media (max-height: 520px) {
+  .mill.is-page {
+    height: auto;
+    min-height: var(--mill-h, 100dvh);
+    overflow: visible;
+  }
+  .mill.is-page .mill-grid {
+    overflow: visible;
+  }
+  .mill.is-page .mill-files,
+  .mill.is-page .mill-out {
+    height: calc(100dvh - var(--short-chrome, 40px));
+  }
+  .mill.is-page .mill-dock {
+    position: sticky;
+    bottom: 0;
+    z-index: 30;
+  }
+}
+
+@media (forced-colors: active) {
+  .mill-tabs button[aria-selected="true"] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+  .mill-row.is-active {
+    outline: 1px solid Highlight;
+  }
+}

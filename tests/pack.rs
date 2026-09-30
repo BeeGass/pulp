@@ -1,7 +1,32 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pulp::{FileStatus, Kind, Options, OutputFormat, Selection, pack};
+use pulp::{FileStatus, Kind, MemoryFile, Options, OutputFormat, Selection, pack, pack_entries};
+
+const CORRUPT_PDF: &[u8] = b"%PDF-1.4 garbage";
+const CORRUPT_DOCX: &[u8] = b"PK\x03\x04 not really a zip";
+
+/// Asserts `file` is flagged unreadable and its dump text is the note that
+/// carries the parser's message.
+fn assert_unreadable(file: &pulp::PackedFile, kind: &str) {
+    let FileStatus::Unreadable(reason) = &file.status else {
+        panic!(
+            "{} should be unreadable, got {:?}",
+            file.relative, file.status
+        );
+    };
+    assert!(
+        !reason.trim().is_empty(),
+        "{} has no parser message",
+        file.relative
+    );
+    assert_eq!(file.text, format!("[{kind} unreadable: {reason}]"));
+    assert!(
+        file.status.message(file.size).ends_with(reason.as_str()),
+        "{}",
+        file.status.message(file.size)
+    );
+}
 
 fn testdata(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -321,6 +346,172 @@ fn test_pack_with_xml_format_returns_documents_markup() {
 }
 
 #[test]
+fn test_pack_with_corrupt_pdf_and_docx_returns_unreadable_notes() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("paper.pdf"), CORRUPT_PDF).unwrap();
+    fs::write(tmp.path().join("memo.docx"), CORRUPT_DOCX).unwrap();
+    fs::copy(testdata("hello.rs"), tmp.path().join("hello.rs")).unwrap();
+
+    let opts = options_for(tmp.path());
+    let packed = pack(&opts).unwrap_or_else(|e| panic!("{e}"));
+    assert_unreadable(find_file(&packed, "paper.pdf"), "pdf");
+    assert_unreadable(find_file(&packed, "memo.docx"), "docx");
+    assert_eq!(packed.stats.files_extracted, 1);
+    assert_eq!(packed.stats.files_skipped, 2);
+
+    let dump = dump_with(&opts);
+    assert!(
+        dump.contains(
+            "FILE: paper.pdf\n================================================\n[pdf unreadable: "
+        ),
+        "{dump}"
+    );
+    assert!(dump.contains("[docx unreadable: "), "{dump}");
+}
+
+const DOWNLOAD_PAGE: &[u8] = b"<html><head><meta charset=\"utf-8\">\
+    <title>Preparing to download ...</title></head>\
+    <body><p>Your download will start in a moment.</p></body></html>\n";
+
+#[test]
+fn test_pack_with_files_not_matching_their_names_returns_their_text_under_a_note() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("report.pdf"), DOWNLOAD_PAGE).unwrap();
+    fs::write(
+        tmp.path().join("minutes.docx"),
+        "Minutes of the tide board\n",
+    )
+    .unwrap();
+    fs::write(tmp.path().join("novel.epub"), b"").unwrap();
+    fs::write(
+        tmp.path().join("scan.pdf"),
+        b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR",
+    )
+    .unwrap();
+
+    let opts = options_for(tmp.path());
+    let packed = pack(&opts).unwrap_or_else(|e| panic!("{e}"));
+    for (name, text) in [
+        (
+            "report.pdf",
+            "[not a PDF: it holds an HTML page (\"Preparing to download ...\")]\n",
+        ),
+        (
+            "minutes.docx",
+            "[not a Word document: it holds plain text]\nMinutes of the tide board",
+        ),
+        ("novel.epub", "[not an EPUB: the file is empty]"),
+    ] {
+        let file = find_file(&packed, name);
+        assert_eq!(file.status, FileStatus::Extracted, "{name}");
+        assert!(file.text.starts_with(text), "{name}: {:?}", file.text);
+    }
+    assert!(
+        find_file(&packed, "report.pdf")
+            .text
+            .contains("Your download will start in a moment."),
+        "the page's text follows the note"
+    );
+    // An image under a PDF name has no text to read, so it stays unreadable.
+    let scan = find_file(&packed, "scan.pdf");
+    assert_eq!(
+        scan.status,
+        FileStatus::Unreadable("not a PDF: it holds a PNG image".into())
+    );
+    assert_eq!(
+        scan.status.message(scan.size),
+        "Not a PDF: it holds a PNG image. The dump holds a one-line note in its place."
+    );
+}
+
+#[test]
+fn test_pack_entries_with_corrupt_pdf_and_docx_returns_unreadable_notes() {
+    let files = [
+        MemoryFile {
+            id: "grant/paper.pdf",
+            relative: "grant/paper.pdf",
+            bytes: CORRUPT_PDF,
+        },
+        MemoryFile {
+            id: "grant/memo.docx",
+            relative: "grant/memo.docx",
+            bytes: CORRUPT_DOCX,
+        },
+        MemoryFile {
+            id: "grant/a.rs",
+            relative: "grant/a.rs",
+            bytes: b"fn a() {}\n",
+        },
+    ];
+    let packed = pack_entries(&files, &Options::default(), None).unwrap_or_else(|e| panic!("{e}"));
+    assert_unreadable(find_file(&packed, "paper.pdf"), "pdf");
+    assert_unreadable(find_file(&packed, "memo.docx"), "docx");
+    assert_eq!(packed.stats.files_extracted, 1);
+    assert_eq!(packed.stats.files_skipped, 2);
+}
+
+/// 26,702 bytes of UTF-8 prose with 3 NULs and 70 other control bytes (SOH,
+/// STX, ETX, DLE, DC1 to DC4) spread through it: about 0.3% of the file, as
+/// in text pulled out of a PDF.
+fn prose_with_stray_controls() -> Vec<u8> {
+    const LEN: usize = 26_702;
+    const STRAYS: usize = 73;
+    const STRAY: [u8; 8] = [0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13, 0x14];
+    let sentence = "The gauge at the north pier logged the tide every ten minutes \u{2014} \
+                    see the caf\u{e9} notes for the storm surge.\n";
+    let mut prose = sentence.repeat(LEN / sentence.len() + 1);
+    let mut cut = LEN - STRAYS;
+    while !prose.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    prose.truncate(cut);
+    while prose.len() < LEN - STRAYS {
+        prose.push('.');
+    }
+    // Evenly spaced, each between two characters; the 13th, 38th, and 63rd
+    // are NULs.
+    let step = prose.len() / (STRAYS + 1);
+    let mut out = Vec::with_capacity(LEN);
+    let mut from = 0;
+    for i in 0..STRAYS {
+        let mut at = (i + 1) * step;
+        while !prose.is_char_boundary(at) {
+            at += 1;
+        }
+        out.extend_from_slice(&prose.as_bytes()[from..at]);
+        out.push(if i % 25 == 12 {
+            0
+        } else {
+            STRAY[i % STRAY.len()]
+        });
+        from = at;
+    }
+    out.extend_from_slice(&prose.as_bytes()[from..]);
+    assert_eq!(out.len(), LEN);
+    assert_eq!(out.iter().filter(|b| **b == 0).count(), 3);
+    assert_eq!(out.iter().filter(|b| STRAY.contains(b)).count(), 70);
+    out
+}
+
+#[test]
+fn test_pack_with_prose_holding_nuls_and_stray_controls_returns_extracted_text() {
+    let prose = prose_with_stray_controls();
+    assert!(!pulp::looks_binary(&prose));
+    assert_eq!(
+        pulp::classify(Path::new("extracted"), Some(&prose)),
+        Kind::Text
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("extracted.txt"), &prose).unwrap();
+    let packed = pack(&options_for(tmp.path())).unwrap_or_else(|e| panic!("{e}"));
+    let file = find_file(&packed, "extracted.txt");
+    assert_eq!(file.status, FileStatus::Extracted, "{:?}", file.status);
+    assert_eq!(file.kind, Kind::Text);
+    assert_eq!(file.text.as_bytes(), prose.as_slice());
+}
+
+#[test]
 fn test_pack_with_empty_only_returns_no_files() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("keep.rs"), "pub fn keep() {}\n").unwrap();
@@ -328,6 +519,92 @@ fn test_pack_with_empty_only_returns_no_files() {
     opts.selection = Selection::Only(Vec::new());
     let packed = pack(&opts).unwrap_or_else(|e| panic!("{e}"));
     assert!(packed.files.is_empty());
+}
+
+/// The relative paths a walk of `root` and a `pack_entries` of the same
+/// files keep under `opts`, plus whether each was cut. The in-memory files
+/// arrive in `order`, not in path order.
+fn kept_by_walk_and_pack_entries(
+    root: &Path,
+    files: &[(&str, &[u8])],
+    order: &[usize],
+    opts: &Options,
+) -> ((Vec<String>, bool), (Vec<String>, bool)) {
+    for (name, body) in files {
+        let path = root.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+    let walked = pulp::walk::collect_detailed(&Options {
+        roots: vec![root.to_path_buf()],
+        ..opts.clone()
+    })
+    .unwrap();
+    let mut from_walk: Vec<String> = walked.files.into_iter().map(|f| f.relative).collect();
+    from_walk.sort();
+    let entries: Vec<MemoryFile<'_>> = order
+        .iter()
+        .map(|&i| MemoryFile {
+            id: files[i].0,
+            relative: files[i].0,
+            bytes: files[i].1,
+        })
+        .collect();
+    let packed = pack_entries(&entries, opts, None).unwrap();
+    let mut from_entries: Vec<String> = packed.files.into_iter().map(|f| f.relative).collect();
+    from_entries.sort();
+    (
+        (from_walk, walked.truncated),
+        (from_entries, packed.stats.truncated),
+    )
+}
+
+#[test]
+fn test_budgets_with_big_then_small_file_keep_same_files_in_walk_and_pack_entries() {
+    let big = [b'x'; 900];
+    let small = [b'y'; 50];
+    let files: [(&str, &[u8]); 2] = [("a_big.txt", &big), ("b_small.txt", &small)];
+    let opts = Options {
+        max_total_bytes: 100,
+        ..Options::default()
+    };
+    for order in [[0, 1], [1, 0]] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (walk, entries) = kept_by_walk_and_pack_entries(tmp.path(), &files, &order, &opts);
+        assert_eq!(walk, (Vec::<String>::new(), true), "{order:?}");
+        assert_eq!(entries, walk, "{order:?}");
+    }
+
+    let files: [(&str, &[u8]); 3] = [
+        ("a_empty.txt", b""),
+        ("b_full.txt", b"data\n"),
+        ("c_empty.txt", b""),
+    ];
+    let opts = Options {
+        max_total_bytes: 0,
+        ..Options::default()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (walk, entries) = kept_by_walk_and_pack_entries(tmp.path(), &files, &[2, 1, 0], &opts);
+    assert_eq!(walk, (vec!["a_empty.txt".to_string()], true));
+    assert_eq!(entries, walk);
+}
+
+#[test]
+fn test_budgets_with_directory_sorting_between_names_keep_same_files_in_walk_and_pack_entries() {
+    // A walk visits `a/b.txt` before `a-c.txt`, though as strings it sorts last.
+    let files: [(&str, &[u8]); 3] = [("a.txt", b"1\n"), ("a-c.txt", b"2\n"), ("a/b.txt", b"3\n")];
+    let opts = Options {
+        max_entries: 2,
+        ..Options::default()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (walk, entries) = kept_by_walk_and_pack_entries(tmp.path(), &files, &[0, 1, 2], &opts);
+    assert_eq!(
+        walk,
+        (vec!["a-c.txt".to_string(), "a/b.txt".to_string()], true)
+    );
+    assert_eq!(entries, walk);
 }
 
 #[test]

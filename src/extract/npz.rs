@@ -4,7 +4,7 @@ use std::io::{Cursor, Read};
 
 use zip::ZipArchive;
 
-use super::archive::{MAX_ARCHIVE_UNCOMPRESSED, is_rejected_member_name, normalize_member_name};
+use super::archive::{is_rejected_member_name, normalize_member_name};
 use crate::error::Error;
 
 const NPY_MAGIC: &[u8] = b"\x93NUMPY";
@@ -18,18 +18,24 @@ pub fn extract_npy(bytes: &[u8]) -> Result<String, Error> {
     Ok(render_npy(&parsed))
 }
 
+/// Largest npy header read from an `.npz` member. numpy writes a header of
+/// about 20 bytes per field, so this covers structured dtypes of some 50,000
+/// fields.
+const MAX_NPY_HEADER: usize = 1024 * 1024;
+
 /// Parse an `.npz` (zip of `.npy` members) into named sections, sorted by name.
 ///
 /// Zip-slip members and directories are skipped. Non-npy file members are
-/// noted rather than treated as opaque binary.
+/// noted rather than treated as opaque binary. Only the head of each member
+/// is read, which holds its header and preview, so every member is listed
+/// however large the arrays are. A member whose header cannot be read gets
+/// a one-line note in its section.
 pub fn extract_npz(bytes: &[u8]) -> Result<String, Error> {
     let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(zip_error)?;
     let mut catalog: Vec<(usize, String, u64)> = Vec::new();
-    let mut claimed_total = 0u64;
     for i in 0..archive.len() {
-        let file = match archive.by_index(i) {
-            Ok(file) => file,
-            Err(_) => continue,
+        let Ok(file) = archive.by_index(i) else {
+            continue;
         };
         if !file.is_file() {
             continue;
@@ -38,42 +44,65 @@ pub fn extract_npz(bytes: &[u8]) -> Result<String, Error> {
         if is_rejected_member_name(raw_name) {
             continue;
         }
-        let name = normalize_member_name(raw_name);
-        let claimed = file.size();
-        if claimed > MAX_ARCHIVE_UNCOMPRESSED
-            || claimed_total.saturating_add(claimed) > MAX_ARCHIVE_UNCOMPRESSED
-        {
-            continue;
-        }
-        claimed_total = claimed_total.saturating_add(claimed);
-        catalog.push((i, name, claimed));
+        catalog.push((i, normalize_member_name(raw_name), file.size()));
     }
     catalog.sort_by(|a, b| a.1.cmp(&b.1));
 
     let mut sections = Vec::new();
-    let mut total = 0u64;
     for (index, name, claimed) in catalog {
-        if total.saturating_add(claimed) > MAX_ARCHIVE_UNCOMPRESSED {
+        let Ok(file) = archive.by_index(index) else {
+            continue;
+        };
+        let display = npy_display_name(&name);
+        if !display.ends_with(".npy") {
+            sections.push(format!("[skipped non-npy entry {name}, {claimed} bytes]"));
             continue;
         }
-        let section = {
-            let file = match archive.by_index(index) {
-                Ok(file) => file,
-                Err(_) => continue,
-            };
-            let mut data = Vec::new();
-            file.take(claimed).read_to_end(&mut data)?;
-            total = total.saturating_add(data.len() as u64);
-            let display = npy_display_name(&name);
-            if display.ends_with(".npy") {
-                format!("## {display}\n{}", extract_npy(&data)?)
-            } else {
-                format!("[skipped non-npy entry {name}, {} bytes]", data.len())
-            }
+        let body = match read_npy_head(file) {
+            Ok(head) => match parse_npy(&head) {
+                Ok(parsed) => render_npy(&parsed),
+                Err(err) => format!("[unreadable npy: {err}]"),
+            },
+            Err(err) => format!("[unreadable npy: {err}]"),
         };
-        sections.push(section);
+        sections.push(format!("## {display}\n{body}"));
     }
     Ok(sections.join("\n\n"))
+}
+
+/// Read the front of an `.npy` member: its header and room for a preview.
+///
+/// The rest of a member is never inflated, so a small archive of large
+/// arrays costs little memory or time. The header's length comes first, so
+/// a header of any size up to [`MAX_NPY_HEADER`] is read whole.
+fn read_npy_head(member: impl Read) -> Result<Vec<u8>, Error> {
+    let mut member = member;
+    let mut head = Vec::new();
+    // The magic, the version, and the header's length: two bytes of length
+    // in version 1, four after.
+    (&mut member).take(12).read_to_end(&mut head)?;
+    let Some(&major) = head.get(6).filter(|_| head.starts_with(NPY_MAGIC)) else {
+        return Ok(head);
+    };
+    let (preamble, header_len) = match (major, head.get(8..12)) {
+        (1, Some(len)) => (10, usize::from(u16::from_le_bytes([len[0], len[1]]))),
+        (_, Some(len)) => (
+            12,
+            usize::try_from(u32::from_le_bytes([len[0], len[1], len[2], len[3]]))
+                .unwrap_or(usize::MAX),
+        ),
+        (_, None) => return Ok(head),
+    };
+    if header_len > MAX_NPY_HEADER {
+        return Err(Error::msg(format!(
+            "npy header is {header_len} bytes, too large; limit {MAX_NPY_HEADER}"
+        )));
+    }
+    let want = preamble + header_len + PREVIEW_MAX_BYTES;
+    member
+        .take(want.saturating_sub(head.len()) as u64)
+        .read_to_end(&mut head)?;
+    Ok(head)
 }
 
 /// Use the basename so a directory prefix on an `.npy` member is ignored.
@@ -722,6 +751,115 @@ mod tests {
         assert!(a_at < z_at, "{text}");
         assert!(text.contains("preview: [2.0]"));
         assert!(text.contains("preview: [1.0]"));
+    }
+
+    /// Deflated members whose zip headers claim `claimed` uncompressed bytes
+    /// each, the sizes a real `.npz` of large arrays declares.
+    fn npz_claiming(names: &[&str], member: &[u8], claimed: u32) -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for name in names {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(member).unwrap();
+        }
+        let mut zip = writer.finish().unwrap().into_inner();
+        let patch = |zip: &mut Vec<u8>, sig: &[u8], offset: usize| {
+            let mut at = 0;
+            while let Some(pos) = zip[at..].windows(4).position(|w| w == sig) {
+                let field = at + pos + offset;
+                zip[field..field + 4].copy_from_slice(&claimed.to_le_bytes());
+                at += pos + 4;
+            }
+        };
+        patch(&mut zip, b"PK\x03\x04", 22);
+        patch(&mut zip, b"PK\x01\x02", 24);
+        zip
+    }
+
+    #[test]
+    fn test_extract_npz_with_members_claiming_gigabytes_lists_every_member() {
+        let mut member = build_npy_v1("<f8", false, &[50_000_000], &[]);
+        member.resize(200 * 1024, 0);
+        let names = ["a.npy", "b.npy", "c.npy"];
+        let zip = npz_claiming(&names, &member, 400_000_000);
+        let text = extract_npz(&zip).unwrap();
+        for name in names {
+            assert!(text.contains(&format!("## {name}\nformat: npy")), "{text}");
+        }
+        assert_eq!(text.matches("elements: 50000000").count(), 3, "{text}");
+    }
+
+    #[test]
+    fn test_extract_npz_with_one_bad_member_notes_it_and_keeps_the_rest() {
+        let good = build_npy_v1("<f4", false, &[1], &f32_payload(&[7.0]));
+        let zip = write_zip(&[("bad.npy", b"not an array"), ("good.npy", good.as_slice())]);
+        let text = extract_npz(&zip).unwrap();
+        assert!(
+            text.contains("## bad.npy\n[unreadable npy: not an npy file]"),
+            "{text}"
+        );
+        assert!(text.contains("## good.npy\n"), "{text}");
+        assert!(text.contains("preview: [7.0]"), "{text}");
+    }
+
+    /// A version 2 npy, whose header length takes four bytes, for dtypes
+    /// too wide for version 1's 64 KiB.
+    fn build_npy_v2(descr: &str, shape: &[usize], payload: &[u8]) -> Vec<u8> {
+        let mut header = format!(
+            "{{'descr': {descr}, 'fortran_order': False, 'shape': {}, }}",
+            format_shape_for_header(shape)
+        );
+        header.push_str(&" ".repeat(63 - (12 + header.len()) % 64));
+        header.push('\n');
+        let mut out = Vec::new();
+        out.extend_from_slice(NPY_MAGIC);
+        out.extend_from_slice(&[2, 0]);
+        out.extend_from_slice(&u32::try_from(header.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn test_extract_npz_with_v2_header_over_64k_lists_dtype_and_shape() {
+        let fields: Vec<String> = (0..5000).map(|i| format!("('field{i}', '<f4')")).collect();
+        let descr = format!("[{}]", fields.join(", "));
+        let npy = build_npy_v2(&descr, &[3], &vec![0u8; 3 * 5000 * 4]);
+        assert!(npy.len() > 96 * 1024);
+        let zip = write_zip(&[("wide.npy", npy.as_slice())]);
+        let text = extract_npz(&zip).unwrap();
+        assert!(
+            text.starts_with("## wide.npy\nformat: npy\ndescr: [('field0', '<f4'), "),
+            "{}",
+            &text[..200]
+        );
+        assert!(
+            text.contains("('field4999', '<f4')]\n"),
+            "{}",
+            &text[text.len() - 300..]
+        );
+        assert!(
+            text.contains("shape: (3,)"),
+            "{}",
+            &text[text.len() - 300..]
+        );
+        assert!(!text.contains("unreadable"));
+    }
+
+    #[test]
+    fn test_extract_npz_with_header_past_the_ceiling_says_too_large() {
+        let mut npy = Vec::from(NPY_MAGIC);
+        npy.extend_from_slice(&[2, 0]);
+        npy.extend_from_slice(&u32::try_from(MAX_NPY_HEADER + 1).unwrap().to_le_bytes());
+        npy.extend_from_slice(b"{'descr': '<f4', ");
+        let zip = write_zip(&[("huge.npy", npy.as_slice())]);
+        let text = extract_npz(&zip).unwrap();
+        assert!(
+            text.contains("## huge.npy\n[unreadable npy: npy header is"),
+            "{text}"
+        );
+        assert!(text.contains("too large"), "{text}");
+        assert!(!text.contains("truncated"), "{text}");
     }
 
     #[test]

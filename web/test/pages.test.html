@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>site page tests</title>
+  <link rel="icon" href="data:,">
+  <style>
+    body { margin: 16px; }
+    #results { margin: 0 0 16px; font: 12px/1.5 monospace; white-space: pre-wrap; }
+    #results[data-status="fail"] { color: #b3261e; }
+    #stage iframe { width: 1280px; height: 900px; border: 1px solid #8f8d87; }
+  </style>
+</head>
+<body>
+  <!-- Run with `cargo xtask ui-test`, or open by hand from `cargo xtask ui-test --serve`. -->
+  <pre id="results" data-status="running"></pre>
+  <div id="stage"></div>
+  <!-- Headless Chrome prints this page when its load event fires; the server
+       answers this frame once the tests post /__ui-test/done. -->
+  <iframe src="/__ui-test/hold" hidden title="test gate"></iframe>
+  <script type="module" src="/web/test/harness.js"></script>
+  <script type="module" src="/web/test/pages.test.js"></script>
+</body>
+</html>
