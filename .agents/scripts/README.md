@@ -15,4 +15,4 @@ One-off commands do not land here. Run those in the shell, or leave a note in th
 
 The Python scripts need Python 3.11 or newer and nothing outside the standard library, except `build-mono-fonts.py` (fonttools and brotli). Each prints its usage in its docstring.
 
-A typical split of finished work into commits: write a spec naming each commit's files (`"worktree"`, a scratch copy built with `hunks.py build`, or `null` to delete), run `mkcommits.py` from inside the repository with the author and committer identity exported, check each commit in `chain.txt` with `verify-commit.sh`, then move the branch with `git update-ref`.
+A typical split of finished work into commits: write a spec naming each commit's files (`"worktree"`, a scratch copy built with `hunks.py build`, or `null` to delete), run `mkcommits.py` from inside the repository with the identity in [`../memory/commits-and-merging.md`](../memory/commits-and-merging.md) exported, check each commit in `chain.txt` with `verify-commit.sh`, then move the branch with `git update-ref`.
