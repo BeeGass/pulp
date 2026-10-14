@@ -74,6 +74,8 @@ Every flag is in the [README](https://github.com/BeeGass/pulp#options).
 | Cancel | Stops the worker | Between files |
 | Setup | None | One cargo line |
 
+Both mills can download that dump as a zip of files, each at most 100 KB (**100 KB parts**, under Options).
+
 In-browser mill: [/mill](https://pulp.onlygass.dev/mill) · [mill.md](https://pulp.onlygass.dev/mill.md)
 
 ## Agent maps

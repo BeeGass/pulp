@@ -20,7 +20,20 @@ const DEFAULTS = {
   notebook: false,
   tree: true,
   wrap: false,
+  // Download only. The dump on screen stays one piece.
+  parts: false,
+  // Download name. Empty keeps the dump's own name.
+  filename: '',
 };
+
+/** Largest file, in bytes, that the 100 KB parts download will write. */
+export const PART_BYTES = 100 * 1024;
+
+/**
+ * How far short of that cap a line break may end a part. A line longer than
+ * this is cut at the cap, on a character boundary.
+ */
+const PART_BREAK_SLACK = 4096;
 
 const ICONS = {
   lock: '<rect x="3.5" y="7" width="9" height="6.5" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/>',
@@ -138,6 +151,271 @@ function fence(text) {
   return ticks + 'text\n' + body + '\n' + ticks;
 }
 
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/** `name` with its directory stripped, split into stem and extension. */
+function fileStem(filename) {
+  const base = String(filename || 'pulp.txt').split(/[/\\]/).pop() || 'pulp.txt';
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0) return { stem: base || 'pulp', ext: '' };
+  return { stem: base.slice(0, dot), ext: base.slice(dot) };
+}
+
+/** `pulp.xml` part 0 of 2 is `pulp-001.xml`. Names sort in part order. */
+export function partFilename(filename, index, count) {
+  const { stem, ext } = fileStem(filename);
+  const width = Math.max(3, String(Math.max(1, count | 0)).length);
+  return stem + '-' + String((index | 0) + 1).padStart(width, '0') + ext;
+}
+
+/** Zip name for a parts download: `pulp.xml` becomes `pulp-parts.zip`. */
+export function partsZipName(filename) {
+  return fileStem(filename).stem + '-parts.zip';
+}
+
+/**
+ * The last path segment of `raw`, without characters a file name cannot hold.
+ * Empty when nothing usable is left.
+ */
+export function sanitizeFilename(raw) {
+  let name = String(raw ?? '').trim().replace(/\\/g, '/');
+  const cut = name.lastIndexOf('/');
+  if (cut >= 0) name = name.slice(cut + 1);
+  name = name.replace(/[\u0000-\u001f\u007f]/g, '').replace(/[<>:"|?*]/g, '').trim();
+  if (!name || name === '.' || name === '..') return '';
+  return name.length > 180 ? name.slice(0, 180) : name;
+}
+
+/** An extension worth keeping, including the dot. A trailing dot does not count. */
+function realExtension(name) {
+  const ext = fileStem(name).ext;
+  return ext.length > 1 ? ext : '';
+}
+
+/**
+ * The name Download saves. `requested` overrides `fallback`. With `parts`,
+ * the result is the zip: `.zip` is added, and a name that already ends in the
+ * dump's extension drops that extension first (`notes.xml` becomes `notes.zip`).
+ * Without `parts`, a name that has no extension takes `fallback`'s.
+ */
+export function downloadFilename(requested, fallback, parts) {
+  const base = sanitizeFilename(fallback) || 'pulp.txt';
+  const asked = sanitizeFilename(requested);
+  const ext = realExtension(base) || '.txt';
+  if (!parts) {
+    if (!asked) return base;
+    return realExtension(asked) ? asked : asked.replace(/\.+$/, '') + ext;
+  }
+  if (!asked) return partsZipName(base);
+  if (/\.zip$/i.test(asked)) return asked;
+  const stem = realExtension(asked).toLowerCase() === ext.toLowerCase() ? fileStem(asked).stem : asked;
+  return stem + '.zip';
+}
+
+/**
+ * The filename `partFilename` numbers inside a parts zip. A blank request
+ * keeps `fallback`, so `pulp.xml` stays `pulp-001.xml`.
+ */
+export function partSourceName(requested, fallback) {
+  const base = sanitizeFilename(fallback) || 'pulp.txt';
+  if (!sanitizeFilename(requested)) return base;
+  const zip = downloadFilename(requested, base, true);
+  const stem = fileStem(zip.replace(/\.zip$/i, '')).stem || fileStem(base).stem || 'pulp';
+  return stem + (realExtension(base) || '.txt');
+}
+
+/**
+ * A glob against a file's path relative to the scanned folder. A leading `/`
+ * anchors there. A pattern with no folder in it (`*.md`) matches in every
+ * folder. `*` stays inside one folder, `**` crosses folders, `?` is one
+ * character. Returns null for a blank pattern.
+ */
+export function compilePathPattern(pattern) {
+  let src = String(pattern ?? '').trim().replace(/\\/g, '/');
+  if (!src) return null;
+  const anchored = src.startsWith('/');
+  src = src.replace(/^\/+/, '').replace(/\/+$/, '').replace(/\/{2,}/g, '/');
+  if (!src) return null;
+  const anywhere = !anchored && !src.includes('/');
+  let body = '';
+  for (let i = 0; i < src.length;) {
+    const c = src[i];
+    if (c === '*' && src[i + 1] === '*') {
+      const after = src[i + 2];
+      if (after === undefined) {
+        body += '.*';
+        break;
+      }
+      if (after === '/') {
+        body += '(?:[^/]+/)*';
+        i += 3;
+        continue;
+      }
+      body += '[^/]*';
+      i += 1;
+      continue;
+    }
+    if (c === '*') {
+      body += '[^/]*';
+      i += 1;
+      continue;
+    }
+    if (c === '?') {
+      body += '[^/]';
+      i += 1;
+      continue;
+    }
+    body += /[\\^$+?.()|[\]{}]/.test(c) ? '\\' + c : c;
+    i += 1;
+  }
+  return new RegExp(anywhere ? '(?:^|.*/)' + body + '$' : '^' + body + '$', 'i');
+}
+
+/** Whether `relative` matches `pattern`. A blank pattern matches nothing. */
+export function pathMatches(pattern, relative) {
+  const re = compilePathPattern(pattern);
+  if (!re) return false;
+  const path = String(relative || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  return re.test(path);
+}
+
+/**
+ * Split `text` into UTF-8 pieces of at most `limit` bytes that join back to
+ * `text`. A piece ends on a newline when one falls within `slack` bytes of
+ * the cap. A single character longer than `limit` is kept whole.
+ */
+export function splitParts(text, limit = PART_BYTES, slack = PART_BREAK_SLACK) {
+  const max = Math.floor(limit);
+  if (!Number.isFinite(max) || max < 1) throw new Error('part limit must be at least 1 byte');
+  const room = Number.isFinite(slack) && slack > 0 ? Math.floor(slack) : 0;
+  const bytes = new TextEncoder().encode(String(text ?? ''));
+  if (bytes.length <= max) return [String(text ?? '')];
+  const dec = new TextDecoder();
+  const parts = [];
+  let start = 0;
+  while (start < bytes.length) {
+    let end = Math.min(bytes.length, start + max);
+    if (end < bytes.length) {
+      // `end` is the first excluded byte. Walk it off a trailing UTF-8 tail.
+      while (end > start && (bytes[end] & 0xc0) === 0x80) end--;
+      const window = Math.max(start, end - room);
+      for (let i = end - 1; i >= window; i--) {
+        if (bytes[i] === 0x0a) {
+          end = i + 1;
+          break;
+        }
+      }
+      // One character that does not fit still has to move, or the loop sticks.
+      if (end <= start) {
+        end = Math.min(bytes.length, start + 1);
+        while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end++;
+      }
+    }
+    if (end <= start) throw new Error('part split made no progress');
+    parts.push(dec.decode(bytes.subarray(start, end)));
+    start = end;
+  }
+  return parts;
+}
+
+/** DOS time and date fields. Years before 1980 clamp to the format's epoch. */
+function dosStamp(date) {
+  const d = date instanceof Date ? date : new Date();
+  const year = Math.min(2107, Math.max(1980, d.getFullYear()));
+  const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  const day = ((year - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  return { time, day };
+}
+
+/**
+ * A zip of stored (uncompressed) entries. `files` are `{ name, text }` or
+ * `{ name, data }` with `data` a Uint8Array. The result is one ZIP32 archive.
+ */
+export function zipStored(files, date) {
+  if (files.length > 0xffff) throw new Error('too many files for one zip');
+  const enc = new TextEncoder();
+  const stamp = dosStamp(date);
+  const encoded = files.map((f) => {
+    const name = enc.encode(String(f.name));
+    const data = f.data instanceof Uint8Array ? f.data : enc.encode(String(f.text ?? ''));
+    if (name.length > 0xffff || data.length > 0xffffffff) throw new Error('a zip entry is too large');
+    return { name, data, crc: crc32(data) };
+  });
+  let bytesNeeded = 22;
+  for (const e of encoded) bytesNeeded += 76 + e.name.length * 2 + e.data.length;
+  if (bytesNeeded > 0xffffffff) throw new Error('the zip is too large');
+  const out = new Uint8Array(bytesNeeded);
+  const view = new DataView(out.buffer);
+  const u16 = (o, v) => view.setUint16(o, v, true);
+  const u32 = (o, v) => view.setUint32(o, v, true);
+  let o = 0;
+  const offsets = [];
+  for (const e of encoded) {
+    offsets.push(o);
+    u32(o, 0x04034b50); o += 4;
+    u16(o, 20); o += 2;
+    u16(o, 0x0800); o += 2;
+    u16(o, 0); o += 2;
+    u16(o, stamp.time); o += 2;
+    u16(o, stamp.day); o += 2;
+    u32(o, e.crc); o += 4;
+    u32(o, e.data.length); o += 4;
+    u32(o, e.data.length); o += 4;
+    u16(o, e.name.length); o += 2;
+    u16(o, 0); o += 2;
+    out.set(e.name, o); o += e.name.length;
+    out.set(e.data, o); o += e.data.length;
+  }
+  const centralAt = o;
+  for (let i = 0; i < encoded.length; i++) {
+    const e = encoded[i];
+    u32(o, 0x02014b50); o += 4;
+    u16(o, (3 << 8) | 20); o += 2;
+    u16(o, 20); o += 2;
+    u16(o, 0x0800); o += 2;
+    u16(o, 0); o += 2;
+    u16(o, stamp.time); o += 2;
+    u16(o, stamp.day); o += 2;
+    u32(o, e.crc); o += 4;
+    u32(o, e.data.length); o += 4;
+    u32(o, e.data.length); o += 4;
+    u16(o, e.name.length); o += 2;
+    u16(o, 0); o += 2;
+    u16(o, 0); o += 2;
+    u16(o, 0); o += 2;
+    u16(o, 1); o += 2;
+    // Unix regular file, mode 0644, in the high half of the external attributes.
+    u32(o, 0o100644 << 16); o += 4;
+    u32(o, offsets[i]); o += 4;
+    out.set(e.name, o); o += e.name.length;
+  }
+  const centralSize = o - centralAt;
+  u32(o, 0x06054b50); o += 4;
+  u16(o, 0); o += 2;
+  u16(o, 0); o += 2;
+  u16(o, encoded.length); o += 2;
+  u16(o, encoded.length); o += 2;
+  u32(o, centralSize); o += 4;
+  u32(o, centralAt); o += 4;
+  u16(o, 0); o += 2;
+  if (o !== out.length) throw new Error('zip size mismatch');
+  return out;
+}
+
 /**
  * Copy `text`, a string or a promise of one. Safari accepts a clipboard write
  * only inside the click that asked for it, so text that is still loading goes
@@ -206,6 +484,7 @@ const OPTION_ROWS = [
   { key: 'archives', label: 'Archives', help: 'Unpack nested zip and tar members.' },
   { key: 'notebook', label: 'Notebook outputs', help: 'Keep Jupyter cell outputs.' },
   { key: 'tree', label: 'Directory map', help: 'Put the tree at the top of the dump.' },
+  { key: 'parts', label: '100 KB parts', help: 'Download a zip of files, each at most 100 KB, that together hold the dump.' },
   { key: 'wrap', label: 'Wrap lines', help: 'View only; the dump is unchanged.' },
 ];
 
@@ -318,6 +597,9 @@ export function mountMill(root, adapter, options) {
     filesLoading: $('filesloading'),
     filesBody: $('filesbody'),
     filter: $('filter'),
+    pickpat: $('pickpat'),
+    pickact: $('pickact'),
+    filename: $('filename'),
     chips: $('chips'),
     tree: $('tree'),
     rows: $('rows'),
@@ -327,6 +609,7 @@ export function mountMill(root, adapter, options) {
     outKeys: $('outkeys'),
     outCopy: root.querySelector('[data-el="outkeys"] [data-act="copy"]'),
     outDownload: root.querySelector('[data-el="outkeys"] [data-act="download"]'),
+    downloadLabel: $('downloadlabel'),
     outTree: root.querySelector('[data-el="outkeys"] [data-act="tree"]'),
     outNote: $('outnote'),
     dump: $('dump'),
@@ -408,6 +691,10 @@ export function mountMill(root, adapter, options) {
       '<kbd class="p-kbd">/</kbd></label><span class="mill-filter-keys">' +
       '<button type="button" class="p-key is-quiet is-sm" data-act="all" title="Tick every file that matches the filter">All</button>' +
       '<button type="button" class="p-key is-quiet is-sm" data-act="none" title="Untick every file that matches the filter">None</button></span></div>' +
+      '<div class="mill-pick"><label class="p-field"><input data-el="pickpat" name="pickpat" type="text" placeholder="/docs/**/*.md" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" enterkeyhint="go" aria-label="Path pattern" title="A leading / starts at this folder. *.md matches in every folder. * stays in one folder, ** crosses folders."></label>' +
+      '<select data-el="pickact" aria-label="Select or deselect matches"><option value="select">Select</option><option value="deselect">Deselect</option></select>' +
+      '<button type="button" class="p-key is-quiet is-sm" data-act="pick">Apply</button></div>' +
+      '<p class="mill-pick-hint">A leading / starts at this folder. *.md matches in every folder. Apply ticks or unticks the whole list.</p>' +
       '<div class="mill-chips" data-el="chips" role="group" aria-label="Tick by language"></div>' +
       '<div class="mill-tree" data-el="tree"><div class="mill-rows" data-el="rows" role="tree" aria-label="Files"></div></div></div></section>' +
       // Settings come before the output in the DOM: the order of the task, and the
@@ -423,6 +710,9 @@ export function mountMill(root, adapter, options) {
       '<div class="mill-set"><span class="p-label" id="' + uid + '-content">Content</span>' + seg('content', [['readable', 'Readable'], ['source', 'Source']]) +
       '<p class="mill-hint" data-el="contenthint" hidden>HTML, XML, and JSON stay as decoded source; PDFs and Office files are still turned into text.</p></div>' +
       '<div class="mill-set"><span class="p-label" id="' + uid + '-format">Format</span>' + seg('format', [['txt', 'Txt'], ['md', 'Md'], ['xml', 'Xml']]) + '</div>' +
+      '<div class="mill-set mill-set-name"><label class="p-label" id="' + uid + '-filename" for="' + uid + '-filename-input">File name</label>' +
+      '<div class="p-field mill-name"><input data-el="filename" id="' + uid + '-filename-input" name="filename" type="text" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" aria-describedby="' + uid + '-filename-help"></div>' +
+      '<p class="mill-hint" id="' + uid + '-filename-help">Names the download. With 100 KB parts on, this is the zip. Blank keeps the default.</p></div>' +
       '<div class="mill-set mill-set-opts" role="group" aria-labelledby="' + uid + '-options"><span class="p-label" id="' + uid + '-options">Options</span>' +
       '<button type="button" class="p-key is-sm mill-opts-toggle" data-el="optstoggle" data-act="opts" aria-expanded="false">' + icon('sliders') + 'Options<span class="p-count" data-el="optscount"></span></button>' +
       '<div class="mill-opts" data-el="opts">' + optRows + '</div></div></div>' +
@@ -442,7 +732,7 @@ export function mountMill(root, adapter, options) {
       viewTab('issues', 'Issues<span class="p-badge" data-el="issuecount" hidden></span>') +
       '</div><span class="p-grow"></span><div class="mill-outkeys" data-el="outkeys">' +
       '<button type="button" class="p-key" data-act="copy" aria-disabled="true">' + icon('copy') + 'Copy</button>' +
-      '<button type="button" class="p-key" data-act="download" aria-disabled="true">' + icon('download') + 'Download</button>' +
+      '<button type="button" class="p-key" data-act="download" aria-disabled="true">' + icon('download') + '<span data-el="downloadlabel">Download</span></button>' +
       '<button type="button" class="p-key is-quiet" data-act="tree" aria-disabled="true" title="Copy only the directory map">' + icon('tree') + 'Tree</button></div></div>' +
       '<div class="mill-outnote" data-el="outnote" hidden></div>' +
       '<div class="p-sheet mill-sheet" ' + panelAttrs('combined') + '><div class="p-ledger" data-el="dump" tabindex="0" role="region" aria-label="Combined dump"></div>' +
@@ -1220,6 +1510,7 @@ export function mountMill(root, adapter, options) {
     root.querySelectorAll('[data-opt]').forEach((input) => {
       input.checked = !!S.settings[input.dataset.opt];
     });
+    if (el.filename && document.activeElement !== el.filename) el.filename.value = S.settings.filename || '';
   }
 
   function renderSettingsState() {
@@ -1234,6 +1525,16 @@ export function mountMill(root, adapter, options) {
     const inspKey = root.querySelector('[data-act="insp"]');
     if (inspKey) inspKey.setAttribute('aria-expanded', String(S.inspOpen));
     el.sumText.textContent = (s.content === 'source' ? 'source' : 'readable') + ' · ' + s.format + ' · ' + plural(on, 'option');
+    refreshNamePlaceholder();
+  }
+
+  /** What a blank file name will download as, so the field can show it. */
+  function refreshNamePlaceholder() {
+    if (!el.filename) return;
+    const ext = S.settings.format === 'md' ? 'md' : S.settings.format === 'txt' ? 'txt' : 'xml';
+    const fallback = (S.result && S.result.filename) || ('pulp.' + ext);
+    const next = downloadFilename('', fallback, !!S.settings.parts);
+    if (el.filename.placeholder !== next) el.filename.placeholder = next;
   }
 
   function renderOutput() {
@@ -1255,6 +1556,10 @@ export function mountMill(root, adapter, options) {
     setAvailable(el.outCopy, ready);
     el.outCopy.classList.toggle('is-primary', ready);
     setAvailable(el.outDownload, ready);
+    const downloadLabel = S.settings.parts ? 'Download zip' : 'Download';
+    if (el.downloadLabel.textContent !== downloadLabel) el.downloadLabel.textContent = downloadLabel;
+    if (S.settings.parts) el.outDownload.title = 'Zip of files, each at most 100 KB';
+    else el.outDownload.removeAttribute('title');
     setAvailable(el.outTree, S.selected.size > 0 && !S.busy);
     const notes = [];
     if (r && stale && S.busy !== 'pack' && S.busy !== 'render') {
@@ -1413,8 +1718,9 @@ export function mountMill(root, adapter, options) {
       html = '<button type="button" class="p-key is-primary" data-act="browse"' + off + '>' + icon('folder') + (caps.source === 'path' ? 'Browse' : 'Choose folder') + '</button>' +
         (caps.sample ? '<button type="button" class="p-key" data-act="sample"' + off + '>' + icon('flask') + 'Sample</button>' : '');
     } else if (p === 'copy') {
+      const save = S.settings.parts ? 'Save zip' : 'Save';
       html = '<button type="button" class="p-key is-primary" data-act="copy">' + icon('copy') + 'Copy</button>' +
-        '<button type="button" class="p-key" data-act="download">' + icon('download') + 'Save</button>' +
+        '<button type="button" class="p-key" data-act="download">' + icon('download') + save + '</button>' +
         '<button type="button" class="p-key is-sq" data-act="tree" aria-label="Copy the directory map" title="Copy the directory map">' + icon('tree') + '</button>';
     } else {
       const n = S.selected.size;
@@ -1995,14 +2301,33 @@ export function mountMill(root, adapter, options) {
     if (!S.result || isStale()) return;
     try {
       const text = await fullDump();
+      let blob;
+      let name;
+      let detail = '';
+      const asked = S.settings.filename;
+      const fallback = S.result.filename;
+      if (S.settings.parts) {
+        const pieces = splitParts(text);
+        const source = partSourceName(asked, fallback);
+        const entries = pieces.map((part, i) => ({
+          name: partFilename(source, i, pieces.length),
+          text: part,
+        }));
+        blob = new Blob([zipStored(entries)], { type: 'application/zip' });
+        name = downloadFilename(asked, fallback, true);
+        detail = ' · ' + plural(pieces.length, 'file');
+      } else {
+        blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+        name = downloadFilename(asked, fallback, false);
+      }
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
-      a.download = S.result.filename;
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
       document.body.appendChild(a);
       a.click();
       a.remove();
       window.setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-      toast('Saved ' + S.result.filename);
+      toast('Saved ' + name + detail);
     } catch (err) {
       failed('Download failed.', err);
     }
@@ -2036,6 +2361,41 @@ export function mountMill(root, adapter, options) {
   function setAll(on) {
     for (let i = 0; i < T.n; i++) if (T.ok[i] && isShown(i)) tick(i, on);
     selectionChanged();
+  }
+
+  /** Tick or untick every file the path pattern matches. Oversized files stay as they are. */
+  function applyPathPick() {
+    const pattern = el.pickpat ? el.pickpat.value.trim() : '';
+    if (!S.files.length) return;
+    if (!pattern) {
+      toast('Enter a path pattern');
+      return;
+    }
+    let match;
+    try {
+      match = compilePathPattern(pattern);
+    } catch (_) {
+      match = null;
+    }
+    if (!match) {
+      toast('Enter a path pattern');
+      return;
+    }
+    const on = !el.pickact || el.pickact.value !== 'deselect';
+    let matched = 0;
+    let tickable = 0;
+    for (let i = 0; i < T.n; i++) {
+      const path = String(T.files[i].relative || '').replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!match.test(path)) continue;
+      matched++;
+      if (!T.ok[i]) continue;
+      tickable++;
+      tick(i, on);
+    }
+    if (tickable) selectionChanged();
+    if (!matched) toast('No files match that pattern');
+    else if (!tickable) toast('Those files are over the size cap');
+    else toast((on ? 'Selected' : 'Deselected') + ' ' + plural(tickable, 'file'));
   }
 
   function toggleDir(path, on) {
@@ -2087,6 +2447,7 @@ export function mountMill(root, adapter, options) {
       case 'tree': doTree(); break;
       case 'all': setAll(true); break;
       case 'none': setAll(false); break;
+      case 'pick': applyPathPick(); break;
       case 'chip': toggleLang(t.dataset.lang); break;
       case 'twist': {
         const dir = row && row.dataset.dir;
@@ -2142,6 +2503,22 @@ export function mountMill(root, adapter, options) {
   });
 
   let filterTimer = 0;
+  if (el.filename) {
+    el.filename.addEventListener('input', () => {
+      const value = el.filename.value;
+      if (S.settings.filename === value) return;
+      S.settings.filename = value;
+      if (!demo) writeStore(SETTINGS_KEY, S.settings);
+    });
+  }
+  if (el.pickpat) {
+    el.pickpat.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.altKey || e.ctrlKey || e.metaKey) return;
+      e.preventDefault();
+      applyPathPick();
+    });
+  }
+
   el.filter.addEventListener('input', () => {
     window.clearTimeout(filterTimer);
     filterTimer = window.setTimeout(() => {

@@ -20,6 +20,9 @@ The public mill UI at [pulp.onlygass.dev/mill](https://pulp.onlygass.dev/mill) p
 
 - Quick dumps when you do not want to install the CLI
 - The same interface as `pulp ui` on localhost: choose a folder or files (or drop them on the page), tick what goes in, choose readable text or source and XML / Markdown / plain text, then copy or download the dump
+- **100 KB parts**, under Options, makes Download save a zip of files each at most 100 KB that together hold the dump, for a chat that caps an upload at 100 KB
+- **File name**, under Settings, names the downloaded file or that zip
+- A path pattern under the file list selects or deselects matches, for example `/docs/**/*.md`
 - **Try a sample** loads a small built-in project so you can see a dump before choosing your own files
 - Selecting a file name previews the text pulp extracts from it; files that could not be extracted are flagged in the tree with the reason
 

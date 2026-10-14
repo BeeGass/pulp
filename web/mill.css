@@ -156,6 +156,43 @@
 .mill-filter input[type="search"]::-webkit-search-cancel-button {
   display: none;
 }
+.mill-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 2px;
+  flex: 0 0 auto;
+}
+.mill-pick .p-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 28px;
+}
+.mill-pick select {
+  flex: 0 0 auto;
+  min-height: 28px;
+  max-width: 9.5rem;
+  padding: 0 8px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line-2);
+  background: var(--sunken);
+  color: var(--text);
+  font: 500 12px/1 var(--ui);
+}
+.mill-pick-hint {
+  margin: 0;
+  padding: 0 12px 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-3);
+}
+.mill-set-name {
+  width: 100%;
+  min-width: 0;
+}
+.mill-name {
+  width: min(100%, 16rem);
+}
 .mill-chips {
   display: flex;
   flex-wrap: wrap;
@@ -761,6 +798,12 @@ span.mill-twist {
     align-items: center;
     gap: 8px;
   }
+  .mill-set-name {
+    flex-wrap: wrap;
+  }
+  .mill-set-name .mill-hint {
+    flex: 1 1 100%;
+  }
   .mill-set-opts {
     position: relative;
   }
@@ -930,6 +973,17 @@ span.mill-twist {
   .mill-filter {
     padding: 8px 0 4px;
   }
+  .mill-pick,
+  .mill-pick-hint {
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .mill-set-name {
+    flex-wrap: wrap;
+  }
+  .mill-set-name .mill-hint {
+    flex: 1 1 100%;
+  }
   .mill-chips {
     padding: 6px 0 8px;
   }
@@ -1049,6 +1103,10 @@ span.mill-twist {
 }
 
 @media (pointer: coarse) {
+  .mill-pick select {
+    min-height: 44px;
+    font-size: 16px;
+  }
   .mill-row {
     border-bottom: 1px solid var(--line);
     border-radius: 0;

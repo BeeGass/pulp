@@ -177,7 +177,7 @@ Then paste or attach the file wherever you talk to your model.
 pulp ui
 ```
 
-This opens the local mill in your browser, on `127.0.0.1:8747` or the next free port. **Browse** to a folder (or paste its path), tick the files you want, pick a format, and press **Pulp**, then copy or download the result. **Try a sample** loads a small built-in project if you want to look around first.
+This opens the local mill in your browser, on `127.0.0.1:8747` or the next free port. **Browse** to a folder (or paste its path), tick the files you want, pick a format, and press **Pulp**, then copy or download the result. **100 KB parts**, under Options, makes that download a zip of files each at most 100 KB instead of one file. **File name**, under Settings, names the file or the zip. A path pattern above the file list selects or deselects matches. **Try a sample** loads a small built-in project if you want to look around first.
 
 ## Common tasks
 
