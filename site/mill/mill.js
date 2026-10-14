@@ -711,8 +711,8 @@ export function mountMill(root, adapter, options) {
       '<p class="mill-hint" data-el="contenthint" hidden>HTML, XML, and JSON stay as decoded source; PDFs and Office files are still turned into text.</p></div>' +
       '<div class="mill-set"><span class="p-label" id="' + uid + '-format">Format</span>' + seg('format', [['txt', 'Txt'], ['md', 'Md'], ['xml', 'Xml']]) + '</div>' +
       '<div class="mill-set mill-set-name"><label class="p-label" id="' + uid + '-filename" for="' + uid + '-filename-input">File name</label>' +
-      '<div class="p-field mill-name"><input data-el="filename" id="' + uid + '-filename-input" name="filename" type="text" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" aria-describedby="' + uid + '-filename-help"></div>' +
-      '<p class="mill-hint" id="' + uid + '-filename-help">Names the download. With 100 KB parts on, this is the zip. Blank keeps the default.</p></div>' +
+      '<div class="p-field mill-filename"><input data-el="filename" id="' + uid + '-filename-input" name="filename" type="text" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" aria-describedby="' + uid + '-filename-help"></div>' +
+      '<p class="mill-hint" id="' + uid + '-filename-help">Names the downloaded file, whether or not 100 KB parts is on. With that option on, this names the zip. Blank keeps the default.</p></div>' +
       '<div class="mill-set mill-set-opts" role="group" aria-labelledby="' + uid + '-options"><span class="p-label" id="' + uid + '-options">Options</span>' +
       '<button type="button" class="p-key is-sm mill-opts-toggle" data-el="optstoggle" data-act="opts" aria-expanded="false">' + icon('sliders') + 'Options<span class="p-count" data-el="optscount"></span></button>' +
       '<div class="mill-opts" data-el="opts">' + optRows + '</div></div></div>' +
@@ -1528,6 +1528,13 @@ export function mountMill(root, adapter, options) {
     refreshNamePlaceholder();
   }
 
+  /** The name Download will use, including a blank field's default. */
+  function savedName() {
+    const ext = S.settings.format === 'md' ? 'md' : S.settings.format === 'txt' ? 'txt' : 'xml';
+    const fallback = (S.result && S.result.filename) || ('pulp.' + ext);
+    return downloadFilename(S.settings.filename, fallback, !!S.settings.parts);
+  }
+
   /** What a blank file name will download as, so the field can show it. */
   function refreshNamePlaceholder() {
     if (!el.filename) return;
@@ -1535,6 +1542,15 @@ export function mountMill(root, adapter, options) {
     const fallback = (S.result && S.result.filename) || ('pulp.' + ext);
     const next = downloadFilename('', fallback, !!S.settings.parts);
     if (el.filename.placeholder !== next) el.filename.placeholder = next;
+  }
+
+  /** The Download key names the file it will save, with or without 100 KB parts. */
+  function refreshDownloadTitle() {
+    if (!el.outDownload) return;
+    const name = savedName();
+    el.outDownload.title = S.settings.parts
+      ? 'Save as ' + name + '. Each file inside is at most 100 KB.'
+      : 'Save as ' + name;
   }
 
   function renderOutput() {
@@ -1558,8 +1574,7 @@ export function mountMill(root, adapter, options) {
     setAvailable(el.outDownload, ready);
     const downloadLabel = S.settings.parts ? 'Download zip' : 'Download';
     if (el.downloadLabel.textContent !== downloadLabel) el.downloadLabel.textContent = downloadLabel;
-    if (S.settings.parts) el.outDownload.title = 'Zip of files, each at most 100 KB';
-    else el.outDownload.removeAttribute('title');
+    refreshDownloadTitle();
     setAvailable(el.outTree, S.selected.size > 0 && !S.busy);
     const notes = [];
     if (r && stale && S.busy !== 'pack' && S.busy !== 'render') {
@@ -2509,6 +2524,7 @@ export function mountMill(root, adapter, options) {
       if (S.settings.filename === value) return;
       S.settings.filename = value;
       if (!demo) writeStore(SETTINGS_KEY, S.settings);
+      refreshDownloadTitle();
     });
   }
   if (el.pickpat) {

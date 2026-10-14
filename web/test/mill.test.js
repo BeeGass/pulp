@@ -584,7 +584,7 @@ test('parts: a dump under 100 KB downloads as a one-file zip, and Copy stays who
   m.$('[data-opt="parts"]').click();
   equal(status(m), 'Ready', '100 KB parts does not mark the dump out of date');
   equal(m.$('[data-el="downloadlabel"]').textContent, 'Download zip');
-  equal(m.$('.mill-outkeys [data-act="download"]').title, 'Zip of files, each at most 100 KB');
+  equal(m.$('.mill-outkeys [data-act="download"]').title, 'Save as pulp-parts.zip. Each file inside is at most 100 KB.');
   match(text(m.$('[data-el="dock"]')), /Save zip/);
   ok(!unavailable(m.$('.mill-outkeys [data-act="download"]')), 'Download stays available');
 
@@ -1468,10 +1468,12 @@ test('path: a glob selects or deselects matching files', async () => {
 test('filename: Download uses the name, and 100 KB parts uses it for the zip', async () => {
   const { m } = await pulped();
   const input = m.$('[data-el="filename"]');
+  ok(!input.disabled && !m.$('[data-opt="parts"]').checked, 'the file name is editable while 100 KB parts is off');
   equal(input.placeholder, 'pulp.xml', 'the placeholder shows the default name');
   input.value = 'handoff';
   input.dispatchEvent(new Event('input', { bubbles: true }));
   equal(status(m), 'Ready', 'renaming does not mark the dump out of date');
+  equal(m.$('.mill-outkeys [data-act="download"]').title, 'Save as handoff.xml');
 
   const saves = saved.length;
   m.$('.mill-outkeys [data-act="download"]').click();
@@ -1504,6 +1506,16 @@ test('filename: Download uses the name, and 100 KB parts uses it for the zip', a
   m.$('.mill-outkeys [data-act="download"]').click();
   await waitFor(() => saved.length > cleaned, { what: 'the sanitized zip' });
   equal(saved.at(-1).name, 'secret.zip', 'a path is reduced to its file name, and the dump extension is dropped');
+
+  m.$('[data-opt="parts"]').click();
+  ok(!input.disabled, 'turning 100 KB parts off leaves the file name editable');
+  equal(input.value, '  ../secret.xml  ', 'the typed name stays');
+  equal(m.$('[data-el="downloadlabel"]').textContent, 'Download');
+  equal(m.$('.mill-outkeys [data-act="download"]').title, 'Save as secret.xml');
+  const plain = saved.length;
+  m.$('.mill-outkeys [data-act="download"]').click();
+  await waitFor(() => saved.length > plain, { what: 'the named single file' });
+  equal(saved.at(-1).name, 'secret.xml', 'the same name is the file when 100 KB parts is off');
 });
 
 test('splitParts: pieces stay within the cap, end on a line, and join back', async () => {
