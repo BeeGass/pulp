@@ -2,7 +2,7 @@
 // packer whose calls wait until the test answers them, drives it through the
 // DOM, and checks what the mill shows. Run by `cargo xtask ui-test`.
 
-import { human, mountMill } from '/web/mill.js';
+import { downloadFilename, human, mountMill, PART_BYTES, partFilename, partSourceName, partsZipName, pathMatches, splitParts, zipStored } from '/web/mill.js';
 import { AssertionError, equal, flush, match, ok, run, same, show, sleep, test, waitFor } from './harness.js';
 
 const SETTINGS_KEY = 'pulp.mill.settings';
@@ -13,7 +13,7 @@ const stage = document.getElementById('stage');
 
 const clipboard = [];
 const opened = [];
-/** Downloads as { name, text }, where text is a promise of the file's contents. */
+/** Downloads as { name, text, bytes }. text and bytes are promises of the file. */
 const saved = [];
 Object.defineProperty(navigator, 'clipboard', {
   configurable: true,
@@ -35,7 +35,12 @@ document.addEventListener('click', (e) => {
   const link = e.target instanceof Element ? e.target.closest('a[download]') : null;
   if (!link) return;
   e.preventDefault();
-  saved.push({ name: link.download, text: fetch(link.href).then((res) => res.text()) });
+  const blob = fetch(link.href).then((res) => res.blob());
+  saved.push({
+    name: link.download,
+    text: blob.then((b) => b.text()),
+    bytes: blob.then((b) => b.arrayBuffer()),
+  });
 }, true);
 
 /* ---------- fixtures ---------- */
@@ -518,6 +523,114 @@ test('copy, download, tree: the dump and the directory map leave through their k
   match(lastToast(m), /directory map/i, 'the Tree toast says what was copied');
   equal(a.count('fullDump'), 0, 'a whole dump needs no second fetch');
 });
+
+/**
+ * Read a stored zip. Checks the local headers, the central directory names,
+ * and the end-of-central-directory count. Returns `{ name, data }` in order.
+ */
+function unzipStore(bytes) {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const u16 = (off) => view.getUint16(off, true);
+  const u32 = (off) => view.getUint32(off, true);
+  const files = [];
+  let o = 0;
+  while (o + 4 <= b.length && u32(o) === 0x04034b50) {
+    if ((u16(o + 6) & 0x800) === 0) throw new Error('zip name is not marked UTF-8');
+    if (u16(o + 8) !== 0) throw new Error('zip entry is compressed');
+    const comp = u32(o + 18);
+    const uncomp = u32(o + 22);
+    if (comp !== uncomp) throw new Error('stored sizes differ');
+    const nameLen = u16(o + 26);
+    const extraLen = u16(o + 28);
+    const nameAt = o + 30;
+    const dataAt = nameAt + nameLen + extraLen;
+    files.push({
+      name: new TextDecoder().decode(b.subarray(nameAt, nameAt + nameLen)),
+      data: b.slice(dataAt, dataAt + comp),
+    });
+    o = dataAt + comp;
+  }
+  const central = o;
+  for (let i = 0; i < files.length; i++) {
+    if (u32(o) !== 0x02014b50) throw new Error('central directory is short');
+    const nameLen = u16(o + 28);
+    const extraLen = u16(o + 30);
+    const commentLen = u16(o + 32);
+    const name = new TextDecoder().decode(b.subarray(o + 46, o + 46 + nameLen));
+    if (name !== files[i].name) throw new Error('central name differs for ' + files[i].name);
+    o += 46 + nameLen + extraLen + commentLen;
+  }
+  if (u32(o) !== 0x06054b50) throw new Error('missing end of central directory');
+  if (u32(o + 12) !== o - central) throw new Error('central directory size is ' + u32(o + 12));
+  if (u32(o + 16) !== central) throw new Error('central directory starts at the wrong offset');
+  if (u16(o + 8) !== files.length || u16(o + 10) !== files.length) throw new Error('entry count');
+  return files;
+}
+
+function concatBytes(chunks) {
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
+}
+
+test('parts: a dump under 100 KB downloads as a one-file zip, and Copy stays whole', async () => {
+  const { m } = await pulped();
+  equal(m.$('[data-el="downloadlabel"]').textContent, 'Download');
+  m.$('[data-opt="parts"]').click();
+  equal(status(m), 'Ready', '100 KB parts does not mark the dump out of date');
+  equal(m.$('[data-el="downloadlabel"]').textContent, 'Download zip');
+  equal(m.$('.mill-outkeys [data-act="download"]').title, 'Zip of files, each at most 100 KB');
+  match(text(m.$('[data-el="dock"]')), /Save zip/);
+  ok(!unavailable(m.$('.mill-outkeys [data-act="download"]')), 'Download stays available');
+
+  const saves = saved.length;
+  m.$('.mill-outkeys [data-act="download"]').click();
+  await waitFor(() => saved.length > saves, { what: 'the zip download' });
+  equal(saved.at(-1).name, 'pulp-parts.zip');
+  match(lastToast(m), /pulp-parts\.zip · 1 file/, 'the toast counts the files in the zip');
+  const files = unzipStore(new Uint8Array(await saved.at(-1).bytes));
+  equal(files.length, 1);
+  equal(files[0].name, 'pulp-001.xml');
+  equal(new TextDecoder().decode(files[0].data), DUMP);
+  ok(files[0].data.length <= PART_BYTES);
+
+  const copies = clipboard.length;
+  copyKey(m).click();
+  await waitFor(() => clipboard.length > copies, { what: 'Copy of the whole dump' });
+  equal(clipboard.at(-1), DUMP, 'Copy still takes the dump in one piece');
+
+  m.$('[data-opt="parts"]').click();
+  equal(m.$('[data-el="downloadlabel"]').textContent, 'Download');
+  const plain = saved.length;
+  m.$('.mill-outkeys [data-act="download"]').click();
+  await waitFor(() => saved.length > plain, { what: 'the single-file download' });
+  equal(saved.at(-1).name, 'pulp.xml');
+  equal(await saved.at(-1).text, DUMP, 'turning parts off saves one file again');
+});
+
+test('parts: a larger dump downloads as 100 KB files that join back together', async () => {
+  const line = 'x'.repeat(99) + '\n';
+  const body = line.repeat(1200);
+  const { m } = await pulped(undefined, { dump: body, dumpBytes: body.length, filename: 'pulp.md' });
+  m.$('[data-opt="parts"]').click();
+  const saves = saved.length;
+  m.$('.mill-outkeys [data-act="download"]').click();
+  await waitFor(() => saved.length > saves, { what: 'the zip download' });
+  equal(saved.at(-1).name, 'pulp-parts.zip');
+  const files = unzipStore(new Uint8Array(await saved.at(-1).bytes));
+  equal(files.length, 2);
+  equal(files[0].name, 'pulp-001.md');
+  equal(files[1].name, 'pulp-002.md');
+  equal(files[0].data.length, PART_BYTES, 'the first file fills the 100 KB cap');
+  ok(files[1].data.length <= PART_BYTES && files[1].data.length > 0, 'the last file holds the rest');
+  equal(new TextDecoder().decode(concatBytes(files.map((f) => f.data))), body, 'the files join into the dump');
+  match(lastToast(m), /2 files/);
+}, { timeout: 10000 });
 
 test('output keys: Copy, Download, and Tree are patched in place through a pulp', async () => {
   const { a, m } = await sampled();
@@ -1270,13 +1383,21 @@ test('settings: choices persist to the next mount, and a demo leaves storage alo
   const first = mount(fakeAdapter());
   first.$('input[data-setting="format"][value="md"]').click();
   first.$('[data-opt="hidden"]').click();
+  first.$('[data-opt="parts"]').click();
+  const name = first.$('[data-el="filename"]');
+  name.value = 'handoff';
+  name.dispatchEvent(new Event('input', { bubbles: true }));
   const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY));
   equal(stored.format, 'md');
   equal(stored.hidden, true);
+  equal(stored.parts, true);
+  equal(stored.filename, 'handoff');
 
   const second = mount(fakeAdapter(), { keepStorage: true });
   ok(second.$('input[data-setting="format"][value="md"]').checked, 'the format comes back');
   ok(second.$('[data-opt="hidden"]').checked, 'the option comes back');
+  ok(second.$('[data-opt="parts"]').checked, '100 KB parts comes back');
+  equal(second.$('[data-el="filename"]').value, 'handoff', 'the file name comes back');
 
   const demo = mount(fakeAdapter(), { keepStorage: true, options: { demo: true, path: '~/Projects/tides' } });
   ok(demo.$('input[data-setting="format"][value="xml"]').checked, 'a demo starts from the defaults');
@@ -1315,6 +1436,157 @@ test('destroy: Esc and Ctrl+Enter reach neither a replaced mill nor a destroyed 
 });
 
 /* ---------- units ---------- */
+
+test('path: a glob selects or deselects matching files', async () => {
+  const { m } = await sampled();
+  const pat = m.$('[data-el="pickpat"]');
+  const act = m.$('[data-el="pickact"]');
+  pat.value = '*.lock';
+  act.value = 'select';
+  m.$('[data-act="pick"]').click();
+  ok(ticked(m, 'Cargo.lock'), 'a lockfile the pattern names is ticked');
+  ok(ticked(m, 'README.md'), 'a file outside the pattern stays');
+  match(lastToast(m), /Selected 1 file/);
+
+  pat.value = '/src/**/*.rs';
+  act.value = 'deselect';
+  pat.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  ok(!ticked(m, 'src/lib.rs') && !ticked(m, 'src/main.rs') && !ticked(m, 'src/net/mod.rs'), 'Rust under src is unticked');
+  ok(ticked(m, 'Cargo.toml'), 'a file outside /src stays ticked');
+  match(lastToast(m), /Deselected 3 files/);
+
+  pat.value = '';
+  m.$('[data-act="pick"]').click();
+  match(lastToast(m), /Enter a path pattern/);
+
+  pat.value = 'data/big.csv';
+  act.value = 'select';
+  m.$('[data-act="pick"]').click();
+  match(lastToast(m), /size cap/, 'an oversized match is not ticked');
+});
+
+test('filename: Download uses the name, and 100 KB parts uses it for the zip', async () => {
+  const { m } = await pulped();
+  const input = m.$('[data-el="filename"]');
+  equal(input.placeholder, 'pulp.xml', 'the placeholder shows the default name');
+  input.value = 'handoff';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  equal(status(m), 'Ready', 'renaming does not mark the dump out of date');
+
+  const saves = saved.length;
+  m.$('.mill-outkeys [data-act="download"]').click();
+  await waitFor(() => saved.length > saves, { what: 'the named download' });
+  equal(saved.at(-1).name, 'handoff.xml', 'a name with no extension takes the format');
+
+  input.value = 'notes.md';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  const named = saved.length;
+  m.$('.mill-outkeys [data-act="download"]').click();
+  await waitFor(() => saved.length > named, { what: 'the explicitly named download' });
+  equal(saved.at(-1).name, 'notes.md');
+
+  m.$('[data-opt="parts"]').click();
+  equal(input.placeholder, 'pulp-parts.zip', 'the placeholder follows 100 KB parts');
+  input.value = 'bundle';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  const zipped = saved.length;
+  m.$('.mill-outkeys [data-act="download"]').click();
+  await waitFor(() => saved.length > zipped, { what: 'the named zip' });
+  equal(saved.at(-1).name, 'bundle.zip');
+  const files = unzipStore(new Uint8Array(await saved.at(-1).bytes));
+  equal(files.length, 1);
+  equal(files[0].name, 'bundle-001.xml');
+  equal(new TextDecoder().decode(files[0].data), DUMP);
+
+  input.value = '  ../secret.xml  ';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  const cleaned = saved.length;
+  m.$('.mill-outkeys [data-act="download"]').click();
+  await waitFor(() => saved.length > cleaned, { what: 'the sanitized zip' });
+  equal(saved.at(-1).name, 'secret.zip', 'a path is reduced to its file name, and the dump extension is dropped');
+});
+
+test('splitParts: pieces stay within the cap, end on a line, and join back', async () => {
+  const enc = new TextEncoder();
+  const within = (parts, limit) => parts.every((p) => enc.encode(p).length <= limit);
+  same(splitParts('hello', 5), ['hello']);
+  same(splitParts('', 8), ['']);
+
+  const lines = splitParts('hello\nworld\n', 8, 8);
+  same(lines, ['hello\n', 'world\n']);
+  ok(within(lines, 8));
+
+  const cut = splitParts('a'.repeat(25), 10, 10);
+  same(cut, ['a'.repeat(10), 'a'.repeat(10), 'aaaaa']);
+
+  // The newline is farther from the cap than the slack, so the line is cut.
+  const slack = splitParts('\n' + 'c'.repeat(PART_BYTES + 10));
+  equal(enc.encode(slack[0]).length, PART_BYTES);
+  equal(slack[0][0], '\n');
+  equal(slack.join(''), '\n' + 'c'.repeat(PART_BYTES + 10));
+
+  // A newline within the slack ends the part short of the cap.
+  const near = 'a'.repeat(PART_BYTES - 100) + '\n' + 'b'.repeat(PART_BYTES);
+  const broke = splitParts(near);
+  equal(enc.encode(broke[0]).length, PART_BYTES - 99);
+  equal(broke[0].endsWith('\n'), true);
+  equal(broke.join(''), near);
+  ok(within(broke, PART_BYTES));
+
+  // A cut that lands inside a character backs up to the character boundary.
+  const marks = '😀'.repeat(3);
+  const glyphs = splitParts(marks, 6, 0);
+  equal(glyphs.join(''), marks);
+  ok(within(glyphs, 6));
+  ok(glyphs.length > 1);
+
+  equal(partFilename('pulp.xml', 0, 2), 'pulp-001.xml');
+  equal(partFilename('pulp.md', 11, 12), 'pulp-012.md');
+  equal(partFilename('dir/pulp-browser.xml', 0, 1000), 'pulp-browser-0001.xml');
+  equal(partsZipName('pulp.md'), 'pulp-parts.zip');
+  equal(partsZipName('dir\\pulp.xml'), 'pulp-parts.zip');
+});
+
+test('zip: a stored archive round-trips names, bytes, and a known CRC', async () => {
+  const zip = zipStored([
+    { name: 'pulp-001.xml', text: '123456789' },
+    { name: 'café.txt', text: 'héllo\n' },
+  ]);
+  const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  equal(view.getUint32(0, true), 0x04034b50, 'local header');
+  equal(view.getUint32(14, true), 0xcbf43926, 'CRC of 123456789');
+  const files = unzipStore(zip);
+  equal(files.length, 2);
+  equal(files[0].name, 'pulp-001.xml');
+  equal(new TextDecoder().decode(files[0].data), '123456789');
+  equal(files[1].name, 'café.txt');
+  equal(new TextDecoder().decode(files[1].data), 'héllo\n');
+});
+
+test('names: a download name and a path glob', async () => {
+  equal(downloadFilename('', 'pulp.xml', false), 'pulp.xml');
+  equal(downloadFilename('handoff', 'pulp.xml', false), 'handoff.xml');
+  equal(downloadFilename('notes.md', 'pulp.xml', false), 'notes.md');
+  equal(downloadFilename('dir/../secret.xml', 'pulp.xml', false), 'secret.xml');
+  equal(downloadFilename('bad:name?.xml', 'pulp.txt', false), 'badname.xml');
+  equal(downloadFilename('', 'pulp.md', true), 'pulp-parts.zip');
+  equal(downloadFilename('bundle', 'pulp.xml', true), 'bundle.zip');
+  equal(downloadFilename('bundle.xml', 'pulp.xml', true), 'bundle.zip');
+  equal(downloadFilename('Bundle.ZIP', 'pulp.xml', true), 'Bundle.ZIP');
+  equal(partSourceName('', 'pulp.md'), 'pulp.md');
+  equal(partSourceName('bundle', 'pulp.xml'), 'bundle.xml');
+  equal(partFilename(partSourceName('bundle', 'pulp.xml'), 0, 2), 'bundle-001.xml');
+
+  ok(pathMatches('*.md', 'README.md') && pathMatches('*.md', 'docs/guide.md'));
+  ok(pathMatches('/docs/**/*.md', 'docs/guide.md') && pathMatches('/docs/**/*.md', 'docs/a/b.md'));
+  ok(!pathMatches('/docs/**/*.md', 'other/docs/guide.md') && !pathMatches('/docs/**/*.md', 'docs/guide.txt'));
+  ok(pathMatches('src/**/*.rs', 'src/net/mod.rs') && !pathMatches('src/**/*.rs', 'lib.rs'));
+  ok(pathMatches('**/*.csv', 'data/readings.csv'));
+  ok(pathMatches('/README.md', 'README.md') && !pathMatches('/README.md', 'docs/README.md'));
+  ok(pathMatches('src/???.rs', 'src/lib.rs') && !pathMatches('src/???.rs', 'src/main.rs'));
+  ok(!pathMatches('', 'README.md') && !pathMatches('   ', 'README.md'));
+  equal(partsZipName('pulp.md'), 'pulp-parts.zip');
+});
 
 test('human: sizes step up through B, KiB, MiB, and GiB', async () => {
   equal(human(0), '0 B');

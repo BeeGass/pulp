@@ -25,6 +25,8 @@ Pulp walks a local tree, extracts text from mixed documents, and writes one dump
 
 The local mill's API, all under `/api/` and all behind the session check (`require_session` in `src/ui.rs`): `scan`, `pack`, `tree`, `preview`, `render`, `cancel`, `progress`, `artifact/{id}`, `browse`, and `sample`. `/api/health` is open.
 
+Download saves that one dump. **100 KB parts** (`parts` in the mill's stored settings) leaves the dump alone and, on Download, zips it into pieces of at most 100 KB (102400 bytes) that join back into the dump. `web/mill.js` splits and zips, so both mills share it and the packer still builds one dump. Copy is unchanged. **File name** in those settings overrides the download name (the zip name when parts are on). A path glob in the files pane selects or deselects matching files; it does not rescan.
+
 ## Top level
 
 | Path | Role |
