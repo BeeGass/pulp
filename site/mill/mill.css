@@ -190,7 +190,7 @@
   width: 100%;
   min-width: 0;
 }
-.mill-name {
+.mill-filename {
   width: min(100%, 16rem);
 }
 .mill-chips {
